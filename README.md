@@ -72,11 +72,7 @@ All hook scripts. Must be in `~/.claude/hooks/` and executable.
 | `notify-input-needed.sh` | `Notification` | Prepends 🔔 to tab title and sends a notification (permission prompts only). Skipped if the user is already looking at this tab. On click, runs `focus-ghostty-tab.sh` |
 | `reset-tab-title.sh` | `Stop` | Resets tab title to `Claude Code [<shortID>]` (removes any icon) |
 | `notify-task-complete.sh` | `Stop` | Sends a completion notification. Skipped if the user is already looking at this tab |
-| `focus-ghostty-tab.sh` | (helper) | Activates Ghostty and clicks the tab whose title contains the given string (partial match, icon-agnostic) |
-
-## Known Issues
-
-- If more than one Ghostty window is open, notifications may activate the wrong window. As long as there's only one Ghostty window with multiple tabs, notification navigation works as expected.
+| `focus-ghostty-tab.sh` | (helper) | Activates Ghostty and focuses the tab whose title contains the given string. Works across multiple windows and single-tab windows |
 
 ## Why Ghostty
 
