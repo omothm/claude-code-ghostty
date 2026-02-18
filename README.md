@@ -8,7 +8,7 @@ When running multiple Claude Code agents in Ghostty tabs, clicking a notificatio
 2. When working: `⏳ Claude Code [<shortID>]`
 3. When waiting for permission: `🔔 Claude Code [<shortID>]`
 4. When finished: back to `Claude Code [<shortID>]`
-5. Notifications use `terminal-notifier` with an `-execute` script that finds and clicks the matching tab (partial title match)
+5. Notifications use `terminal-notifier` with an `-execute` script that finds and clicks the matching tab (partial title match). Since tabs are targeted by title rather than index, this works even if tabs are reordered or moved between windows
 6. Ghostty's native notifications are disabled to avoid duplicates
 
 ## Prerequisites
