@@ -67,9 +67,10 @@ All hook scripts. Must be in `~/.claude/hooks/` and executable.
 
 | Script | Hook Event | Purpose |
 |--------|-----------|---------|
+| `tab-title.sh` | (helper) | Unified tab title manager. Sets the terminal title with the appropriate status icon and outputs the base title to stdout. Statuses: `idle`, `working`, `input`, `query` (query returns the base title without changing the tab) |
 | `set-tab-title.sh` | `SessionStart` | Sets tab title to `Claude Code [<shortID>]` |
 | `set-tab-working.sh` | `UserPromptSubmit`, `PostToolUse` | Prepends ⏳ to tab title (also clears 🔔 after permission is granted) |
-| `notify-input-needed.sh` | `Notification` | Prepends 🔔 to tab title and sends a notification (permission prompts only). Skipped if the user is already looking at this tab. On click, runs `focus-ghostty-tab.sh` |
+| `notify-input-needed.sh` | `Notification` | Marks tab with 🔔 and sends a notification (permission prompts only). Skipped if the user is already looking at this tab. On click, runs `focus-ghostty-tab.sh` |
 | `reset-tab-title.sh` | `Stop` | Resets tab title to `Claude Code [<shortID>]` (removes any icon) |
 | `notify-task-complete.sh` | `Stop` | Sends a completion notification. Skipped if the user is already looking at this tab |
 | `focus-ghostty-tab.sh` | (helper) | Activates Ghostty and focuses the tab whose title contains the given string. Works across multiple windows and single-tab windows |

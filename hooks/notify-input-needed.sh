@@ -29,7 +29,7 @@ message=$(echo "$input" | jq -r '.message // "Needs your input"')
 
 dir_name=$(basename "$cwd")
 short_id=$(echo "$session_id" | cut -c1-8)
-tab_title="Claude Code [$short_id]"
+tab_title=$("$(dirname "$0")/tab-title.sh" query "$session_id")
 
 # Skip if user is looking at this exact tab
 active_app=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)
@@ -53,7 +53,7 @@ if [ "$active_app" = "ghostty" ]; then
 fi
 
 # Mark tab as waiting for input
-printf '\033]2;%s %s\007' "🔔" "$tab_title" > /dev/tty 2>/dev/null
+"$(dirname "$0")/tab-title.sh" input "$session_id" > /dev/null
 
 # Send notification - clicking will activate Ghostty and focus the correct tab
 terminal-notifier \

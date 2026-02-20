@@ -21,7 +21,7 @@ message=$(echo "$input" | jq -r '.message // "Task completed"' 2>/dev/null)
 
 dir_name=$(basename "$cwd")
 short_id=$(echo "$session_id" | cut -c1-8)
-tab_title="Claude Code [$short_id]"
+tab_title=$("$(dirname "$0")/tab-title.sh" query "$session_id")
 
 # Check if Ghostty is active and this tab is focused — skip notification if so
 active_app=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)
