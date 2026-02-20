@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/notify-input-needed.sh"
+            "command": "~/.claude/hooks/notify.sh '🔔' 'Needs your input' input permission_prompt"
           }
         ]
       }
@@ -56,7 +56,7 @@
           },
           {
             "type": "command",
-            "command": "~/.claude/hooks/notify-task-complete.sh"
+            "command": "~/.claude/hooks/notify.sh '✅' 'Task completed'"
           }
         ]
       }

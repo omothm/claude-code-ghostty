@@ -3,9 +3,11 @@
 # Usage: tab-title.sh <status> <session_id>
 #   status: idle, working, input, query
 #
-# Sets the terminal tab title with the appropriate icon and outputs the base
-# title (without icon) to stdout. Use status "query" to get the base title
-# without changing the terminal tab title.
+# Sets the terminal tab title with the appropriate icon.
+# Outputs two lines to stdout:
+#   Line 1: base title (without icon)
+#   Line 2: session summary (empty if none)
+# Use status "query" to get the output without changing the terminal tab title.
 
 status="$1"
 session_id="$2"
@@ -36,3 +38,4 @@ if [ "$status" != "query" ]; then
 fi
 
 echo "$base_title"
+echo "$summary"

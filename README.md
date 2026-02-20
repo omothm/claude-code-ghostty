@@ -4,10 +4,10 @@ When running multiple Claude Code agents in Ghostty tabs, clicking a notificatio
 
 ## How It Works
 
-1. Each session gets a stable tab title: `Claude Code [<shortID>]`
-2. When working: `⏳ Claude Code [<shortID>]`
-3. When waiting for permission: `🔔 Claude Code [<shortID>]`
-4. When finished: back to `Claude Code [<shortID>]`
+1. Each session gets a stable tab title: `Claude Code [<shortID>]` (or `Claude Code [<shortID>] <summary>` if the session has been `/rename`d)
+2. When working: `⏳ Claude Code [<shortID>] ...`
+3. When waiting for permission: `🔔 Claude Code [<shortID>] ...`
+4. When finished: back to `Claude Code [<shortID>] ...`
 5. Notifications use `terminal-notifier` with an `-execute` script that finds and clicks the matching tab (partial title match). Since tabs are targeted by title rather than index, this works even if tabs are reordered or moved between windows
 6. Ghostty's native notifications are disabled to avoid duplicates
 
@@ -61,18 +61,19 @@ On first use, macOS will prompt for accessibility permissions for `terminal-noti
 
 Claude Code settings containing the `env` and `hooks` configuration needed for this setup. The `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` env var prevents Claude Code from overwriting the custom tab titles.
 
+If you `/rename` a session, the custom name is appended to the tab title (e.g., `⏳ Claude Code [39e3e375] my-task`). This is read from the session's jsonl file by `tab-title.sh`.
+
 ### `hooks/`
 
 All hook scripts. Must be in `~/.claude/hooks/` and executable.
 
 | Script | Hook Event | Purpose |
 |--------|-----------|---------|
-| `tab-title.sh` | (helper) | Unified tab title manager. Sets the terminal title with the appropriate status icon and outputs the base title to stdout. Statuses: `idle`, `working`, `input`, `query` (query returns the base title without changing the tab) |
-| `set-tab-title.sh` | `SessionStart` | Sets tab title to `Claude Code [<shortID>]` |
-| `set-tab-working.sh` | `UserPromptSubmit`, `PostToolUse` | Prepends ⏳ to tab title (also clears 🔔 after permission is granted) |
-| `notify-input-needed.sh` | `Notification` | Marks tab with 🔔 and sends a notification (permission prompts only). Skipped if the user is already looking at this tab. On click, runs `focus-ghostty-tab.sh` |
-| `reset-tab-title.sh` | `Stop` | Resets tab title to `Claude Code [<shortID>]` (removes any icon) |
-| `notify-task-complete.sh` | `Stop` | Sends a completion notification. Skipped if the user is already looking at this tab |
+| `tab-title.sh` | (helper) | Unified tab title manager. Sets the terminal title with the appropriate status icon and appends the session summary if one exists (from `/rename`). Outputs two lines to stdout: the base title and the summary. Statuses: `idle`, `working`, `input`, `query` (query returns the output without changing the tab) |
+| `set-tab-title.sh` | `SessionStart` | Sets tab title to idle |
+| `set-tab-working.sh` | `UserPromptSubmit`, `PostToolUse` | Sets tab title to working (also clears 🔔 after permission is granted) |
+| `notify.sh` | `Notification`, `Stop` | Sends a macOS notification via `terminal-notifier`. Skipped if the user is already looking at this tab. On click, runs `focus-ghostty-tab.sh`. Called with arguments from `settings.json` to configure icon, default message, tab status, and notification type filter |
+| `reset-tab-title.sh` | `Stop` | Resets tab title to idle (removes any icon) |
 | `focus-ghostty-tab.sh` | (helper) | Activates Ghostty and focuses the tab whose title contains the given string. Works across multiple windows and single-tab windows |
 
 ## Why Ghostty
