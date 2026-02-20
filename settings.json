@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/set-tab-title.sh"
+            "command": "~/.claude/hooks/tab-title.sh idle"
           }
         ]
       }
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/set-tab-working.sh"
+            "command": "~/.claude/hooks/tab-title.sh working"
           }
         ]
       }
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/set-tab-working.sh"
+            "command": "~/.claude/hooks/tab-title.sh working"
           }
         ]
       }
@@ -52,7 +52,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/reset-tab-title.sh"
+            "command": "~/.claude/hooks/tab-title.sh idle"
           },
           {
             "type": "command",

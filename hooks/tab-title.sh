@@ -1,7 +1,9 @@
 #!/bin/bash
 # Unified tab title helper for Ghostty tabs.
-# Usage: tab-title.sh <status> <session_id>
+# Usage: tab-title.sh <status> [session_id]
 #   status: idle, working, input, query
+#
+# If session_id is omitted, it is read from stdin JSON (.session_id field).
 #
 # Sets the terminal tab title with the appropriate icon.
 # Outputs two lines to stdout:
@@ -11,6 +13,9 @@
 
 status="$1"
 session_id="$2"
+if [ -z "$session_id" ]; then
+  session_id=$(jq -r '.session_id // "unknown"' 2>/dev/null)
+fi
 short_id=$(echo "$session_id" | cut -c1-8)
 base_title="Claude Code [$short_id]"
 

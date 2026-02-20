@@ -67,14 +67,11 @@ If you `/rename` a session, the custom name is appended to the tab title (e.g., 
 
 All hook scripts. Must be in `~/.claude/hooks/` and executable.
 
-| Script | Hook Event | Purpose |
-|--------|-----------|---------|
-| `tab-title.sh` | (helper) | Unified tab title manager. Sets the terminal title with the appropriate status icon and appends the session summary if one exists (from `/rename`). Outputs two lines to stdout: the base title and the summary. Statuses: `idle`, `working`, `input`, `query` (query returns the output without changing the tab) |
-| `set-tab-title.sh` | `SessionStart` | Sets tab title to idle |
-| `set-tab-working.sh` | `UserPromptSubmit`, `PostToolUse` | Sets tab title to working (also clears 🔔 after permission is granted) |
-| `notify.sh` | `Notification`, `Stop` | Sends a macOS notification via `terminal-notifier`. Skipped if the user is already looking at this tab. On click, runs `focus-ghostty-tab.sh`. Called with arguments from `settings.json` to configure icon, default message, tab status, and notification type filter |
-| `reset-tab-title.sh` | `Stop` | Resets tab title to idle (removes any icon) |
-| `focus-ghostty-tab.sh` | (helper) | Activates Ghostty and focuses the tab whose title contains the given string. Works across multiple windows and single-tab windows |
+| Script | Purpose |
+|--------|---------|
+| `tab-title.sh` | Unified tab title manager. Called directly from `settings.json` with a status argument (`idle`, `working`, `input`, `query`). Reads `session_id` from stdin JSON (or accepts it as a second argument). Sets the terminal title with the appropriate status icon and appends the session summary if one exists (from `/rename`). Outputs two lines to stdout: the base title and the summary |
+| `notify.sh` | Sends a macOS notification via `terminal-notifier`. Called directly from `settings.json` with arguments for icon, default message, tab status, and notification type filter. Skipped if the user is already looking at this tab. On click, runs `focus-ghostty-tab.sh` |
+| `focus-ghostty-tab.sh` | Activates Ghostty and focuses the tab whose title contains the given string. Works across multiple windows and single-tab windows |
 
 ## Why Ghostty
 
