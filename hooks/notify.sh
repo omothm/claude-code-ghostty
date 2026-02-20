@@ -49,10 +49,10 @@ short_id=$(echo "$session_id" | cut -c1-8)
 tab_output=$("$(dirname "$0")/tab-title.sh" query "$session_id")
 session_summary=$(echo "$tab_output" | tail -1)
 if [ -n "$session_summary" ]; then
-  subtitle="$session_summary [$short_id]"
+  subtitle="$session_summary ($dir_name)"
   match_key="$session_summary"
 else
-  subtitle="$dir_name [$short_id]"
+  subtitle="$short_id ($dir_name)"
   match_key="$short_id"
 fi
 

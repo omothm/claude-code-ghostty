@@ -17,7 +17,6 @@ if [ -z "$session_id" ]; then
   session_id=$(jq -r '.session_id // "unknown"' 2>/dev/null)
 fi
 short_id=$(echo "$session_id" | cut -c1-8)
-base_title="Claude Code [$short_id]"
 
 # Look up session custom title from the session's jsonl file
 summary=""
@@ -30,7 +29,9 @@ for session_file in ~/.claude/projects/*/"$session_id".jsonl; do
   [ -n "$summary" ] && break
 done
 if [ -n "$summary" ]; then
-  base_title="$base_title $summary"
+  base_title="Claude Code | $summary"
+else
+  base_title="Claude Code | $short_id"
 fi
 
 if [ "$status" != "query" ]; then

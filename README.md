@@ -4,10 +4,10 @@ When running multiple Claude Code agents in Ghostty tabs, clicking a notificatio
 
 ## How It Works
 
-1. Each session gets a stable tab title: `Claude Code [<shortID>]` (or `Claude Code [<shortID>] <summary>` if the session has been `/rename`d)
-2. When working: `⏳ Claude Code [<shortID>] ...`
-3. When waiting for permission: `🔔 Claude Code [<shortID>] ...`
-4. When finished: back to `Claude Code [<shortID>] ...`
+1. Each session gets a stable tab title: `Claude Code | <shortID>` (or `Claude Code | <summary>` if `/rename`d)
+2. When working: `⏳ Claude Code | ...`
+3. When waiting for permission: `🔔 Claude Code | ...`
+4. When finished: back to `Claude Code | ...`
 5. Notifications use `terminal-notifier` with an `-execute` script that finds and clicks the matching tab (partial title match). Since tabs are targeted by title rather than index, this works even if tabs are reordered or moved between windows
 6. Ghostty's native notifications are disabled to avoid duplicates
 
@@ -61,7 +61,7 @@ On first use, macOS will prompt for accessibility permissions for `terminal-noti
 
 Claude Code settings containing the `env` and `hooks` configuration needed for this setup. The `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` env var prevents Claude Code from overwriting the custom tab titles.
 
-If you `/rename` a session, the custom name is appended to the tab title (e.g., `⏳ Claude Code [39e3e375] my-task`). This is read from the session's jsonl file by `tab-title.sh`.
+If you `/rename` a session, the custom name replaces the short ID in the tab title (e.g., `⏳ Claude Code | my-task`). This is read from the session's jsonl file by `tab-title.sh`.
 
 ### `hooks/`
 
