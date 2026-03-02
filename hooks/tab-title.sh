@@ -31,7 +31,8 @@ done
 if [ -n "$summary" ]; then
   base_title="Claude Code | $summary"
 else
-  base_title="Claude Code | $short_id"
+  dir_name=$(basename "$PWD")
+  base_title="Claude Code | $dir_name ($short_id)"
 fi
 
 if [ "$status" != "query" ]; then
