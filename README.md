@@ -4,7 +4,7 @@ When running multiple Claude Code agents in Ghostty tabs, clicking a notificatio
 
 ## How It Works
 
-1. Each session gets a stable tab title: `Claude Code | <shortID>` (or `Claude Code | <summary>` if `/rename`d)
+1. Each session gets a stable tab title: `Claude Code | <directory> (<shortID>)` (or `Claude Code | <summary>` if `/rename`d)
 2. When working: `⏳ Claude Code | ...`
 3. When waiting for permission: `🔔 Claude Code | ...`
 4. When finished: back to `Claude Code | ...`
