@@ -47,7 +47,7 @@ message=$(echo "$input" | jq -r --arg def "$default_message" '.message // $def' 
 dir_name=$(basename "$cwd")
 short_id=$(echo "$session_id" | cut -c1-8)
 tab_output=$("$(dirname "$0")/tab-title.sh" query "$session_id")
-session_summary=$(echo "$tab_output" | tail -1)
+session_summary=$(echo "$tab_output" | sed -n '2p')
 if [ -n "$session_summary" ]; then
   subtitle="$session_summary ($dir_name)"
   match_key="$session_summary"
