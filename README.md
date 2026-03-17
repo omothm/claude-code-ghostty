@@ -51,6 +51,14 @@ desktop-notifications = false
 
 Ghostty's native notifications bring the entire window to the current desktop instead of switching to Ghostty's desktop. Our custom `terminal-notifier` hook avoids this. Disabling native notifications prevents duplicates.
 
+Optionally, also add:
+
+```
+bell-features = no-title
+```
+
+This disables the native bell icon that Ghostty shows in non-Claude tabs when a notification fires, since our custom notifications handle that signaling.
+
 ### 4. Grant accessibility permissions
 
 On first use, macOS will prompt for accessibility permissions for `terminal-notifier` and `osascript`. Grant these in System Settings > Privacy & Security > Accessibility. Notification click-to-navigate won't work without this.
