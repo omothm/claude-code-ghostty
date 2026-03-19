@@ -1,5 +1,3 @@
-# Agents
-
 ## Post-Change Checklist
 
 After every change, verify the following:
