@@ -10,6 +10,18 @@
 #   default_message             Fallback message if none in the hook JSON
 #   tab_status (optional)       If set, updates the tab title to this status
 #   required_notification_type  If set, exit unless notification_type matches
+#
+# Debug: set BELL_TRACE=1 to append diagnostics to $BELL_TRACE_LOG
+# (defaults to /tmp/bell-trace.log).
+
+__N=notify.sh
+__trace() {
+  [ -n "$BELL_TRACE" ] || return 0
+  printf '%s [%s pid=%s ppid=%s] %s\n' \
+    "$(gdate +%s.%3N 2>/dev/null || date +%s)" "$__N" "$$" "$PPID" "$*" \
+    >> "${BELL_TRACE_LOG:-/tmp/bell-trace.log}"
+}
+__trace "entry argc=$# args=[$*]"
 
 icon="$1"
 default_message="$2"
@@ -21,19 +33,23 @@ input=$(cat)
 
 # Exit if no input
 if [ -z "$input" ]; then
+  __trace "early-exit reason=empty-stdin"
   exit 0
 fi
 
 # Check if this is from Cursor (has cursor_version field) - exit if so
 cursor_version=$(echo "$input" | jq -r '.cursor_version // empty' 2>/dev/null)
 if [ -n "$cursor_version" ]; then
+  __trace "early-exit reason=cursor cursor_version=$cursor_version"
   exit 0
 fi
 
 # Filter by notification type if required
 if [ -n "$required_type" ]; then
   notification_type=$(echo "$input" | jq -r '.notification_type // empty' 2>/dev/null)
+  __trace "type-filter required=$required_type received=$notification_type"
   if [ "$notification_type" != "$required_type" ]; then
+    __trace "early-exit reason=type-mismatch"
     exit 0
   fi
 fi
@@ -72,22 +88,31 @@ if [ "$active_app" = "ghostty" ]; then
     end tell
     return 0' 2>/dev/null)
 
+  __trace "active-app=$active_app this_tab_active=$this_tab_active match_key=$match_key"
   if [ "$this_tab_active" = "1" ]; then
+    __trace "early-exit reason=user-on-this-tab"
     exit 0
   fi
+else
+  __trace "active-app=$active_app (not ghostty) — proceeding"
 fi
 
 # Update tab title if requested
 if [ -n "$tab_status" ]; then
+  __trace "calling tab-title.sh $tab_status"
   "$(dirname "$0")/tab-title.sh" "$tab_status" "$session_id" > /dev/null
+  __trace "tab-title.sh returned rc=$?"
 fi
 
 # Send notification - clicking will activate Ghostty and focus the correct tab
+__trace "sending terminal-notifier title=\"$icon $title\" match_key=$match_key"
 terminal-notifier \
   -title "$icon $title" \
   -message "$message" \
   -subtitle "$subtitle" \
   -appIcon /Applications/Ghostty.app/Contents/Resources/AppIcon.icns \
   -execute "$HOME/.claude/hooks/focus-ghostty-tab.sh '$match_key'"
+__trace "terminal-notifier rc=$?"
 
+__trace "exit"
 exit 0
