@@ -85,39 +85,31 @@ A [SwiftBar](https://swiftbar.app/) plugin shows a menubar indicator for Claude 
 |------|----------|
 | `notifs` (default) | Hidden when all sessions are idle or working; shows a bell icon + count when one or more sessions are awaiting input |
 | `off` | Always hidden even if the plugin is installed |
-| `always-on` | Always visible; shows counts for all session states; header turns an attention color when any session needs input |
+| `always-on` | Always visible; shows counts for all session states; emoji bell appears in header (yellow) when any session needs input |
 
 **`always-on` example** — when one session awaits input and two others are active:
 
 ```
-🔔1⏳1☕️2   ← orange when any 🔔 session exists
+🔔1 ⏳1 💤1
 ─────────────────────
 api-service (a1b2c3d4) — awaiting input
 frontend (e5f6a7b8) — working
 devtools (c9d0e1f2) — idle
 ```
 
-Clicking any entry focuses that Ghostty tab.
+When no sessions are awaiting input the header shows only `⏳N 💤N` (no bell). Clicking any entry focuses that Ghostty tab.
 
 ### Configuration
 
-Create `~/.claude/cc-ghostty-config.json` to customise behavior. All keys are optional; omitted keys use the defaults shown below.
+Create `~/.claude/cc-ghostty-config.json` to set the mode:
 
 ```json
 {
-  "mode": "always-on",
-  "icons": {
-    "input":   "🔔",
-    "working": "⏳",
-    "idle":    "☕️"
-  },
-  "attentionColor": "#FF6B00"
+  "mode": "always-on"
 }
 ```
 
-- **`mode`** — `"notifs"` | `"off"` | `"always-on"`
-- **`icons`** — emoji shown in the menubar header counts (always-on mode) and as tab title prefixes
-- **`attentionColor`** — CSS hex or macOS named color applied to the menubar header when sessions need input
+- **`mode`** — `"notifs"` (default) | `"off"` | `"always-on"`
 
 ## Validation
 

@@ -156,12 +156,13 @@ fi
 
 __trace "result=visible always-on input=$n_input working=$n_working idle=$n_idle"
 
-# When sessions are awaiting input, use the emoji bell (yellow) so it stands
-# out against the other monochrome SF Symbol icons.
+# When sessions are awaiting input, prepend the emoji bell (yellow) so it
+# stands out against the monochrome SF Symbol icons. When there are none,
+# omit the bell entirely — it would only ever show :bell:0 which is pointless.
 if [ "$n_input" -gt 0 ]; then
   echo "🔔${n_input} :hourglass:${n_working} :zzz:${n_idle}"
 else
-  echo ":bell:${n_input} :hourglass:${n_working} :zzz:${n_idle}"
+  echo ":hourglass:${n_working} :zzz:${n_idle}"
 fi
 echo "---"
 

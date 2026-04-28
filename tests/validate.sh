@@ -352,11 +352,12 @@ if [ "$plugin" = "1" ]; then
   echo "$out" | grep -q '— working' && ok "always-on: working entry has status label" || ng "always-on: working entry missing status label: $out"
   echo "$out" | grep -q '— idle' && ok "always-on: idle entry has status label" || ng "always-on: idle entry missing status label: $out"
 
-  # With only idle/working (no bell), header uses SF :bell: symbol
+  # With only idle/working (no bell), header shows only hourglass + zzz
   rm -f "$BELL_STATE_DIR/aoB1"
   out2=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
-  echo "$out2" | grep -q ':bell:0' && ok "always-on: SF :bell: in header when no input sessions" || ng "always-on: missing :bell:0 in header: $out2"
-  echo "$out2" | grep -qv '🔔' && ok "always-on: emoji bell absent when no input sessions" || ng "always-on: emoji bell shown when no input: $out2"
+  echo "$out2" | head -n1 | grep -q ':hourglass:' && ok "always-on: :hourglass: in header when no input sessions" || ng "always-on: :hourglass: missing from header: $out2"
+  echo "$out2" | head -n1 | grep -qv ':bell:' && ok "always-on: :bell: absent from header when no input sessions" || ng "always-on: :bell: shown in header when no input: $out2"
+  echo "$out2" | head -n1 | grep -qv '🔔' && ok "always-on: emoji bell absent from header when no input sessions" || ng "always-on: emoji bell shown when no input: $out2"
 
   rm -f "$BELL_STATE_DIR/aoW1" "$BELL_STATE_DIR/aoD1"
 else
