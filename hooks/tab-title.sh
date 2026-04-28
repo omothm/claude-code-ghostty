@@ -24,23 +24,17 @@ __trace() {
 }
 __trace "entry argc=$# args=[$*]"
 
-# Load bell config from JSON (~/.claude/cc-ghostty-config.json). Defaults apply
-# when the file is absent or a key is missing.
+# Load bell config from JSON (~/.claude/cc-ghostty-config.json).
+# Only .mode is read; icon appearance is fixed and not configurable.
 BELL_MODE="notifs"
-BELL_ICON_INPUT="🔔"
-BELL_ICON_WORKING="⏳"
 BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/cc-ghostty-config.json}"
 if [ -f "$BELL_CONFIG" ]; then
-  _m="" _ii="" _iw=""
-  { IFS= read -r _m; IFS= read -r _ii; IFS= read -r _iw; } \
-    < <(jq -r '.mode // "notifs", (.icons.input // "🔔"), (.icons.working // "⏳")' \
-        "$BELL_CONFIG" 2>/dev/null)
-  [ -n "$_m" ]  && BELL_MODE="$_m"
-  [ -n "$_ii" ] && BELL_ICON_INPUT="$_ii"
-  [ -n "$_iw" ] && BELL_ICON_WORKING="$_iw"
-  unset _m _ii _iw
+  _m=""
+  IFS= read -r _m < <(jq -r '.mode // "notifs"' "$BELL_CONFIG" 2>/dev/null)
+  [ -n "$_m" ] && BELL_MODE="$_m"
+  unset _m
 fi
-__trace "bell-config mode=$BELL_MODE icon_input=$BELL_ICON_INPUT icon_working=$BELL_ICON_WORKING"
+__trace "bell-config mode=$BELL_MODE"
 
 status="$1"
 session_id="$2"
@@ -70,8 +64,8 @@ fi
 
 if [ "$status" != "query" ]; then
   case "$status" in
-    working) title="${BELL_ICON_WORKING} $base_title" ;;
-    input)   title="${BELL_ICON_INPUT} $base_title"   ;;
+    working) title="⏳ $base_title" ;;
+    input)   title="🔔 $base_title" ;;
     *)       title="$base_title" ;;
   esac
   printf '\033]2;%s\007' "$title" > /dev/tty 2>/dev/null
@@ -117,8 +111,8 @@ case "$BELL_MODE" in
     ;;
   always-on)
     case "$status" in
-      input)   _write_state "${BELL_ICON_INPUT} $base_title"   "input"   ;;
-      working) _write_state "${BELL_ICON_WORKING} $base_title" "working" ;;
+      input)   _write_state "🔔 $base_title" "input"   ;;
+      working) _write_state "⏳ $base_title" "working" ;;
       idle)    _write_state "$base_title"                      "idle"    ;;
       end)     _remove_state ;;
       *)       __trace "state-file unchanged (status=$status)" ;;
@@ -128,7 +122,7 @@ case "$BELL_MODE" in
     # notifs mode (default)
     case "$status" in
       input)
-        _write_state "${BELL_ICON_INPUT} $base_title" "input"
+        _write_state "🔔 $base_title" "input"
         ;;
       idle|working|end)
         _remove_state

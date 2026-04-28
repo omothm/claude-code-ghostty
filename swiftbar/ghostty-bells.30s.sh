@@ -2,11 +2,11 @@
 # SwiftBar plugin: menubar indicator for Ghostty Claude Code sessions.
 # Reads per-session state files written by ~/.claude/hooks/tab-title.sh.
 #
-# Three modes (set via ~/.claude/bell-config):
+# Three modes (set via ~/.claude/cc-ghostty-config.json):
 #   notifs (default) — visible only when sessions are awaiting input; shows count
 #   off              — always hidden even if the feature is installed
-#   always-on        — always visible; shows counts for all session states;
-#                      header turns attention color when any session needs input
+#   always-on        — always visible; :bell:N :hourglass:N :zzz:N counts;
+#                      switches to emoji 🔔 for the bell count when N>0
 #
 # Install: copy to SwiftBar's plugins directory and make executable.
 # The filename suffix (.30s.sh) sets the background refresh interval — a
@@ -28,31 +28,15 @@ HOOKS_DIR="${GHOSTTY_HOOKS_DIR:-$HOME/.claude/hooks}"
 FOCUS="$HOOKS_DIR/focus-ghostty-tab.sh"
 STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 
-# Load bell config from JSON (~/.claude/cc-ghostty-config.json). Defaults apply
-# when the file is absent or a key is missing.
+# Load bell config from JSON (~/.claude/cc-ghostty-config.json).
+# Only .mode is read; icon appearance is fixed and not configurable.
 BELL_MODE="notifs"
-BELL_ICON_INPUT="🔔"
-BELL_ICON_WORKING="⏳"
-BELL_ICON_IDLE="☕️"
-BELL_ATTENTION_COLOR="#FF6B00"
 BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/cc-ghostty-config.json}"
 if [ -f "$BELL_CONFIG" ]; then
-  _m="" _ii="" _iw="" _il="" _ac=""
-  { IFS= read -r _m; IFS= read -r _ii; IFS= read -r _iw
-    IFS= read -r _il; IFS= read -r _ac; } \
-    < <(jq -r '
-      .mode // "notifs",
-      (.icons.input // "🔔"),
-      (.icons.working // "⏳"),
-      (.icons.idle // "☕️"),
-      (.attentionColor // "#FF6B00")
-    ' "$BELL_CONFIG" 2>/dev/null)
-  [ -n "$_m" ]  && BELL_MODE="$_m"
-  [ -n "$_ii" ] && BELL_ICON_INPUT="$_ii"
-  [ -n "$_iw" ] && BELL_ICON_WORKING="$_iw"
-  [ -n "$_il" ] && BELL_ICON_IDLE="$_il"
-  [ -n "$_ac" ] && BELL_ATTENTION_COLOR="$_ac"
-  unset _m _ii _iw _il _ac
+  _m=""
+  IFS= read -r _m < <(jq -r '.mode // "notifs"' "$BELL_CONFIG" 2>/dev/null)
+  [ -n "$_m" ] && BELL_MODE="$_m"
+  unset _m
 fi
 __trace "mode=$BELL_MODE"
 
@@ -86,9 +70,9 @@ _file_status() {
   local t
   t=$(head -n1 "$f" 2>/dev/null)
   case "$t" in
-    "${BELL_ICON_INPUT} "*|"🔔 "*) printf 'input'   ;;
-    "${BELL_ICON_WORKING} "*|"⏳ "*) printf 'working' ;;
-    "Claude Code | "*)              printf 'idle'    ;;
+    "🔔 "*)            printf 'input'   ;;
+    "⏳ "*)            printf 'working' ;;
+    "Claude Code | "*) printf 'idle'    ;;
     # Not a recognised state file — return empty so callers can skip it.
   esac
 }
@@ -113,7 +97,7 @@ if [ "$BELL_MODE" != "always-on" ]; then
   while IFS= read -r t; do
     [ -z "$t" ] && continue
     case "$t" in
-      "${BELL_ICON_INPUT} "*|"🔔 "*) bell_titles="${bell_titles}${t}"$'\n' ;;
+      "🔔 "*) bell_titles="${bell_titles}${t}"$'\n' ;;
     esac
   done <<< "$titles"
   bell_titles="${bell_titles%$'\n'}"
@@ -130,10 +114,9 @@ if [ "$BELL_MODE" != "always-on" ]; then
 
   while IFS= read -r title; do
     [ -z "$title" ] && continue
-    # Strip leading icon + space and swap " | " so it doesn't collide with
-    # SwiftBar's param separator.
-    display="${title#"${BELL_ICON_INPUT} "}"
-    display="${display#"🔔 "}"
+    # Strip leading 🔔 and swap " | " so it doesn't collide with SwiftBar's
+    # param separator.
+    display="${title#"🔔 "}"
     display="${display// | / — }"
     printf '%s | shell="%s" param1="%s" terminal=false\n' "$display" "$FOCUS" "$title"
   done <<< "$bell_titles"
@@ -171,13 +154,14 @@ if [ "$any_files" = "0" ] || [ $((n_input + n_working + n_idle)) -eq 0 ]; then
   exit 0
 fi
 
-header="${BELL_ICON_INPUT}${n_input}${BELL_ICON_WORKING}${n_working}${BELL_ICON_IDLE}${n_idle}"
 __trace "result=visible always-on input=$n_input working=$n_working idle=$n_idle"
 
+# When sessions are awaiting input, use the emoji bell (yellow) so it stands
+# out against the other monochrome SF Symbol icons.
 if [ "$n_input" -gt 0 ]; then
-  printf '%s | color=%s\n' "$header" "$BELL_ATTENTION_COLOR"
+  echo "🔔${n_input} :hourglass:${n_working} :zzz:${n_idle}"
 else
-  echo "$header"
+  echo ":bell:${n_input} :hourglass:${n_working} :zzz:${n_idle}"
 fi
 echo "---"
 

@@ -226,6 +226,12 @@ fi
 # ---------------------------------------------------------------------------
 section "sweep-bell-state.sh"
 
+# Use a fresh, isolated state dir for the entire sweep section.
+# Background sweeps dispatched by the plugin tests above (which still have
+# the old BELL_STATE_DIR in scope) cannot interfere with our test files.
+export BELL_STATE_DIR="$TMPROOT/sweep-state"
+mkdir -p "$BELL_STATE_DIR"
+
 # Hard-age: 25h-old file pruned unconditionally
 write_sf "sH" "🔔 Claude Code | hard-aged (sH12345)"
 age_file "25 hours ago" "$BELL_STATE_DIR/sH"
@@ -292,7 +298,7 @@ fi
 # ---------------------------------------------------------------------------
 section "Mode=always-on"
 
-printf '{"mode":"always-on","icons":{"input":"🔔","working":"⏳","idle":"☕️"},"attentionColor":"#FF6B00"}\n' > "$BELL_CONFIG"
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
 
 SID_AO="ao-$(date +%s)"
 
@@ -333,10 +339,9 @@ if [ "$plugin" = "1" ]; then
 
   out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
 
-  echo "$out" | grep -q '🔔1' && ok "always-on: header contains input count" || ng "always-on: header missing input count: $out"
-  echo "$out" | grep -q '⏳1' && ok "always-on: header contains working count" || ng "always-on: header missing working count: $out"
-  echo "$out" | grep -q '☕️1' && ok "always-on: header contains idle count" || ng "always-on: header missing idle count: $out"
-  echo "$out" | grep -q 'color=#FF6B00' && ok "always-on: attention color on bell session" || ng "always-on: attention color missing: $out"
+  echo "$out" | grep -q '🔔1' && ok "always-on: header uses emoji bell when input > 0" || ng "always-on: header missing emoji bell: $out"
+  echo "$out" | grep -q ':hourglass:1' && ok "always-on: header contains working count" || ng "always-on: header missing working count: $out"
+  echo "$out" | grep -q ':zzz:1' && ok "always-on: header contains idle count" || ng "always-on: header missing idle count: $out"
   echo "$out" | grep -q 'ao-bell' && ok "always-on: bell entry present" || ng "always-on: bell entry missing: $out"
   echo "$out" | grep -q 'ao-work' && ok "always-on: working entry present" || ng "always-on: working entry missing: $out"
   echo "$out" | grep -q 'ao-idle' && ok "always-on: idle entry present" || ng "always-on: idle entry missing: $out"
@@ -347,10 +352,11 @@ if [ "$plugin" = "1" ]; then
   echo "$out" | grep -q '— working' && ok "always-on: working entry has status label" || ng "always-on: working entry missing status label: $out"
   echo "$out" | grep -q '— idle' && ok "always-on: idle entry has status label" || ng "always-on: idle entry missing status label: $out"
 
-  # With only idle/working (no bell), no attention color
+  # With only idle/working (no bell), header uses SF :bell: symbol
   rm -f "$BELL_STATE_DIR/aoB1"
   out2=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
-  echo "$out2" | grep -qv 'color=' && ok "always-on: no attention color without bell session" || ng "always-on: attention color shown without bell session: $out2"
+  echo "$out2" | grep -q ':bell:0' && ok "always-on: SF :bell: in header when no input sessions" || ng "always-on: missing :bell:0 in header: $out2"
+  echo "$out2" | grep -qv '🔔' && ok "always-on: emoji bell absent when no input sessions" || ng "always-on: emoji bell shown when no input: $out2"
 
   rm -f "$BELL_STATE_DIR/aoW1" "$BELL_STATE_DIR/aoD1"
 else
