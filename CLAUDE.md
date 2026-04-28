@@ -17,7 +17,14 @@ After every change, verify the following in order:
 3. **Notification text** — does any user-visible string need updating?
 4. **README.md** — does the human-facing documentation still reflect the
    current install flow? (Architecture details don't belong there.)
-5. **Local deploy** — ask the user whether the change should be copied to
+5. **Hook parity** — `settings.json` (project) and `~/.claude/settings.json`
+   (global) must define the same core hook events (`SessionStart`,
+   `Notification`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `StopFailure`,
+   `SessionEnd`) with identical matchers and commands. The global file may have
+   additional hooks (`PreToolUse`/unfence, `SubagentStop`/agent-arena,
+   `Stop`/sync-permissions) that are intentionally absent from the project
+   file. Any change to a shared hook must be applied to **both** files.
+6. **Local deploy** — ask the user whether the change should be copied to
    `~/.claude/hooks/` / `~/swiftbar/`.
 
 ## Architecture

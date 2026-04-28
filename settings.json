@@ -16,7 +16,7 @@
     ],
     "Notification": [
       {
-        "matcher": "",
+        "matcher": "permission_prompt",
         "hooks": [
           {
             "type": "command",
@@ -57,6 +57,31 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/notify.sh '✅' 'Task completed'"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/tab-title.sh idle"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/notify.sh '⚠️' 'Claude stopped: API error'"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/tab-title.sh idle"
           }
         ]
       }
