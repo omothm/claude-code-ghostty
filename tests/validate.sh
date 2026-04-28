@@ -11,28 +11,49 @@
 # the plugin is deployed, the menubar briefly refreshes during the run.
 #
 # Usage:
-#   ./tests/validate.sh            # concise output (failures + summary)
-#   ./tests/validate.sh --verbose  # show passes too
-#   ./tests/validate.sh -v
+#   ./tests/validate.sh                   # test deployed scripts, concise output
+#   ./tests/validate.sh --verbose         # test deployed scripts, show passes
+#   ./tests/validate.sh <project-dir>     # test project scripts (e.g. .)
+#   ./tests/validate.sh <project-dir> -v
 #
 # Exit code: 0 if all non-skipped checks pass, non-zero equal to fail count.
 
 set -u
 
 VERBOSE=0
-case "${1:-}" in -v|--verbose) VERBOSE=1 ;; esac
+PROJECT_DIR=""
 
-HOOKS_DIR="$HOME/.claude/hooks"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -v|--verbose) VERBOSE=1 ;;
+    -*) ;;
+    *) PROJECT_DIR="$1" ;;
+  esac
+  shift
+done
+
 SWIFTBAR_APP="/Applications/SwiftBar.app"
-SWIFTBAR_PLUGIN_DIR="$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)"
-PLUGIN_PATH=""
-[ -n "$SWIFTBAR_PLUGIN_DIR" ] && PLUGIN_PATH="$SWIFTBAR_PLUGIN_DIR/ghostty-bells.30s.sh"
+
+if [ -n "$PROJECT_DIR" ]; then
+  PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd)" || { printf 'Error: directory not found: %s\n' "$PROJECT_DIR" >&2; exit 1; }
+  HOOKS_DIR="$PROJECT_DIR/hooks"
+  export GHOSTTY_HOOKS_DIR="$HOOKS_DIR"
+  PLUGIN_PATH="$PROJECT_DIR/swiftbar/ghostty-bells.30s.sh"
+else
+  HOOKS_DIR="$HOME/.claude/hooks"
+  SWIFTBAR_PLUGIN_DIR="$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)"
+  PLUGIN_PATH=""
+  [ -n "$SWIFTBAR_PLUGIN_DIR" ] && PLUGIN_PATH="$SWIFTBAR_PLUGIN_DIR/ghostty-bells.30s.sh"
+fi
 
 TMPROOT="$(mktemp -d -t bell-validate.XXXXXX)"
 export BELL_STATE_DIR="$TMPROOT/state"
 export BELL_TRACE_LOG="$TMPROOT/trace.log"
+export BELL_CONFIG="$TMPROOT/bell-config"
 mkdir -p "$BELL_STATE_DIR"
 touch "$BELL_TRACE_LOG"
+# Start with an empty (notifs-default) config.
+: > "$BELL_CONFIG"
 
 if [ -t 1 ]; then
   C_OK=$'\e[32m'; C_NG=$'\e[31m'; C_SK=$'\e[33m'; C_B=$'\e[1m'; C_R=$'\e[0m'
@@ -51,7 +72,7 @@ section() { printf '\n%s==>%s %s%s%s\n' "$C_B" "$C_R" "$C_B" "$*" "$C_R"; }
 
 cleanup() {
   rm -rf "$TMPROOT"
-  unset BELL_STATE_DIR BELL_TRACE BELL_TRACE_LOG
+  unset BELL_STATE_DIR BELL_TRACE BELL_TRACE_LOG BELL_CONFIG GHOSTTY_HOOKS_DIR
 }
 trap cleanup EXIT
 
@@ -79,7 +100,10 @@ swiftbar=0
 if [ -d "$SWIFTBAR_APP" ]; then swiftbar=1; ok "SwiftBar installed"; else skip "SwiftBar not installed"; fi
 
 plugin=0
-if [ "$swiftbar" = "1" ]; then
+if [ -n "$PROJECT_DIR" ]; then
+  if [ -x "$PLUGIN_PATH" ]; then plugin=1; ok "plugin at $PLUGIN_PATH"
+  else ng "plugin not found at $PLUGIN_PATH"; fi
+elif [ "$swiftbar" = "1" ]; then
   if [ -n "$PLUGIN_PATH" ] && [ -x "$PLUGIN_PATH" ]; then plugin=1; ok "plugin at $PLUGIN_PATH"
   else ng "plugin not found at expected path ($PLUGIN_PATH)"; fi
 fi
@@ -119,6 +143,16 @@ echo "{\"session_id\":\"$SID\"}" | "$HOOKS_DIR/tab-title.sh" input > /dev/null 2
 mt_after=$(stat -f %m "$BELL_STATE_DIR/$SID" 2>/dev/null)
 if [ "$mt_before" = "$mt_after" ]; then ok "idempotent input (no rewrite when unchanged)"
 else ng "repeat input rewrote state file"; fi
+
+# end removes state file (for SessionEnd hook)
+echo "{\"session_id\":\"$SID\"}" | "$HOOKS_DIR/tab-title.sh" input > /dev/null 2>&1
+echo "{\"session_id\":\"$SID\"}" | "$HOOKS_DIR/tab-title.sh" end > /dev/null 2>&1
+if ! sf_exists "$SID"; then ok "end removes state file"; else ng "end did not remove state file"; fi
+
+# state file has two lines (title + status)
+echo "{\"session_id\":\"$SID\"}" | "$HOOKS_DIR/tab-title.sh" input > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$SID" 2>/dev/null)
+if [ "$line2" = "input" ]; then ok "state file line 2 = status"; else ng "state file line 2 wrong (got: $line2)"; fi
 
 rm -f "$BELL_STATE_DIR/$SID"
 
@@ -227,6 +261,104 @@ trace_reset
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
 grep -q "refresh-menubar.sh" "$BELL_TRACE_LOG" && ok "sweep triggers refresh after pruning" || ng "sweep did not trigger refresh after pruning"
 unset BELL_TRACE
+
+# ---------------------------------------------------------------------------
+section "Mode=off"
+
+printf '{"mode":"off"}\n' > "$BELL_CONFIG"
+
+# tab-title.sh in off mode: never writes state files
+echo "{\"session_id\":\"mOA\"}" | "$HOOKS_DIR/tab-title.sh" input   > /dev/null 2>&1
+if ! sf_exists "mOA"; then ok "off: input does not write state file"; else ng "off: input wrote state file"; fi
+
+echo "{\"session_id\":\"mOA\"}" | "$HOOKS_DIR/tab-title.sh" idle    > /dev/null 2>&1
+if ! sf_exists "mOA"; then ok "off: idle does not write state file"; else ng "off: idle wrote state file"; fi
+
+echo "{\"session_id\":\"mOA\"}" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+if ! sf_exists "mOA"; then ok "off: working does not write state file"; else ng "off: working wrote state file"; fi
+
+# tab-title.sh in off mode: cleans up an existing state file
+write_sf "mOB" "🔔 Claude Code | off-cleanup (mOB)"
+echo "{\"session_id\":\"mOB\"}" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+if ! sf_exists "mOB"; then ok "off: removes existing state file on transition"; else ng "off: did not remove state file"; fi
+
+if [ "$plugin" = "1" ]; then
+  out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1); rc=$?
+  [ "$rc" = "0" ] && [ -z "$out" ] && ok "off: plugin emits no output" || ng "off: plugin output when mode=off: rc=$rc out=\"$out\""
+else
+  skip "off: plugin output test"
+fi
+
+# ---------------------------------------------------------------------------
+section "Mode=always-on"
+
+printf '{"mode":"always-on","icons":{"input":"🔔","working":"⏳","idle":"☕️"},"attentionColor":"#FF6B00"}\n' > "$BELL_CONFIG"
+
+SID_AO="ao-$(date +%s)"
+
+# idle writes state file in always-on mode
+echo "{\"session_id\":\"${SID_AO}i\"}" | "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+if sf_exists "${SID_AO}i"; then ok "always-on: idle writes state file"; else ng "always-on: idle did not write state file"; fi
+line2=$(sed -n '2p' "$BELL_STATE_DIR/${SID_AO}i" 2>/dev/null)
+[ "$line2" = "idle" ] && ok "always-on: idle state file line 2 = 'idle'" || ng "always-on: idle state file line 2 wrong (got: $line2)"
+
+# working writes state file in always-on mode
+echo "{\"session_id\":\"${SID_AO}w\"}" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+if sf_exists "${SID_AO}w"; then ok "always-on: working writes state file"; else ng "always-on: working did not write state file"; fi
+line2=$(sed -n '2p' "$BELL_STATE_DIR/${SID_AO}w" 2>/dev/null)
+[ "$line2" = "working" ] && ok "always-on: working state file line 2 = 'working'" || ng "always-on: working state file line 2 wrong (got: $line2)"
+
+# end removes state file in always-on mode
+echo "{\"session_id\":\"${SID_AO}e\"}" | "$HOOKS_DIR/tab-title.sh" idle  > /dev/null 2>&1
+echo "{\"session_id\":\"${SID_AO}e\"}" | "$HOOKS_DIR/tab-title.sh" end   > /dev/null 2>&1
+if ! sf_exists "${SID_AO}e"; then ok "always-on: end removes state file"; else ng "always-on: end did not remove state file"; fi
+
+# idempotency in always-on: repeated working does not rewrite
+echo "{\"session_id\":\"${SID_AO}w2\"}" | "$HOOKS_DIR/tab-title.sh" idle    > /dev/null 2>&1
+echo "{\"session_id\":\"${SID_AO}w2\"}" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+mt_before=$(stat -f %m "$BELL_STATE_DIR/${SID_AO}w2" 2>/dev/null)
+sleep 1.2
+echo "{\"session_id\":\"${SID_AO}w2\"}" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+mt_after=$(stat -f %m "$BELL_STATE_DIR/${SID_AO}w2" 2>/dev/null)
+[ "$mt_before" = "$mt_after" ] && ok "always-on: repeated working is idempotent" || ng "always-on: repeated working rewrote state file"
+
+rm -f "$BELL_STATE_DIR/${SID_AO}i" "$BELL_STATE_DIR/${SID_AO}w" \
+      "$BELL_STATE_DIR/${SID_AO}w2"
+
+if [ "$plugin" = "1" ]; then
+  # Write a mix of states and verify plugin output.
+  printf '%s\n%s\n' "🔔 Claude Code | ao-bell (aoB1)"    "input"   > "$BELL_STATE_DIR/aoB1"
+  printf '%s\n%s\n' "⏳ Claude Code | ao-work (aoW1)"    "working" > "$BELL_STATE_DIR/aoW1"
+  printf '%s\n%s\n' "Claude Code | ao-idle (aoD1)"       "idle"    > "$BELL_STATE_DIR/aoD1"
+
+  out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+
+  echo "$out" | grep -q '🔔1' && ok "always-on: header contains input count" || ng "always-on: header missing input count: $out"
+  echo "$out" | grep -q '⏳1' && ok "always-on: header contains working count" || ng "always-on: header missing working count: $out"
+  echo "$out" | grep -q '☕️1' && ok "always-on: header contains idle count" || ng "always-on: header missing idle count: $out"
+  echo "$out" | grep -q 'color=#FF6B00' && ok "always-on: attention color on bell session" || ng "always-on: attention color missing: $out"
+  echo "$out" | grep -q 'ao-bell' && ok "always-on: bell entry present" || ng "always-on: bell entry missing: $out"
+  echo "$out" | grep -q 'ao-work' && ok "always-on: working entry present" || ng "always-on: working entry missing: $out"
+  echo "$out" | grep -q 'ao-idle' && ok "always-on: idle entry present" || ng "always-on: idle entry missing: $out"
+  # Entry names must NOT include "Claude Code | " prefix
+  echo "$out" | grep -qv 'Claude Code |' && ok "always-on: 'Claude Code | ' stripped from entries" || ng "always-on: 'Claude Code | ' not stripped"
+  # Entry names must include status label
+  echo "$out" | grep -q 'awaiting input' && ok "always-on: input entry has status label" || ng "always-on: input entry missing status label: $out"
+  echo "$out" | grep -q '— working' && ok "always-on: working entry has status label" || ng "always-on: working entry missing status label: $out"
+  echo "$out" | grep -q '— idle' && ok "always-on: idle entry has status label" || ng "always-on: idle entry missing status label: $out"
+
+  # With only idle/working (no bell), no attention color
+  rm -f "$BELL_STATE_DIR/aoB1"
+  out2=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out2" | grep -qv 'color=' && ok "always-on: no attention color without bell session" || ng "always-on: attention color shown without bell session: $out2"
+
+  rm -f "$BELL_STATE_DIR/aoW1" "$BELL_STATE_DIR/aoD1"
+else
+  skip "always-on: plugin output tests"
+fi
+
+# Restore to notifs default for remaining tests.
+: > "$BELL_CONFIG"
 
 # ---------------------------------------------------------------------------
 section "BELL_TRACE toggle"

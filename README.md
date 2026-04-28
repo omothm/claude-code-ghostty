@@ -1,13 +1,13 @@
 # Ghostty + Claude Code: Tab-Targeted Notifications
 
-When running multiple Claude Code agents in Ghostty tabs, clicking a notification activates Ghostty and focuses the correct tab. Tab titles show the agent's state at a glance. An optional menubar indicator lists every session currently awaiting input.
+When running multiple Claude Code agents in Ghostty tabs, clicking a notification activates Ghostty and focuses the correct tab. Tab titles show the agent's state at a glance. An optional menubar indicator tracks sessions.
 
 ## How It Works
 
 Each session's tab title encodes its state:
 
 - `⏳ Claude Code | …` — working
-- `🔔 Claude Code | …` — waiting for permission
+- `🔔 Claude Code | …` — awaiting input
 - `Claude Code | <dir> (<shortID>)` — idle (or `Claude Code | <summary>` if `/rename`d)
 
 Notifications use `terminal-notifier` with an `-execute` script that finds and clicks the matching tab by partial title match, so it works across windows and tab reorders. Ghostty's native notifications are disabled to avoid duplicates.
@@ -58,9 +58,9 @@ to disable Ghostty's native bell icon in non-Claude tabs (our notifications hand
 
 macOS will prompt on first use for `terminal-notifier` and `osascript`. Grant both in System Settings > Privacy & Security > Accessibility. Notification click-to-navigate won't work without this.
 
-## Optional: menubar bell indicator
+## Optional: menubar indicator
 
-A [SwiftBar](https://swiftbar.app/) plugin shows a menubar icon when one or more Claude Code sessions are awaiting input, with a dropdown to focus any of them. Entirely optional — the core notifications above work without it.
+A [SwiftBar](https://swiftbar.app/) plugin shows a menubar indicator for Claude Code sessions. Three modes are available; the default (`notifs`) requires no configuration.
 
 1. `brew install --cask swiftbar`
 2. Create a plugins directory:
@@ -79,13 +79,55 @@ A [SwiftBar](https://swiftbar.app/) plugin shows a menubar icon when one or more
 
    SwiftBar auto-detects new plugin files. The `.30s` in the filename is a background poll interval; rename to tune it (e.g. `.1m.sh`). Live transitions update the menubar within ~200 ms via push refresh.
 
+### Menubar modes
+
+| Mode | Behavior |
+|------|----------|
+| `notifs` (default) | Hidden when all sessions are idle or working; shows a bell icon + count when one or more sessions are awaiting input |
+| `off` | Always hidden even if the plugin is installed |
+| `always-on` | Always visible; shows counts for all session states; header turns an attention color when any session needs input |
+
+**`always-on` example** — when one session awaits input and two others are active:
+
+```
+🔔1⏳1☕️2   ← orange when any 🔔 session exists
+─────────────────────
+api-service (a1b2c3d4) — awaiting input
+frontend (e5f6a7b8) — working
+devtools (c9d0e1f2) — idle
+```
+
+Clicking any entry focuses that Ghostty tab.
+
+### Configuration
+
+Create `~/.claude/cc-ghostty-config.json` to customise behavior. All keys are optional; omitted keys use the defaults shown below.
+
+```json
+{
+  "mode": "always-on",
+  "icons": {
+    "input":   "🔔",
+    "working": "⏳",
+    "idle":    "☕️"
+  },
+  "attentionColor": "#FF6B00"
+}
+```
+
+- **`mode`** — `"notifs"` | `"off"` | `"always-on"`
+- **`icons`** — emoji shown in the menubar header counts (always-on mode) and as tab title prefixes
+- **`attentionColor`** — CSS hex or macOS named color applied to the menubar header when sessions need input
+
 ## Validation
 
 ```sh
-./tests/validate.sh
+./tests/validate.sh            # test deployed scripts (~/.claude/hooks/)
+./tests/validate.sh .          # test project scripts without deploying
+./tests/validate.sh --verbose  # show every passing check
 ```
 
-Runs ~43 end-to-end checks against the deployed scripts. Safe to run anytime (sandboxed). Exits non-zero on any failure.
+Runs ~68 end-to-end checks. Safe to run anytime (sandboxed temp directories). Exits non-zero on any failure.
 
 ## Why Ghostty
 

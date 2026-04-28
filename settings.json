@@ -81,7 +81,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/tab-title.sh idle"
+            "command": "~/.claude/hooks/tab-title.sh end"
           }
         ]
       }

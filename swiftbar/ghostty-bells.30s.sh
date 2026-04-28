@@ -1,13 +1,12 @@
 #!/bin/bash
-# SwiftBar plugin: menubar dropdown of Ghostty Claude Code sessions awaiting input.
-# Reads per-session state files written by ~/.claude/hooks/tab-title.sh and
-# emits one dropdown entry per session currently in bell state. Hidden when
-# the state directory is empty.
+# SwiftBar plugin: menubar indicator for Ghostty Claude Code sessions.
+# Reads per-session state files written by ~/.claude/hooks/tab-title.sh.
 #
-# This bypasses the macOS Accessibility API (AppleScript tab enumeration) to
-# avoid multi-second lag reflecting ANSI tab-title changes while Ghostty is
-# backgrounded. Clicking an entry invokes focus-ghostty-tab.sh, which still
-# uses AX — that's fine because bringing Ghostty forward refreshes AX.
+# Three modes (set via ~/.claude/bell-config):
+#   notifs (default) — visible only when sessions are awaiting input; shows count
+#   off              — always hidden even if the feature is installed
+#   always-on        — always visible; shows counts for all session states;
+#                      header turns attention color when any session needs input
 #
 # Install: copy to SwiftBar's plugins directory and make executable.
 # The filename suffix (.30s.sh) sets the background refresh interval — a
@@ -29,39 +28,181 @@ HOOKS_DIR="${GHOSTTY_HOOKS_DIR:-$HOME/.claude/hooks}"
 FOCUS="$HOOKS_DIR/focus-ghostty-tab.sh"
 STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 
-titles=""
-if [ -d "$STATE_DIR" ]; then
+# Load bell config from JSON (~/.claude/cc-ghostty-config.json). Defaults apply
+# when the file is absent or a key is missing.
+BELL_MODE="notifs"
+BELL_ICON_INPUT="🔔"
+BELL_ICON_WORKING="⏳"
+BELL_ICON_IDLE="☕️"
+BELL_ATTENTION_COLOR="#FF6B00"
+BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/cc-ghostty-config.json}"
+if [ -f "$BELL_CONFIG" ]; then
+  _m="" _ii="" _iw="" _il="" _ac=""
+  { IFS= read -r _m; IFS= read -r _ii; IFS= read -r _iw
+    IFS= read -r _il; IFS= read -r _ac; } \
+    < <(jq -r '
+      .mode // "notifs",
+      (.icons.input // "🔔"),
+      (.icons.working // "⏳"),
+      (.icons.idle // "☕️"),
+      (.attentionColor // "#FF6B00")
+    ' "$BELL_CONFIG" 2>/dev/null)
+  [ -n "$_m" ]  && BELL_MODE="$_m"
+  [ -n "$_ii" ] && BELL_ICON_INPUT="$_ii"
+  [ -n "$_iw" ] && BELL_ICON_WORKING="$_iw"
+  [ -n "$_il" ] && BELL_ICON_IDLE="$_il"
+  [ -n "$_ac" ] && BELL_ATTENTION_COLOR="$_ac"
+  unset _m _ii _iw _il _ac
+fi
+__trace "mode=$BELL_MODE"
+
+# Mode off: never emit any output.
+if [ "$BELL_MODE" = "off" ]; then
+  __trace "result=hidden (mode=off)"
+  exit 0
+fi
+
+# -------------------------------------------------------------------------
+# Collect state files
+# -------------------------------------------------------------------------
+_read_state_files() {
+  [ -d "$STATE_DIR" ] || return
+  for f in "$STATE_DIR"/*; do
+    [ -f "$f" ] || continue
+    printf '%s\n' "$f"
+  done
+}
+
+# Returns status for a state file, or empty string if the file is not a
+# recognised session state file (e.g. stray files in the state directory).
+_file_status() {
+  local f="$1"
+  local st
+  st=$(sed -n '2p' "$f" 2>/dev/null)
+  case "$st" in
+    input|working|idle) printf '%s' "$st"; return ;;
+  esac
+  # Backwards compat: infer from line-1 prefix for single-line state files.
+  local t
+  t=$(head -n1 "$f" 2>/dev/null)
+  case "$t" in
+    "${BELL_ICON_INPUT} "*|"🔔 "*) printf 'input'   ;;
+    "${BELL_ICON_WORKING} "*|"⏳ "*) printf 'working' ;;
+    "Claude Code | "*)              printf 'idle'    ;;
+    # Not a recognised state file — return empty so callers can skip it.
+  esac
+}
+
+# -------------------------------------------------------------------------
+# notifs mode (default): show bell count, list only waiting sessions
+# -------------------------------------------------------------------------
+if [ "$BELL_MODE" != "always-on" ]; then
+  titles=""
+  if [ -d "$STATE_DIR" ]; then
     for f in "$STATE_DIR"/*; do
-        [ -f "$f" ] || continue
-        line=$(head -n1 "$f" 2>/dev/null)
-        [ -n "$line" ] && titles="${titles}${line}"$'\n'
+      [ -f "$f" ] || continue
+      line=$(head -n1 "$f" 2>/dev/null)
+      [ -n "$line" ] && titles="${titles}${line}"$'\n'
     done
     titles="${titles%$'\n'}"
-fi
-__trace "state-read bytes=${#titles}"
+  fi
+  __trace "state-read bytes=${#titles}"
 
-if [ -z "$titles" ]; then
+  # Only show entries that are in bell/input state.
+  bell_titles=""
+  while IFS= read -r t; do
+    [ -z "$t" ] && continue
+    case "$t" in
+      "${BELL_ICON_INPUT} "*|"🔔 "*) bell_titles="${bell_titles}${t}"$'\n' ;;
+    esac
+  done <<< "$titles"
+  bell_titles="${bell_titles%$'\n'}"
+
+  if [ -z "$bell_titles" ]; then
     __trace "result=hidden (zero bells)"
     exit 0
-fi
+  fi
 
-count=$(printf '%s\n' "$titles" | grep -c '🔔')
-__trace "result=visible count=$count"
-echo ":bell.fill: ${count}"
-echo "---"
+  count=$(printf '%s\n' "$bell_titles" | grep -c .)
+  __trace "result=visible count=$count"
+  echo ":bell.fill: ${count}"
+  echo "---"
 
-while IFS= read -r title; do
+  while IFS= read -r title; do
     [ -z "$title" ] && continue
-    # Strip leading 🔔 and swap " | " so it doesn't collide with SwiftBar's
-    # param separator.
-    display="${title#🔔 }"
+    # Strip leading icon + space and swap " | " so it doesn't collide with
+    # SwiftBar's param separator.
+    display="${title#"${BELL_ICON_INPUT} "}"
+    display="${display#"🔔 "}"
     display="${display// | / — }"
     printf '%s | shell="%s" param1="%s" terminal=false\n' "$display" "$FOCUS" "$title"
-done <<< "$titles"
+  done <<< "$bell_titles"
 
-# Fire stale-state cleanup in the background so menubar rendering isn't
-# delayed by the ~300 ms AX enumeration. If anything is pruned, the sweep
-# itself nudges SwiftBar to re-read.
+  # Fire stale-state cleanup in the background so menubar rendering isn't
+  # delayed by the ~300 ms AX enumeration.
+  "$HOOKS_DIR/sweep-bell-state.sh" </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  __trace "sweep-dispatched (background)"
+  __trace "exit"
+  exit 0
+fi
+
+# -------------------------------------------------------------------------
+# always-on mode: show all sessions with counts; attention color on bell
+# -------------------------------------------------------------------------
+
+n_input=0; n_working=0; n_idle=0
+any_files=0
+
+# First pass: count by status.
+while IFS= read -r f; do
+  st=$(_file_status "$f")
+  [ -z "$st" ] && continue
+  any_files=1
+  case "$st" in
+    input)   n_input=$((n_input+1))   ;;
+    working) n_working=$((n_working+1)) ;;
+    *)       n_idle=$((n_idle+1))     ;;
+  esac
+done < <(_read_state_files)
+
+if [ "$any_files" = "0" ] || [ $((n_input + n_working + n_idle)) -eq 0 ]; then
+  __trace "result=hidden (always-on zero sessions)"
+  exit 0
+fi
+
+header="${BELL_ICON_INPUT}${n_input}${BELL_ICON_WORKING}${n_working}${BELL_ICON_IDLE}${n_idle}"
+__trace "result=visible always-on input=$n_input working=$n_working idle=$n_idle"
+
+if [ "$n_input" -gt 0 ]; then
+  printf '%s | color=%s\n' "$header" "$BELL_ATTENTION_COLOR"
+else
+  echo "$header"
+fi
+echo "---"
+
+# Second pass: emit one dropdown entry per session.
+while IFS= read -r f; do
+  st=$(_file_status "$f")
+  [ -z "$st" ] && continue
+  title=$(head -n1 "$f" 2>/dev/null)
+  [ -z "$title" ] && continue
+  case "$st" in
+    input)   label="awaiting input" ;;
+    working) label="working"        ;;
+    *)       label="idle"           ;;
+  esac
+  # Strip "Claude Code | " prefix (present regardless of icon prefix).
+  case "$title" in
+    *"Claude Code | "*) dir_part="${title#*Claude Code | }" ;;
+    *) dir_part="$title" ;;
+  esac
+  # Swap " | " → " — " so it doesn't collide with SwiftBar's param separator.
+  display="${dir_part// | / — } — ${label}"
+  printf '%s | shell="%s" param1="%s" terminal=false\n' "$display" "$FOCUS" "$title"
+done < <(_read_state_files)
+
+# Fire stale-state cleanup in background.
 "$HOOKS_DIR/sweep-bell-state.sh" </dev/null >/dev/null 2>&1 &
 disown 2>/dev/null || true
 __trace "sweep-dispatched (background)"

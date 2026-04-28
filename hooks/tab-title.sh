@@ -1,7 +1,7 @@
 #!/bin/bash
 # Unified tab title helper for Ghostty tabs.
 # Usage: tab-title.sh <status> [session_id]
-#   status: idle, working, input, query
+#   status: idle, working, input, query, end
 #
 # If session_id is omitted, it is read from stdin JSON (.session_id field).
 #
@@ -23,6 +23,24 @@ __trace() {
     >> "${BELL_TRACE_LOG:-/tmp/bell-trace.log}"
 }
 __trace "entry argc=$# args=[$*]"
+
+# Load bell config from JSON (~/.claude/cc-ghostty-config.json). Defaults apply
+# when the file is absent or a key is missing.
+BELL_MODE="notifs"
+BELL_ICON_INPUT="🔔"
+BELL_ICON_WORKING="⏳"
+BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/cc-ghostty-config.json}"
+if [ -f "$BELL_CONFIG" ]; then
+  _m="" _ii="" _iw=""
+  { IFS= read -r _m; IFS= read -r _ii; IFS= read -r _iw; } \
+    < <(jq -r '.mode // "notifs", (.icons.input // "🔔"), (.icons.working // "⏳")' \
+        "$BELL_CONFIG" 2>/dev/null)
+  [ -n "$_m" ]  && BELL_MODE="$_m"
+  [ -n "$_ii" ] && BELL_ICON_INPUT="$_ii"
+  [ -n "$_iw" ] && BELL_ICON_WORKING="$_iw"
+  unset _m _ii _iw
+fi
+__trace "bell-config mode=$BELL_MODE icon_input=$BELL_ICON_INPUT icon_working=$BELL_ICON_WORKING"
 
 status="$1"
 session_id="$2"
@@ -52,8 +70,8 @@ fi
 
 if [ "$status" != "query" ]; then
   case "$status" in
-    working) title="⏳ $base_title" ;;
-    input)   title="🔔 $base_title" ;;
+    working) title="${BELL_ICON_WORKING} $base_title" ;;
+    input)   title="${BELL_ICON_INPUT} $base_title"   ;;
     *)       title="$base_title" ;;
   esac
   printf '\033]2;%s\007' "$title" > /dev/tty 2>/dev/null
@@ -63,34 +81,66 @@ fi
 # Maintain the bell-state directory. The SwiftBar plugin reads this instead of
 # querying the macOS Accessibility API, which has multi-second lag reflecting
 # ANSI-set tab titles while Ghostty is backgrounded.
+#
+# State file format (two lines):
+#   Line 1: full tab title with icon prefix (matches the ANSI title set above)
+#   Line 2: status string (input | working | idle)
 STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 state_file="$STATE_DIR/$session_id"
 state_changed=0
-case "$status" in
-  input)
-    mkdir -p "$STATE_DIR"
-    desired="🔔 $base_title"
-    if [ ! -f "$state_file" ] || [ "$(cat "$state_file" 2>/dev/null)" != "$desired" ]; then
-      printf '%s\n' "$desired" > "$state_file"
-      state_changed=1
-      __trace "state-file write: $state_file"
-    else
-      __trace "state-file unchanged (already set)"
-    fi
+
+_write_state() {
+  mkdir -p "$STATE_DIR"
+  local desired="$1" st="$2"
+  if [ ! -f "$state_file" ] || [ "$(head -n1 "$state_file" 2>/dev/null)" != "$desired" ]; then
+    printf '%s\n%s\n' "$desired" "$st" > "$state_file"
+    state_changed=1
+    __trace "state-file write ($st): $state_file"
+  else
+    __trace "state-file unchanged ($st)"
+  fi
+}
+
+_remove_state() {
+  if [ -f "$state_file" ]; then
+    rm -f "$state_file"
+    state_changed=1
+    __trace "state-file remove: $state_file"
+  else
+    __trace "state-file absent (nothing to remove)"
+  fi
+}
+
+case "$BELL_MODE" in
+  off)
+    _remove_state
     ;;
-  idle|working)
-    if [ -f "$state_file" ]; then
-      rm -f "$state_file"
-      state_changed=1
-      __trace "state-file remove: $state_file"
-    else
-      __trace "state-file absent (nothing to remove)"
-    fi
+  always-on)
+    case "$status" in
+      input)   _write_state "${BELL_ICON_INPUT} $base_title"   "input"   ;;
+      working) _write_state "${BELL_ICON_WORKING} $base_title" "working" ;;
+      idle)    _write_state "$base_title"                      "idle"    ;;
+      end)     _remove_state ;;
+      *)       __trace "state-file unchanged (status=$status)" ;;
+    esac
     ;;
   *)
-    __trace "state-file unchanged (status=$status)"
+    # notifs mode (default)
+    case "$status" in
+      input)
+        _write_state "${BELL_ICON_INPUT} $base_title" "input"
+        ;;
+      idle|working|end)
+        _remove_state
+        ;;
+      *)
+        __trace "state-file unchanged (status=$status)"
+        ;;
+    esac
     ;;
 esac
+
+unset -f _write_state _remove_state
 
 # Nudge the optional SwiftBar menubar plugin only on actual state transitions.
 if [ "$state_changed" = "1" ]; then
