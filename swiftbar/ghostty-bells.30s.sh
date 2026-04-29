@@ -166,26 +166,50 @@ else
 fi
 echo "---"
 
-# Second pass: emit one dropdown entry per session.
+# Second pass: collect entries by status group, then emit with section headers.
+input_entries=""; working_entries=""; idle_entries=""
 while IFS= read -r f; do
   st=$(_file_status "$f")
   [ -z "$st" ] && continue
   title=$(head -n1 "$f" 2>/dev/null)
   [ -z "$title" ] && continue
-  case "$st" in
-    input)   label="awaiting input" ;;
-    working) label="working"        ;;
-    *)       label="idle"           ;;
-  esac
-  # Strip "Claude Code | " prefix (present regardless of icon prefix).
+  # Strip "Claude Code | " prefix and icon prefix.
   case "$title" in
     *"Claude Code | "*) dir_part="${title#*Claude Code | }" ;;
     *) dir_part="$title" ;;
   esac
   # Swap " | " → " — " so it doesn't collide with SwiftBar's param separator.
-  display="${dir_part// | / — } — ${label}"
-  printf '%s | shell="%s" param1="%s" terminal=false\n' "$display" "$FOCUS" "$title"
+  display="${dir_part// | / — }"
+  case "$st" in
+    input)
+      input_entries="${input_entries}$(printf '%s | sfimage=bell.fill shell="%s" param1="%s" terminal=false' \
+        "$display" "$FOCUS" "$title")"$'\n' ;;
+    working)
+      working_entries="${working_entries}$(printf '%s | sfimage=hourglass shell="%s" param1="%s" terminal=false' \
+        "$display" "$FOCUS" "$title")"$'\n' ;;
+    *)
+      idle_entries="${idle_entries}$(printf '%s | sfimage=zzz shell="%s" param1="%s" terminal=false' \
+        "$display" "$FOCUS" "$title")"$'\n' ;;
+  esac
 done < <(_read_state_files)
+
+need_sep=0
+if [ -n "$input_entries" ]; then
+  echo "Awaiting input | size=11 color=gray"
+  printf '%s' "$input_entries"
+  need_sep=1
+fi
+if [ -n "$working_entries" ]; then
+  [ "$need_sep" = "1" ] && echo "---"
+  echo "Working | size=11 color=gray"
+  printf '%s' "$working_entries"
+  need_sep=1
+fi
+if [ -n "$idle_entries" ]; then
+  [ "$need_sep" = "1" ] && echo "---"
+  echo "Idle | size=11 color=gray"
+  printf '%s' "$idle_entries"
+fi
 
 # Fire stale-state cleanup in background.
 "$HOOKS_DIR/sweep-bell-state.sh" </dev/null >/dev/null 2>&1 &

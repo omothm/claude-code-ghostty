@@ -92,9 +92,14 @@ A [SwiftBar](https://swiftbar.app/) plugin shows a menubar indicator for Claude 
 ```
 🔔 1 ⏳ 1 💤 1   ← bold numbers; emoji bell when any session awaits input
 ─────────────────────
-api-service (a1b2c3d4) — awaiting input
-frontend (e5f6a7b8) — working
-devtools (c9d0e1f2) — idle
+Awaiting input
+  🔔 api-service (a1b2c3d4)
+─────────────────────
+Working
+  ⏳ frontend (e5f6a7b8)
+─────────────────────
+Idle
+  💤 devtools (c9d0e1f2)
 ```
 
 When no sessions are awaiting input the header shows only `⏳ N 💤 N` (no bell). Clicking any entry focuses that Ghostty tab.

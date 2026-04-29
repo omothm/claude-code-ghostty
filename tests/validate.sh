@@ -346,12 +346,12 @@ if [ "$plugin" = "1" ]; then
   echo "$out" | grep -q 'ao-bell' && ok "always-on: bell entry present" || ng "always-on: bell entry missing: $out"
   echo "$out" | grep -q 'ao-work' && ok "always-on: working entry present" || ng "always-on: working entry missing: $out"
   echo "$out" | grep -q 'ao-idle' && ok "always-on: idle entry present" || ng "always-on: idle entry missing: $out"
-  # Entry names must NOT include "Claude Code | " prefix
-  echo "$out" | grep -qv 'Claude Code |' && ok "always-on: 'Claude Code | ' stripped from entries" || ng "always-on: 'Claude Code | ' not stripped"
-  # Entry names must include status label
-  echo "$out" | grep -q 'awaiting input' && ok "always-on: input entry has status label" || ng "always-on: input entry missing status label: $out"
-  echo "$out" | grep -q '— working' && ok "always-on: working entry has status label" || ng "always-on: working entry missing status label: $out"
-  echo "$out" | grep -q '— idle' && ok "always-on: idle entry has status label" || ng "always-on: idle entry missing status label: $out"
+  echo "$out" | grep -q 'sfimage=bell.fill' && ok "always-on: input entry has bell.fill icon" || ng "always-on: input entry missing bell.fill icon: $out"
+  echo "$out" | grep -q 'sfimage=hourglass' && ok "always-on: working entry has hourglass icon" || ng "always-on: working entry missing hourglass icon: $out"
+  echo "$out" | grep -q 'sfimage=zzz' && ok "always-on: idle entry has zzz icon" || ng "always-on: idle entry missing zzz icon: $out"
+  echo "$out" | grep -q 'Awaiting input' && ok "always-on: input section header present" || ng "always-on: input section header missing: $out"
+  echo "$out" | grep -q 'Working' && ok "always-on: working section header present" || ng "always-on: working section header missing: $out"
+  echo "$out" | grep -q 'Idle' && ok "always-on: idle section header present" || ng "always-on: idle section header missing: $out"
 
   # With only idle/working (no bell), header shows only hourglass + zzz
   rm -f "$BELL_STATE_DIR/aoB1"
