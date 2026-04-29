@@ -339,9 +339,10 @@ if [ "$plugin" = "1" ]; then
 
   out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
 
-  echo "$out" | grep -q '🔔1' && ok "always-on: header uses emoji bell when input > 0" || ng "always-on: header missing emoji bell: $out"
-  echo "$out" | grep -q ':hourglass:1' && ok "always-on: header contains working count" || ng "always-on: header missing working count: $out"
-  echo "$out" | grep -q ':zzz:1' && ok "always-on: header contains idle count" || ng "always-on: header missing idle count: $out"
+  echo "$out" | grep -q '🔔 1' && ok "always-on: header uses emoji bell when input > 0" || ng "always-on: header missing emoji bell: $out"
+  echo "$out" | grep -q ':hourglass: 1' && ok "always-on: header contains working count" || ng "always-on: header missing working count: $out"
+  echo "$out" | grep -q ':zzz: 1' && ok "always-on: header contains idle count" || ng "always-on: header missing idle count: $out"
+  echo "$out" | head -n1 | grep -q 'font=.AppleSystemUIFontBold' && ok "always-on: header uses bold font" || ng "always-on: header missing bold font: $out"
   echo "$out" | grep -q 'ao-bell' && ok "always-on: bell entry present" || ng "always-on: bell entry missing: $out"
   echo "$out" | grep -q 'ao-work' && ok "always-on: working entry present" || ng "always-on: working entry missing: $out"
   echo "$out" | grep -q 'ao-idle' && ok "always-on: idle entry present" || ng "always-on: idle entry missing: $out"
@@ -358,6 +359,7 @@ if [ "$plugin" = "1" ]; then
   echo "$out2" | head -n1 | grep -q ':hourglass:' && ok "always-on: :hourglass: in header when no input sessions" || ng "always-on: :hourglass: missing from header: $out2"
   echo "$out2" | head -n1 | grep -qv ':bell:' && ok "always-on: :bell: absent from header when no input sessions" || ng "always-on: :bell: shown in header when no input: $out2"
   echo "$out2" | head -n1 | grep -qv '🔔' && ok "always-on: emoji bell absent from header when no input sessions" || ng "always-on: emoji bell shown when no input: $out2"
+  echo "$out2" | head -n1 | grep -q 'font=.AppleSystemUIFontBold' && ok "always-on: no-input header uses bold font" || ng "always-on: no-input header missing bold font: $out2"
 
   rm -f "$BELL_STATE_DIR/aoW1" "$BELL_STATE_DIR/aoD1"
 else

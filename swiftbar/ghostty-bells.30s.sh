@@ -160,9 +160,9 @@ __trace "result=visible always-on input=$n_input working=$n_working idle=$n_idle
 # stands out against the monochrome SF Symbol icons. When there are none,
 # omit the bell entirely — it would only ever show :bell:0 which is pointless.
 if [ "$n_input" -gt 0 ]; then
-  echo "🔔${n_input} :hourglass:${n_working} :zzz:${n_idle}"
+  echo "🔔 ${n_input} :hourglass: ${n_working} :zzz: ${n_idle} | font=.AppleSystemUIFontBold"
 else
-  echo ":hourglass:${n_working} :zzz:${n_idle}"
+  echo ":hourglass: ${n_working} :zzz: ${n_idle} | font=.AppleSystemUIFontBold"
 fi
 echo "---"
 
