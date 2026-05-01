@@ -50,7 +50,9 @@ TMPROOT="$(mktemp -d -t bell-validate.XXXXXX)"
 export BELL_STATE_DIR="$TMPROOT/state"
 export BELL_TRACE_LOG="$TMPROOT/trace.log"
 export BELL_CONFIG="$TMPROOT/bell-config"
-mkdir -p "$BELL_STATE_DIR"
+export CCG_EVENT_LOG="$TMPROOT/events.jsonl"
+export CCG_SESSION_STATE_DIR="$TMPROOT/sessions"
+mkdir -p "$BELL_STATE_DIR" "$CCG_SESSION_STATE_DIR"
 touch "$BELL_TRACE_LOG"
 # Start with an empty (notifs-default) config.
 : > "$BELL_CONFIG"
@@ -72,7 +74,8 @@ section() { printf '\n%s==>%s %s%s%s\n' "$C_B" "$C_R" "$C_B" "$*" "$C_R"; }
 
 cleanup() {
   rm -rf "$TMPROOT"
-  unset BELL_STATE_DIR BELL_TRACE BELL_TRACE_LOG BELL_CONFIG GHOSTTY_HOOKS_DIR
+  unset BELL_STATE_DIR BELL_TRACE BELL_TRACE_LOG BELL_CONFIG GHOSTTY_HOOKS_DIR \
+        CCG_EVENT_LOG CCG_SESSION_STATE_DIR
 }
 trap cleanup EXIT
 
@@ -92,7 +95,7 @@ for cmd in jq terminal-notifier gdate osascript; do
   if command -v "$cmd" >/dev/null 2>&1; then ok "$cmd installed"; else ng "$cmd missing"; fi
 done
 
-for f in tab-title.sh notify.sh refresh-menubar.sh focus-ghostty-tab.sh sweep-bell-state.sh; do
+for f in tab-title.sh notify.sh refresh-menubar.sh focus-ghostty-tab.sh sweep-bell-state.sh dashboard-server.sh; do
   if [ -x "$HOOKS_DIR/$f" ]; then ok "$HOOKS_DIR/$f executable"; else ng "$HOOKS_DIR/$f missing or not executable"; fi
 done
 
@@ -181,6 +184,94 @@ unset BELL_TRACE
 rm -f "$BELL_STATE_DIR/gA"
 
 # ---------------------------------------------------------------------------
+section "events.jsonl logging"
+
+# Reset the event log and per-session state for this section.
+: > "$CCG_EVENT_LOG"
+rm -rf "$CCG_SESSION_STATE_DIR"
+mkdir -p "$CCG_SESSION_STATE_DIR"
+
+# Count occurrences of session_id in the event log, robustly. Avoids the
+# grep-on-empty-file case where `grep -c` returns "0\n" + exit 1.
+count_events_for() {
+  local sid="$1"
+  [ -s "$CCG_EVENT_LOG" ] || { echo 0; return; }
+  local c
+  c=$(grep -c "\"session_id\":\"$sid\"" "$CCG_EVENT_LOG" 2>/dev/null) || c=0
+  echo "${c:-0}"
+}
+
+EID="evt-$$"
+
+# 1. idle (SessionStart) — first transition logs.
+echo "{\"session_id\":\"$EID\"}" | "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+n=$(count_events_for "$EID")
+[ "$n" = "1" ] && ok "idle (first transition) appends event" || ng "first idle did not append (got $n events)"
+
+# 2. Repeat idle — no log entry (no transition).
+echo "{\"session_id\":\"$EID\"}" | "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+n=$(count_events_for "$EID")
+[ "$n" = "1" ] && ok "repeat idle does not duplicate event" || ng "repeat idle duplicated event (got $n)"
+
+# 3. working — logs.
+echo "{\"session_id\":\"$EID\"}" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+n=$(count_events_for "$EID")
+[ "$n" = "2" ] && ok "idle → working appends event" || ng "working did not append (got $n)"
+
+# 4. PostToolUse-style repeat working — no log.
+for _ in 1 2 3; do
+  echo "{\"session_id\":\"$EID\"}" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+done
+n=$(count_events_for "$EID")
+[ "$n" = "2" ] && ok "repeated working (PostToolUse churn) does not duplicate" || ng "repeated working logged extra (got $n)"
+
+# 5. input — logs.
+echo "{\"session_id\":\"$EID\"}" | "$HOOKS_DIR/tab-title.sh" input > /dev/null 2>&1
+n=$(count_events_for "$EID")
+[ "$n" = "3" ] && ok "working → input appends event" || ng "input did not append (got $n)"
+
+# 6. Event JSON shape.
+last=$(tail -n1 "$CCG_EVENT_LOG")
+echo "$last" | jq -e '.ts | type == "number"' >/dev/null 2>&1 \
+  && ok "event ts is numeric" || ng "event ts not numeric: $last"
+echo "$last" | jq -e '.session_id and .state and .title' >/dev/null 2>&1 \
+  && ok "event has session_id, state, title" || ng "event missing fields: $last"
+state_field=$(echo "$last" | jq -r '.state')
+[ "$state_field" = "input" ] && ok "last event state == input" || ng "last event state wrong: $state_field"
+
+# 7. end after a real prior state — logs.
+echo "{\"session_id\":\"$EID\"}" | "$HOOKS_DIR/tab-title.sh" end > /dev/null 2>&1
+n=$(count_events_for "$EID")
+[ "$n" = "4" ] && ok "input → end appends event" || ng "end did not append (got $n)"
+
+# 8. Per-session state file is removed on end.
+[ ! -f "$CCG_SESSION_STATE_DIR/$EID" ] \
+  && ok "session state file cleaned up on end" \
+  || ng "session state file lingered after end"
+
+# 9. end with no prior state — does NOT log (avoids zombie events).
+EID2="evt-empty-$$"
+echo "{\"session_id\":\"$EID2\"}" | "$HOOKS_DIR/tab-title.sh" end > /dev/null 2>&1
+n=$(count_events_for "$EID2")
+[ "$n" = "0" ] && ok "end with no prior state does not log" || ng "end-with-no-prior wrongly logged (got $n)"
+
+# 10. notifs mode does not suppress event logging (events are mode-independent).
+EID3="evt-notifs-$$"
+echo "{\"session_id\":\"$EID3\"}" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+n=$(count_events_for "$EID3")
+# notifs mode (current $BELL_CONFIG is empty → notifs default) doesn't write a
+# bell-state file for working, but the event log is independent of bell mode.
+[ "$n" = "1" ] && ok "notifs mode still logs working event" || ng "notifs mode missed working event (got $n)"
+
+# 11. query never logs.
+events_before=$(wc -l < "$CCG_EVENT_LOG")
+"$HOOKS_DIR/tab-title.sh" query "$EID3" > /dev/null 2>&1
+events_after=$(wc -l < "$CCG_EVENT_LOG")
+[ "$events_before" = "$events_after" ] && ok "query never logs an event" || ng "query mutated event log"
+
+rm -f "$BELL_STATE_DIR/$EID" "$BELL_STATE_DIR/$EID2" "$BELL_STATE_DIR/$EID3"
+
+# ---------------------------------------------------------------------------
 section "refresh-menubar.sh"
 
 out=$("$HOOKS_DIR/refresh-menubar.sh" 2>&1); rc=$?
@@ -221,6 +312,88 @@ if [ "$plugin" = "1" ]; then
   [ "$rc" = "0" ] && [ -z "$out" ] && ok "empty state dir => icon hidden (no stdout, exit 0)" || ng "plugin output when empty: rc=$rc out=\"$out\""
 else
   skip "plugin output tests"
+fi
+
+# ---------------------------------------------------------------------------
+section "dashboard entry in plugin output"
+
+if [ "$plugin" = "1" ]; then
+  # Use an isolated CCG_DIR so we don't trip over a real server if one is
+  # running on the user's machine.
+  export CCG_DIR="$TMPROOT/ccg-plugin"
+  mkdir -p "$CCG_DIR"
+
+  write_sf "dA" "🔔 Claude Code | dash-alpha (dA12345)"
+
+  # Stopped state: no PID file → entry says "Open dashboard".
+  out=$(CCG_DIR="$CCG_DIR" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out" | grep -q 'Open dashboard' \
+    && ok "stopped → emits 'Open dashboard' entry" \
+    || ng "stopped → missing 'Open dashboard' entry: $out"
+  echo "$out" | grep -q 'param1="start"' \
+    && ok "stopped entry uses param1=start" \
+    || ng "stopped entry missing param1=start"
+  echo "$out" | grep -q 'refresh=true' \
+    && ok "dashboard entry has refresh=true (menu re-renders after click)" \
+    || ng "dashboard entry missing refresh=true"
+
+  # Dashboard entry must come AFTER the session entries (separator between).
+  last_sep_line=$(echo "$out" | grep -n '^---$' | tail -n1 | cut -d: -f1)
+  dash_line=$(echo "$out" | grep -n 'dashboard' | tail -n1 | cut -d: -f1)
+  if [ -n "$last_sep_line" ] && [ -n "$dash_line" ] && [ "$dash_line" -gt "$last_sep_line" ]; then
+    ok "dashboard entry follows last separator (positioned after sessions)"
+  else
+    ng "dashboard entry not positioned after sessions: sep=$last_sep_line dash=$dash_line"
+  fi
+
+  # Running state: stub PID file pointing at this shell's PID (alive).
+  echo "$$" > "$CCG_DIR/server.pid"
+  out=$(CCG_DIR="$CCG_DIR" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out" | grep -q 'Stop dashboard server' \
+    && ok "running → emits 'Stop dashboard server' entry" \
+    || ng "running → missing 'Stop dashboard server' entry: $out"
+  echo "$out" | grep -q 'param1="stop"' \
+    && ok "running entry uses param1=stop" \
+    || ng "running entry missing param1=stop"
+  echo "$out" | grep -qv 'Open dashboard' \
+    && ok "running → 'Open dashboard' suppressed" \
+    || ng "running → 'Open dashboard' wrongly present: $out"
+
+  # Stale PID file (pointing at a non-existent process) → treated as stopped.
+  echo "999999" > "$CCG_DIR/server.pid"
+  out=$(CCG_DIR="$CCG_DIR" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out" | grep -q 'Open dashboard' \
+    && ok "stale PID file → entry reverts to 'Open dashboard'" \
+    || ng "stale PID file → still showing 'Stop': $out"
+
+  rm -f "$BELL_STATE_DIR/dA" "$CCG_DIR/server.pid"
+  unset CCG_DIR
+else
+  skip "dashboard entry tests"
+fi
+
+# ---------------------------------------------------------------------------
+section "dashboard-server.sh status"
+
+# Status is the only branch we exercise unconditionally — start/stop spawn a
+# real http.server which we don't want running unattended in the validator.
+if [ -x "$HOOKS_DIR/dashboard-server.sh" ]; then
+  CCG_DIR="$TMPROOT/ccg-status"
+  mkdir -p "$CCG_DIR"
+
+  out=$(CCG_DIR="$CCG_DIR" "$HOOKS_DIR/dashboard-server.sh" status 2>&1)
+  [ "$out" = "stopped" ] && ok "status without PID file → 'stopped'" || ng "status wrong (got '$out')"
+
+  echo "999999" > "$CCG_DIR/server.pid"
+  out=$(CCG_DIR="$CCG_DIR" "$HOOKS_DIR/dashboard-server.sh" status 2>&1)
+  [ "$out" = "stopped" ] && ok "status with stale PID → 'stopped'" || ng "stale PID status wrong (got '$out')"
+
+  echo "$$" > "$CCG_DIR/server.pid"
+  out=$(CCG_DIR="$CCG_DIR" "$HOOKS_DIR/dashboard-server.sh" status 2>&1)
+  [ "$out" = "running" ] && ok "status with live PID → 'running'" || ng "live PID status wrong (got '$out')"
+
+  out=$("$HOOKS_DIR/dashboard-server.sh" 2>&1); rc=$?
+  [ "$rc" = "2" ] && ok "no-arg invocation exits 2 (usage)" || ng "no-arg rc=$rc"
 fi
 
 # ---------------------------------------------------------------------------

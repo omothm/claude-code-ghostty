@@ -24,10 +24,10 @@ __trace() {
 }
 __trace "entry argc=$# args=[$*]"
 
-# Load bell config from JSON (~/.claude/cc-ghostty-config.json).
+# Load config from JSON (~/.claude/.ccg/config.json).
 # Only .mode is read; icon appearance is fixed and not configurable.
 BELL_MODE="notifs"
-BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/cc-ghostty-config.json}"
+BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/.ccg/config.json}"
 if [ -f "$BELL_CONFIG" ]; then
   _m=""
   IFS= read -r _m < <(jq -r '.mode // "notifs"' "$BELL_CONFIG" 2>/dev/null)
@@ -135,6 +135,43 @@ case "$BELL_MODE" in
 esac
 
 unset -f _write_state _remove_state
+
+# Log state transitions to ~/.claude/.ccg/events.jsonl for the metrics
+# dashboard. Independent of BELL_MODE — the log captures every transition
+# even in notifs mode (where idle/working don't write a bell-state file).
+# Per-session "logical state" files at ~/.claude/.ccg/sessions/<sid> let us
+# detect transitions without scanning the log on every hook invocation
+# (PostToolUse can fire many times per second).
+case "$status" in
+  idle|working|input|end)
+    EVENT_LOG="${CCG_EVENT_LOG:-$HOME/.claude/.ccg/events.jsonl}"
+    SESSION_STATE_DIR="${CCG_SESSION_STATE_DIR:-$HOME/.claude/.ccg/sessions}"
+    session_state_file="$SESSION_STATE_DIR/$session_id"
+    prev_state=""
+    [ -f "$session_state_file" ] && prev_state=$(head -n1 "$session_state_file" 2>/dev/null)
+    if [ "$status" != "$prev_state" ]; then
+      # End event only meaningful if there was a prior state to end.
+      if [ "$status" = "end" ] && [ -z "$prev_state" ]; then
+        __trace "event-log skip (end with no prior state)"
+      else
+        mkdir -p "$(dirname "$EVENT_LOG")" "$SESSION_STATE_DIR"
+        ts=$(gdate +%s.%3N 2>/dev/null || date +%s)
+        jq -nc --arg ts "$ts" --arg sid "$session_id" --arg state "$status" \
+              --arg title "$base_title" --arg cwd "$PWD" \
+          '{ts: ($ts|tonumber), session_id: $sid, state: $state, title: $title, cwd: $cwd}' \
+          >> "$EVENT_LOG" 2>/dev/null
+        __trace "event-log append state=$status prev=${prev_state:-<none>}"
+        if [ "$status" = "end" ]; then
+          rm -f "$session_state_file"
+        else
+          printf '%s\n' "$status" > "$session_state_file"
+        fi
+      fi
+    else
+      __trace "event-log skip (no transition, state=$status)"
+    fi
+    ;;
+esac
 
 # Nudge the optional SwiftBar menubar plugin only on actual state transitions.
 if [ "$state_changed" = "1" ]; then

@@ -2,7 +2,7 @@
 # SwiftBar plugin: menubar indicator for Ghostty Claude Code sessions.
 # Reads per-session state files written by ~/.claude/hooks/tab-title.sh.
 #
-# Three modes (set via ~/.claude/cc-ghostty-config.json):
+# Three modes (set via ~/.claude/.ccg/config.json):
 #   notifs (default) — visible only when sessions are awaiting input; shows count
 #   off              — always hidden even if the feature is installed
 #   always-on        — always visible; :bell:N :hourglass:N :zzz:N counts;
@@ -28,10 +28,10 @@ HOOKS_DIR="${GHOSTTY_HOOKS_DIR:-$HOME/.claude/hooks}"
 FOCUS="$HOOKS_DIR/focus-ghostty-tab.sh"
 STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 
-# Load bell config from JSON (~/.claude/cc-ghostty-config.json).
+# Load config from JSON (~/.claude/.ccg/config.json).
 # Only .mode is read; icon appearance is fixed and not configurable.
 BELL_MODE="notifs"
-BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/cc-ghostty-config.json}"
+BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/.ccg/config.json}"
 if [ -f "$BELL_CONFIG" ]; then
   _m=""
   IFS= read -r _m < <(jq -r '.mode // "notifs"' "$BELL_CONFIG" 2>/dev/null)
@@ -55,6 +55,22 @@ _read_state_files() {
     [ -f "$f" ] || continue
     printf '%s\n' "$f"
   done
+}
+
+# Emit the dashboard control entry. Toggles between "Open dashboard" (which
+# starts the server and opens the browser) and "Stop dashboard server" based
+# on whether dashboard-server.sh reports a live PID.
+_emit_dashboard_entry() {
+  local script="$HOOKS_DIR/dashboard-server.sh"
+  [ -x "$script" ] || return 0
+  local state
+  state=$("$script" status 2>/dev/null)
+  echo "---"
+  if [ "$state" = "running" ]; then
+    printf 'Stop dashboard server | sfimage=stop.circle shell="%s" param1="stop" terminal=false refresh=true\n' "$script"
+  else
+    printf 'Open dashboard | sfimage=chart.line.uptrend.xyaxis shell="%s" param1="start" terminal=false refresh=true\n' "$script"
+  fi
 }
 
 # Returns status for a state file, or empty string if the file is not a
@@ -120,6 +136,8 @@ if [ "$BELL_MODE" != "always-on" ]; then
     display="${display// | / — }"
     printf '%s | shell="%s" param1="%s" terminal=false\n' "$display" "$FOCUS" "$title"
   done <<< "$bell_titles"
+
+  _emit_dashboard_entry
 
   # Fire stale-state cleanup in the background so menubar rendering isn't
   # delayed by the ~300 ms AX enumeration.
@@ -210,6 +228,8 @@ if [ -n "$idle_entries" ]; then
   echo "Idle | size=11 color=gray"
   printf '%s' "$idle_entries"
 fi
+
+_emit_dashboard_entry
 
 # Fire stale-state cleanup in background.
 "$HOOKS_DIR/sweep-bell-state.sh" </dev/null >/dev/null 2>&1 &

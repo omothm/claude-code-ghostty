@@ -29,7 +29,7 @@ After every change, verify the following in order:
 
 ## Architecture
 
-Three layers cooperate:
+Four layers cooperate:
 
 1. **Tab title (ANSI)** — `tab-title.sh` writes `⏳ Claude Code | …`,
    `🔔 Claude Code | …`, or the base title (no prefix) via
@@ -41,6 +41,12 @@ Three layers cooperate:
    `open -g swiftbar://refreshallplugins` so SwiftBar re-runs the plugin
    within a few hundred ms. The plugin's filename-encoded 30 s poll is a
    safety net, not the primary path.
+4. **Event log + dashboard** — `tab-title.sh` also appends every transition
+   to `~/.claude/.ccg/events.jsonl` (append-only JSONL: `{ts, session_id,
+   state, title, cwd}`). The single-file dashboard at `~/.claude/.ccg/dashboard.html`
+   fetches the log over HTTP every second and computes live + last-24h
+   metrics. This layer is independent of bell mode — events are logged
+   even when `notifs` mode suppresses bell-state writes for working/idle.
 
 ### Why state files instead of AppleScript tab enumeration
 
@@ -70,6 +76,22 @@ The gate:
 - `input`: fire only if file didn't exist or content differs.
 - `idle` / `working`: fire only if the file existed and was removed.
 - `query`: never fires; read-only path.
+
+### Event log dedup
+
+`events.jsonl` must record real transitions only — `PostToolUse` fires after
+every tool call, so a naive append would flood the log. `tab-title.sh`
+keeps a per-session "logical state" file at `~/.claude/.ccg/sessions/<sid>`
+(content: just the state name) and only appends to `events.jsonl` when the
+new state differs from that file. On `end`, the per-session file is removed
+so a future `SessionStart` for the same `session_id` would re-emit `idle`.
+A pure `end` with no prior state is dropped to avoid zombie entries from
+stray hook invocations.
+
+This layer is intentionally independent of bell mode: in `notifs` mode the
+bell-state file isn't written for `idle`/`working`, but the event log still
+gets every transition. Sandbox via `CCG_EVENT_LOG` and
+`CCG_SESSION_STATE_DIR` env vars (the validator does this).
 
 ### Stale-state cleanup
 
@@ -103,12 +125,15 @@ visible display text. `param1=` retains the original 🔔-prefixed title for
 
 | Script | Purpose | Triggered by |
 |--------|---------|--------------|
-| `hooks/tab-title.sh` | Sets the ANSI tab title; writes/removes `~/.claude/bell-state/<session_id>`; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `notify.sh` (for `input`) |
+| `hooks/tab-title.sh` | Sets the ANSI tab title; writes/removes `~/.claude/bell-state/<session_id>`; appends real state transitions to `~/.claude/.ccg/events.jsonl`; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `notify.sh` (for `input`) |
 | `hooks/notify.sh` | Sends `terminal-notifier`; skips if user is already on that tab; routes to `tab-title.sh` for title updates | `Notification`, `Stop` |
 | `hooks/focus-ghostty-tab.sh` | AppleScript to focus a Ghostty tab by title-contains match; works across windows and single-tab windows | Notification `-execute`, SwiftBar dropdown |
 | `hooks/refresh-menubar.sh` | `open -g swiftbar://refreshallplugins`; silent no-op if SwiftBar isn't installed | `tab-title.sh` on state change; `sweep-bell-state.sh` after pruning |
 | `hooks/sweep-bell-state.sh` | Prunes stale state files (hard-age + AX-verified) | Background job dispatched by the SwiftBar plugin after each run |
-| `swiftbar/ghostty-bells.30s.sh` | Reads state dir, emits dropdown, dispatches sweep in background | SwiftBar 30 s poll + push-refresh URL |
+| `hooks/dashboard-server.sh` | Manages the metrics-dashboard HTTP server (`start`/`stop`/`status`/`toggle`); writes `~/.claude/.ccg/server.pid` and opens browser on start | SwiftBar dropdown entry click |
+| `swiftbar/ghostty-bells.30s.sh` | Reads state dir, emits dropdown (sessions + dashboard entry), dispatches sweep in background | SwiftBar 30 s poll + push-refresh URL |
+| `.ccg/dashboard.html` | Single-file metrics dashboard; fetches `events.jsonl` over HTTP every second | Served via `python3 -m http.server` from `~/.claude/.ccg/` |
+| `.ccg/config.json` | Mode config (`{"mode":"notifs|off|always-on"}`); shipped with `always-on` | Read by `tab-title.sh` and the SwiftBar plugin |
 | `tests/validate.sh` | End-to-end validator; see below | Manual / CI |
 
 ## Environment variables
@@ -123,17 +148,32 @@ visible display text. `param1=` retains the original 🔔-prefixed title for
 - **`BELL_STATE_DIR`** — override the state directory (default
   `~/.claude/bell-state`). The validator uses this to sandbox; production
   hooks don't set it.
+- **`BELL_CONFIG`** — override the config-file path (default
+  `~/.claude/.ccg/config.json`). The validator uses this to sandbox.
+- **`CCG_EVENT_LOG`** — override the dashboard event log path (default
+  `~/.claude/.ccg/events.jsonl`). The validator uses this to sandbox.
+- **`CCG_SESSION_STATE_DIR`** — override the per-session logical-state
+  directory used for event-log dedup (default `~/.claude/.ccg/sessions`).
+  The validator uses this to sandbox.
+- **`CCG_DIR`** — override the dashboard-server's working directory
+  (default `~/.claude/.ccg`). Determines where the PID file and server
+  log live, and the directory `python3 -m http.server` serves.
+- **`CCG_DASHBOARD_PORT`** — override the dashboard server port (default
+  `8765`).
 - **`GHOSTTY_HOOKS_DIR`** — override the hooks directory path used by the
   SwiftBar plugin (default `~/.claude/hooks`).
 
 ## Validator
 
-`tests/validate.sh` runs ~43 checks covering: prerequisites, state-file
-lifecycle, refresh gating (fire vs skip), `refresh-menubar.sh` gate paths,
-plugin output (SF Symbol + count, param1 preservation, ` | ` → ` — ` swap,
-empty-dir hiding), stale-file sweep (hard age, grace protection, AX-verified
-prune, refresh-after-prune), `BELL_TRACE` toggle (off = 0 bytes, on =
-populated), and end-to-end `input`→state→plugin latency.
+`tests/validate.sh` runs ~99 checks covering: prerequisites, state-file
+lifecycle, refresh gating (fire vs skip), event-log dedup + JSON shape,
+`refresh-menubar.sh` gate paths, plugin output (SF Symbol + count, param1
+preservation, ` | ` → ` — ` swap, empty-dir hiding), dashboard-entry
+toggle (open/stop based on PID file, stale-PID handling, position after
+sessions), `dashboard-server.sh status` modes, stale-file sweep (hard age,
+grace protection, AX-verified prune, refresh-after-prune), `BELL_TRACE`
+toggle (off = 0 bytes, on = populated), and end-to-end `input`→state→plugin
+latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches
 real session state.

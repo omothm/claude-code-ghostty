@@ -106,7 +106,12 @@ When no sessions are awaiting input the header shows only `⏳ N 💤 N` (no bel
 
 ### Configuration
 
-Create `~/.claude/cc-ghostty-config.json` to set the mode:
+Configuration and dashboard artifacts live under `~/.claude/.ccg/`. Set the mode by creating `~/.claude/.ccg/config.json`:
+
+```sh
+mkdir -p ~/.claude/.ccg
+cp .ccg/config.json ~/.claude/.ccg/config.json    # ships with {"mode":"always-on"}
+```
 
 ```json
 {
@@ -116,6 +121,34 @@ Create `~/.claude/cc-ghostty-config.json` to set the mode:
 
 - **`mode`** — `"notifs"` (default) | `"off"` | `"always-on"`
 
+## Optional: metrics dashboard
+
+The hooks log every state transition to `~/.claude/.ccg/events.jsonl` (append-only JSONL). A self-contained dashboard reads this log and shows live + last-24h metrics: concurrent working / awaiting / idle right now, time spent in each state, sessions started, average response latency (🔔 → next prompt), and peak concurrent working.
+
+1. Copy the dashboard:
+
+   ```sh
+   mkdir -p ~/.claude/.ccg
+   cp .ccg/dashboard.html ~/.claude/.ccg/
+   ```
+
+2. Open it. Two ways:
+
+   - **From the SwiftBar dropdown** (recommended) — the menubar plugin appends an **Open dashboard** entry below the session list. Click it: the plugin starts `python3 -m http.server 8765` from `~/.claude/.ccg/` and opens http://localhost:8765/dashboard.html. The entry then becomes **Stop dashboard server**.
+
+   - **Manually** — the dashboard fetches `events.jsonl` over HTTP and refuses to run from `file://`:
+
+     ```sh
+     cd ~/.claude/.ccg
+     python3 -m http.server 8765
+     ```
+
+     Then open http://localhost:8765/dashboard.html.
+
+3. The dashboard auto-refreshes every second.
+
+The dashboard is a single HTML file that imports Chart.js from a CDN; there are no build steps and no other files to install. The PID of the running server is tracked at `~/.claude/.ccg/server.pid` so the menubar entry stays in sync across SwiftBar refreshes.
+
 ## Validation
 
 ```sh
@@ -124,7 +157,7 @@ Create `~/.claude/cc-ghostty-config.json` to set the mode:
 ./tests/validate.sh --verbose  # show every passing check
 ```
 
-Runs ~68 end-to-end checks. Safe to run anytime (sandboxed temp directories). Exits non-zero on any failure.
+Runs ~99 end-to-end checks. Safe to run anytime (sandboxed temp directories). Exits non-zero on any failure.
 
 ## Why Ghostty
 

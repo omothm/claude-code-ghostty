@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Claude Code · Ghostty metrics</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --fg: #1a1a1a;
+  --bg: #fafafa;
+  --card-bg: rgba(0,0,0,0.04);
+  --muted: rgba(0,0,0,0.55);
+  --accent-work: #2e8b57;
+  --accent-wait: #d4651a;
+  --accent-idle: #888;
+  --error-bg: #fff0ec;
+  --error-fg: #7a2300;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #f0f0f0;
+    --bg: #1a1a1a;
+    --card-bg: rgba(255,255,255,0.06);
+    --muted: rgba(255,255,255,0.55);
+    --accent-work: #4caf6a;
+    --accent-wait: #f08540;
+    --accent-idle: #888;
+    --error-bg: #3a1810;
+    --error-fg: #ffb89a;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font: 14px -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+  padding: 28px 32px 48px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 20px;
+}
+h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+h2 {
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 32px 0 12px;
+}
+.status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.tick {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent-work);
+  box-shadow: 0 0 0 0 rgba(46,139,87,0.6);
+  animation: pulse 1s infinite;
+}
+.tick.stale { background: var(--accent-idle); animation: none; }
+.tick.waiting { background: var(--accent-wait); animation: none; }
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(46,139,87,0.5); }
+  70%  { box-shadow: 0 0 0 6px rgba(46,139,87,0); }
+  100% { box-shadow: 0 0 0 0 rgba(46,139,87,0); }
+}
+.row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.card {
+  background: var(--card-bg);
+  border-radius: 10px;
+  padding: 18px 20px;
+}
+.card .label {
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.card .value {
+  font: 600 36px/1 -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.card .sub { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.card.work .value { color: var(--accent-work); }
+.card.wait .value { color: var(--accent-wait); }
+.card.idle .value { color: var(--accent-idle); }
+.chart-wrap {
+  background: var(--card-bg);
+  border-radius: 10px;
+  padding: 16px;
+  height: 280px;
+}
+.error {
+  background: var(--error-bg);
+  color: var(--error-fg);
+  border-radius: 10px;
+  padding: 16px 20px;
+  line-height: 1.5;
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+.error code {
+  background: rgba(0,0,0,0.08);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.error pre {
+  background: rgba(0,0,0,0.08);
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  overflow-x: auto;
+}
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 40px 0;
+  font-size: 13px;
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Claude Code · Ghostty</h1>
+  <div class="status"><span class="tick" id="tick"></span><span id="status-text">connecting…</span></div>
+</header>
+
+<div id="error" class="error" style="display:none;"></div>
+
+<h2>Right now</h2>
+<div class="row">
+  <div class="card work"><div class="label">Working</div><div class="value" id="now-working">0</div><div class="sub">⏳ active sessions</div></div>
+  <div class="card wait"><div class="label">Awaiting input</div><div class="value" id="now-input">0</div><div class="sub">🔔 blocked on you</div></div>
+  <div class="card idle"><div class="label">Idle</div><div class="value" id="now-idle">0</div><div class="sub">💤 between prompts</div></div>
+</div>
+
+<h2>Last 24 hours · concurrency</h2>
+<div class="chart-wrap"><canvas id="timeline"></canvas></div>
+
+<h2>Last 24 hours · totals</h2>
+<div class="row">
+  <div class="card work"><div class="label">Time working</div><div class="value" id="t-working">—</div><div class="sub">summed across sessions</div></div>
+  <div class="card wait"><div class="label">Time awaiting you</div><div class="value" id="t-input">—</div><div class="sub">minimize this</div></div>
+  <div class="card idle"><div class="label">Time idle</div><div class="value" id="t-idle">—</div><div class="sub">summed across sessions</div></div>
+</div>
+<div class="row" style="margin-top:12px;">
+  <div class="card"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
+  <div class="card"><div class="label">Avg response latency</div><div class="value" id="t-latency">—</div><div class="sub">🔔 → next prompt</div></div>
+  <div class="card"><div class="label">Peak concurrent working</div><div class="value" id="t-peak">0</div><div class="sub">max parallelism reached</div></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script>
+const REFRESH_MS = 1000;
+const WINDOW_SEC = 24 * 3600;
+const BIN_SEC = 5 * 60;            // 5-min bins → 288 points across 24h
+const TRAILING_CAP_SEC = 30 * 60;  // cap open-ended trailing spans at 30 min
+const NOW_RECENT_SEC = 30 * 60;    // a session counts as "right now" if its last event is ≤ 30 min old
+const STATES = ['working', 'input', 'idle'];
+
+let chart = null;
+
+function fmtDuration(secs) {
+  if (!secs || secs <= 0) return '0m';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h >= 1) return `${h}h ${m.toString().padStart(2, '0')}m`;
+  if (m >= 1) return `${m}m`;
+  return `${Math.round(secs)}s`;
+}
+
+function fmtLatency(secs) {
+  if (secs == null) return '—';
+  if (secs < 60) return `${Math.round(secs)}s`;
+  const m = Math.floor(secs / 60);
+  const s = Math.round(secs % 60);
+  if (m >= 60) {
+    const h = Math.floor(m / 60);
+    return `${h}h ${(m % 60).toString().padStart(2, '0')}m`;
+  }
+  return `${m}m ${s.toString().padStart(2, '0')}s`;
+}
+
+async function fetchEvents() {
+  const resp = await fetch('./events.jsonl', { cache: 'no-store' });
+  if (resp.status === 404) {
+    const err = new Error('events.jsonl not found');
+    err.code = 404;
+    throw err;
+  }
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return await resp.text();
+}
+
+function parseEvents(text) {
+  const out = [];
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const e = JSON.parse(t);
+      if (typeof e.ts === 'number' && typeof e.session_id === 'string' && typeof e.state === 'string') {
+        out.push(e);
+      }
+    } catch (_) { /* skip malformed */ }
+  }
+  out.sort((a, b) => a.ts - b.ts);
+  return out;
+}
+
+// Compute the [start, end] timestamp span (in seconds) for the i-th event of
+// a session, capping open trailing spans for stale sessions.
+function spanFor(evs, i, nowSec) {
+  const e = evs[i];
+  if (i + 1 < evs.length) return [e.ts, evs[i + 1].ts];
+  if (e.state === 'end') return [e.ts, e.ts]; // closed; no trailing time
+  return [e.ts, Math.min(nowSec, e.ts + TRAILING_CAP_SEC)];
+}
+
+function compute(events, nowSec) {
+  const cutoff = nowSec - WINDOW_SEC;
+
+  // Group by session, preserving sort order.
+  const sessions = new Map();
+  for (const e of events) {
+    let arr = sessions.get(e.session_id);
+    if (!arr) { arr = []; sessions.set(e.session_id, arr); }
+    arr.push(e);
+  }
+
+  const totals = { working: 0, input: 0, idle: 0 };
+  const latencies = [];
+  let started = 0;
+  const latest = new Map();
+
+  // 5-min bin counters across the 24h window.
+  const bins = Math.floor(WINDOW_SEC / BIN_SEC);
+  const tlWorking = new Array(bins).fill(0);
+  const tlInput   = new Array(bins).fill(0);
+  const tlIdle    = new Array(bins).fill(0);
+
+  for (const [, evs] of sessions) {
+    if (evs.length === 0) continue;
+    if (evs[0].ts >= cutoff) started += 1;
+    latest.set(evs[evs.length - 1].session_id, evs[evs.length - 1]);
+
+    for (let i = 0; i < evs.length; i++) {
+      const e = evs[i];
+      if (!STATES.includes(e.state)) continue;
+
+      const [spanStart, spanEnd] = spanFor(evs, i, nowSec);
+      const s = Math.max(spanStart, cutoff);
+      const en = Math.min(spanEnd, nowSec);
+      if (en <= s) continue;
+
+      // Time-in-state totals (clipped to window).
+      totals[e.state] += en - s;
+
+      // Concurrency bins. Bin k covers [cutoff + k*BIN_SEC, cutoff + (k+1)*BIN_SEC).
+      const startBin = Math.max(0, Math.floor((s - cutoff) / BIN_SEC));
+      const endBin   = Math.min(bins - 1, Math.floor((en - cutoff - 1e-6) / BIN_SEC));
+      const arr = e.state === 'working' ? tlWorking
+                : e.state === 'input'   ? tlInput
+                : tlIdle;
+      for (let b = startBin; b <= endBin; b++) arr[b] += 1;
+    }
+
+    // Latency: input → next event for same session.
+    for (let i = 0; i < evs.length - 1; i++) {
+      if (evs[i].state === 'input') latencies.push(evs[i + 1].ts - evs[i].ts);
+    }
+  }
+
+  // Right-now counters: latest non-end event per session, within recent window.
+  const nowCounts = { working: 0, input: 0, idle: 0 };
+  const nowCutoff = nowSec - NOW_RECENT_SEC;
+  for (const e of latest.values()) {
+    if (e.state === 'end') continue;
+    if (e.ts < nowCutoff) continue;
+    if (e.state in nowCounts) nowCounts[e.state] += 1;
+  }
+
+  let peak = 0;
+  for (const v of tlWorking) if (v > peak) peak = v;
+
+  let avgLat = null;
+  if (latencies.length > 0) {
+    avgLat = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+  }
+
+  return { totals, nowCounts, started, peak, avgLat, tlWorking, tlInput, tlIdle, bins, totalEvents: events.length };
+}
+
+function buildChart(labels, data) {
+  const ctx = document.getElementById('timeline').getContext('2d');
+  const css = getComputedStyle(document.documentElement);
+  const work = css.getPropertyValue('--accent-work').trim();
+  const wait = css.getPropertyValue('--accent-wait').trim();
+  const idle = css.getPropertyValue('--accent-idle').trim();
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Working',        data: data.tlWorking, borderColor: work, backgroundColor: work + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Awaiting input', data: data.tlInput,   borderColor: wait, backgroundColor: wait + '66', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Idle',           data: data.tlIdle,    borderColor: idle, backgroundColor: idle + '33', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: {
+          type: 'time',
+          time: { unit: 'hour', tooltipFormat: 'HH:mm', displayFormats: { hour: 'HH:mm' } },
+          grid: { display: false },
+          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
+        },
+        y: {
+          stacked: true,
+          beginAtZero: true,
+          ticks: { precision: 0, stepSize: 1 },
+          grid: { color: 'rgba(127,127,127,0.15)' }
+        }
+      },
+      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10, usePointStyle: true } } }
+    }
+  });
+}
+
+function buildLabels(nowSec) {
+  const cutoff = nowSec - WINDOW_SEC;
+  const bins = Math.floor(WINDOW_SEC / BIN_SEC);
+  const labels = new Array(bins);
+  for (let i = 0; i < bins; i++) {
+    labels[i] = new Date((cutoff + i * BIN_SEC) * 1000);
+  }
+  return labels;
+}
+
+function render(data, nowSec) {
+  const labels = buildLabels(nowSec);
+  if (!chart) chart = buildChart(labels, data);
+  else {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = data.tlWorking;
+    chart.data.datasets[1].data = data.tlInput;
+    chart.data.datasets[2].data = data.tlIdle;
+    chart.update('none');
+  }
+
+  document.getElementById('now-working').textContent = data.nowCounts.working;
+  document.getElementById('now-input').textContent   = data.nowCounts.input;
+  document.getElementById('now-idle').textContent    = data.nowCounts.idle;
+
+  document.getElementById('t-working').textContent = fmtDuration(data.totals.working);
+  document.getElementById('t-input').textContent   = fmtDuration(data.totals.input);
+  document.getElementById('t-idle').textContent    = fmtDuration(data.totals.idle);
+
+  document.getElementById('t-sessions').textContent = data.started;
+  document.getElementById('t-latency').textContent  = fmtLatency(data.avgLat);
+  document.getElementById('t-peak').textContent     = data.peak;
+}
+
+function showError(html, statusVariant) {
+  const el = document.getElementById('error');
+  el.style.display = '';
+  el.innerHTML = html;
+  const tick = document.getElementById('tick');
+  tick.classList.remove('stale', 'waiting');
+  tick.classList.add(statusVariant === 'waiting' ? 'waiting' : 'stale');
+  document.getElementById('status-text').textContent =
+    statusVariant === 'waiting' ? 'waiting for events' : 'unreachable';
+}
+
+function clearError() {
+  document.getElementById('error').style.display = 'none';
+  document.getElementById('tick').classList.remove('stale', 'waiting');
+  document.getElementById('status-text').textContent = 'live';
+}
+
+const SERVE_HINT = `
+  This dashboard reads <code>events.jsonl</code> from the same directory and
+  must be <strong>served over HTTP</strong>. Browsers block local-file fetches
+  when opened via <code>file://</code>.
+  <pre>cd ~/.claude/.ccg
+python3 -m http.server 8765</pre>
+  Then open <code>http://localhost:8765/dashboard.html</code>.`;
+
+async function tick() {
+  try {
+    const text = await fetchEvents();
+    const events = parseEvents(text);
+    const nowSec = Date.now() / 1000;
+    const data = compute(events, nowSec);
+    render(data, nowSec);
+    clearError();
+  } catch (e) {
+    const isFileScheme = location.protocol === 'file:';
+    let msg, variant = 'stale';
+    if (isFileScheme) {
+      msg = `<strong>The dashboard is open as a local file.</strong> ${SERVE_HINT}`;
+    } else if (e.code === 404) {
+      msg = `<strong>No events recorded yet.</strong> The dashboard will populate as Claude Code sessions transition state. The hook writes to <code>~/.claude/.ccg/events.jsonl</code> on every <code>SessionStart</code>, <code>UserPromptSubmit</code>, <code>Stop</code>, awaiting-input notification, and <code>SessionEnd</code>.`;
+      variant = 'waiting';
+    } else {
+      msg = `<strong>Cannot fetch <code>events.jsonl</code></strong> (${e.message}). ${SERVE_HINT}`;
+    }
+    showError(msg, variant);
+  }
+}
+
+tick();
+setInterval(tick, REFRESH_MS);
+</script>
+</body>
+</html>
