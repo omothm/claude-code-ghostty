@@ -70,6 +70,9 @@ A [SwiftBar](https://swiftbar.app/) plugin shows a menubar indicator for Claude 
    ```
 
 3. Launch SwiftBar (`open -a SwiftBar`). On first launch it opens a folder picker; select the directory you just created.
+
+   To start SwiftBar automatically at login: click the SwiftBar menubar icon → **SwiftBar** → **Preferences…** and check **Launch at login**.
+
 4. Copy the plugin:
 
    ```sh
