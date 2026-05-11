@@ -68,8 +68,26 @@ if [ "$status" != "query" ]; then
     input)   title="🔔 $base_title" ;;
     *)       title="$base_title" ;;
   esac
-  printf '\033]2;%s\007' "$title" > /dev/tty 2>/dev/null
-  __trace "title-set title=\"$title\""
+  # /dev/tty isn't available to hook subprocesses in newer Claude Code builds
+  # (no controlling terminal), so resolve the terminal device by walking up
+  # to the first ancestor attached to a TTY (typically the claude process).
+  tty_dev=""
+  pid=$PPID
+  for _ in 1 2 3 4 5; do
+    [ -n "$pid" ] && [ "$pid" != "0" ] || break
+    t=$(ps -p "$pid" -o tty= 2>/dev/null | tr -d ' ')
+    if [ -n "$t" ] && [ "$t" != "?" ] && [ "$t" != "??" ] && [ -w "/dev/$t" ]; then
+      tty_dev="/dev/$t"
+      break
+    fi
+    pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ')
+  done
+  if [ -n "$tty_dev" ]; then
+    printf '\033]2;%s\007' "$title" > "$tty_dev" 2>/dev/null
+    __trace "title-set title=\"$title\" dev=$tty_dev"
+  else
+    __trace "title-set skipped (no parent tty found)"
+  fi
 fi
 
 # Maintain the bell-state directory. The SwiftBar plugin reads this instead of

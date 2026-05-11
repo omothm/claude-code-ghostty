@@ -160,6 +160,38 @@ if [ "$line2" = "input" ]; then ok "state file line 2 = status"; else ng "state 
 rm -f "$BELL_STATE_DIR/$SID"
 
 # ---------------------------------------------------------------------------
+section "tab-title.sh title write to terminal"
+
+# Regression guard: Claude Code v2.1.139 spawns hook subprocesses without a
+# controlling terminal, so the historical `> /dev/tty` write fails with
+# ENXIO and the title silently never updates. The hook must instead resolve
+# a TTY by walking up the process tree to a parent that owns one (the
+# `claude` process). Verify (a) the trace records the resolved device path,
+# and (b) no "Device not configured" error leaks to stderr.
+
+export BELL_TRACE=1
+trace_reset
+tt_err=$(echo "{\"session_id\":\"tw-$$\"}" | "$HOOKS_DIR/tab-title.sh" idle 2>&1 >/dev/null)
+unset BELL_TRACE
+
+# Strip the legitimate first-line stdout (base_title) noise — only stderr matters here.
+echo "$tt_err" | grep -qi "device not configured" \
+  && ng "hook still writes /dev/tty (ENXIO leaked): $tt_err" \
+  || ok "no /dev/tty ENXIO error on hook invocation"
+
+if grep -qE 'title-set title=.* dev=/dev/' "$BELL_TRACE_LOG"; then
+  ok "title-set trace records resolved TTY device (parent walk found one)"
+elif grep -q 'title-set skipped (no parent tty found)' "$BELL_TRACE_LOG"; then
+  # Validator itself runs from a TTY, so its child (the hook) must find one
+  # via PPID. Skipping here would mask the very bug we're guarding against.
+  ng "hook reported no parent TTY despite validator running from a terminal"
+else
+  ng "no title-set trace entry produced (hook didn't reach the title-write branch)"
+fi
+
+rm -f "$BELL_STATE_DIR/tw-$$"
+
+# ---------------------------------------------------------------------------
 section "tab-title.sh refresh gating"
 
 export BELL_TRACE=1

@@ -165,14 +165,16 @@ visible display text. `param1=` retains the original 🔔-prefixed title for
 
 ## Validator
 
-`tests/validate.sh` runs ~99 checks covering: prerequisites, state-file
-lifecycle, refresh gating (fire vs skip), event-log dedup + JSON shape,
-`refresh-menubar.sh` gate paths, plugin output (SF Symbol + count, param1
-preservation, ` | ` → ` — ` swap, empty-dir hiding), dashboard-entry
-toggle (open/stop based on PID file, stale-PID handling, position after
-sessions), `dashboard-server.sh status` modes, stale-file sweep (hard age,
-grace protection, AX-verified prune, refresh-after-prune), `BELL_TRACE`
-toggle (off = 0 bytes, on = populated), and end-to-end `input`→state→plugin
+`tests/validate.sh` covers: prerequisites, state-file lifecycle,
+title-write to parent's TTY (regression guard against the no-controlling-
+terminal hook environment introduced in Claude Code 2.1.139), refresh
+gating (fire vs skip), event-log dedup + JSON shape, `refresh-menubar.sh`
+gate paths, plugin output (SF Symbol + count, param1 preservation,
+` | ` → ` — ` swap, empty-dir hiding), dashboard-entry toggle (open/stop
+based on PID file, stale-PID handling, position after sessions),
+`dashboard-server.sh status` modes, stale-file sweep (hard age, grace
+protection, AX-verified prune, refresh-after-prune), `BELL_TRACE` toggle
+(off = 0 bytes, on = populated), and end-to-end `input`→state→plugin
 latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches
