@@ -12,6 +12,7 @@
   --muted: rgba(0,0,0,0.55);
   --accent-work: #2e8b57;
   --accent-wait: #d4651a;
+  --accent-watch: #4a8bb8;
   --accent-idle: #888;
   --error-bg: #fff0ec;
   --error-fg: #7a2300;
@@ -24,6 +25,7 @@
     --muted: rgba(255,255,255,0.55);
     --accent-work: #4caf6a;
     --accent-wait: #f08540;
+    --accent-watch: #6ba8d4;
     --accent-idle: #888;
     --error-bg: #3a1810;
     --error-fg: #ffb89a;
@@ -66,7 +68,8 @@ h2 {
   70%  { box-shadow: 0 0 0 6px rgba(46,139,87,0); }
   100% { box-shadow: 0 0 0 0 rgba(46,139,87,0); }
 }
-.row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.row.row3 { grid-template-columns: repeat(3, 1fr); }
 .card {
   background: var(--card-bg);
   border-radius: 10px;
@@ -86,6 +89,7 @@ h2 {
 .card .sub { font-size: 11px; color: var(--muted); margin-top: 6px; }
 .card.work .value { color: var(--accent-work); }
 .card.wait .value { color: var(--accent-wait); }
+.card.watch .value { color: var(--accent-watch); }
 .card.idle .value { color: var(--accent-idle); }
 .chart-wrap {
   background: var(--card-bg);
@@ -136,6 +140,7 @@ h2 {
 <div class="row">
   <div class="card work"><div class="label">Working</div><div class="value" id="now-working">0</div><div class="sub">⏳ active sessions</div></div>
   <div class="card wait"><div class="label">Awaiting input</div><div class="value" id="now-input">0</div><div class="sub">🔔 blocked on you</div></div>
+  <div class="card watch"><div class="label">Watching</div><div class="value" id="now-watching">0</div><div class="sub">👀 idle but supervising</div></div>
   <div class="card idle"><div class="label">Idle</div><div class="value" id="now-idle">0</div><div class="sub">💤 between prompts</div></div>
 </div>
 
@@ -146,9 +151,10 @@ h2 {
 <div class="row">
   <div class="card work"><div class="label">Time working</div><div class="value" id="t-working">—</div><div class="sub">summed across sessions</div></div>
   <div class="card wait"><div class="label">Time awaiting you</div><div class="value" id="t-input">—</div><div class="sub">minimize this</div></div>
+  <div class="card watch"><div class="label">Time watching</div><div class="value" id="t-watching">—</div><div class="sub">supervising background work</div></div>
   <div class="card idle"><div class="label">Time idle</div><div class="value" id="t-idle">—</div><div class="sub">summed across sessions</div></div>
 </div>
-<div class="row" style="margin-top:12px;">
+<div class="row row3" style="margin-top:12px;">
   <div class="card"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
   <div class="card"><div class="label">Avg response latency</div><div class="value" id="t-latency">—</div><div class="sub">🔔 → next prompt</div></div>
   <div class="card"><div class="label">Peak concurrent working</div><div class="value" id="t-peak">0</div><div class="sub">max parallelism reached</div></div>
@@ -162,7 +168,7 @@ const WINDOW_SEC = 24 * 3600;
 const BIN_SEC = 5 * 60;            // 5-min bins → 288 points across 24h
 const TRAILING_CAP_SEC = 30 * 60;  // cap open-ended trailing spans at 30 min
 const NOW_RECENT_SEC = 30 * 60;    // a session counts as "right now" if its last event is ≤ 30 min old
-const STATES = ['working', 'input', 'idle'];
+const STATES = ['working', 'input', 'watching', 'idle'];
 
 let chart = null;
 
@@ -234,16 +240,17 @@ function compute(events, nowSec) {
     arr.push(e);
   }
 
-  const totals = { working: 0, input: 0, idle: 0 };
+  const totals = { working: 0, input: 0, watching: 0, idle: 0 };
   const latencies = [];
   let started = 0;
   const latest = new Map();
 
   // 5-min bin counters across the 24h window.
   const bins = Math.floor(WINDOW_SEC / BIN_SEC);
-  const tlWorking = new Array(bins).fill(0);
-  const tlInput   = new Array(bins).fill(0);
-  const tlIdle    = new Array(bins).fill(0);
+  const tlWorking  = new Array(bins).fill(0);
+  const tlInput    = new Array(bins).fill(0);
+  const tlWatching = new Array(bins).fill(0);
+  const tlIdle     = new Array(bins).fill(0);
 
   for (const [, evs] of sessions) {
     if (evs.length === 0) continue;
@@ -265,8 +272,9 @@ function compute(events, nowSec) {
       // Concurrency bins. Bin k covers [cutoff + k*BIN_SEC, cutoff + (k+1)*BIN_SEC).
       const startBin = Math.max(0, Math.floor((s - cutoff) / BIN_SEC));
       const endBin   = Math.min(bins - 1, Math.floor((en - cutoff - 1e-6) / BIN_SEC));
-      const arr = e.state === 'working' ? tlWorking
-                : e.state === 'input'   ? tlInput
+      const arr = e.state === 'working'  ? tlWorking
+                : e.state === 'input'    ? tlInput
+                : e.state === 'watching' ? tlWatching
                 : tlIdle;
       for (let b = startBin; b <= endBin; b++) arr[b] += 1;
     }
@@ -278,7 +286,7 @@ function compute(events, nowSec) {
   }
 
   // Right-now counters: latest non-end event per session, within recent window.
-  const nowCounts = { working: 0, input: 0, idle: 0 };
+  const nowCounts = { working: 0, input: 0, watching: 0, idle: 0 };
   const nowCutoff = nowSec - NOW_RECENT_SEC;
   for (const e of latest.values()) {
     if (e.state === 'end') continue;
@@ -294,23 +302,25 @@ function compute(events, nowSec) {
     avgLat = latencies.reduce((a, b) => a + b, 0) / latencies.length;
   }
 
-  return { totals, nowCounts, started, peak, avgLat, tlWorking, tlInput, tlIdle, bins, totalEvents: events.length };
+  return { totals, nowCounts, started, peak, avgLat, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
 }
 
 function buildChart(labels, data) {
   const ctx = document.getElementById('timeline').getContext('2d');
   const css = getComputedStyle(document.documentElement);
-  const work = css.getPropertyValue('--accent-work').trim();
-  const wait = css.getPropertyValue('--accent-wait').trim();
-  const idle = css.getPropertyValue('--accent-idle').trim();
+  const work  = css.getPropertyValue('--accent-work').trim();
+  const wait  = css.getPropertyValue('--accent-wait').trim();
+  const watch = css.getPropertyValue('--accent-watch').trim();
+  const idle  = css.getPropertyValue('--accent-idle').trim();
   return new Chart(ctx, {
     type: 'line',
     data: {
       labels,
       datasets: [
-        { label: 'Working',        data: data.tlWorking, borderColor: work, backgroundColor: work + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Awaiting input', data: data.tlInput,   borderColor: wait, backgroundColor: wait + '66', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Idle',           data: data.tlIdle,    borderColor: idle, backgroundColor: idle + '33', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Working',        data: data.tlWorking,  borderColor: work,  backgroundColor: work  + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Awaiting input', data: data.tlInput,    borderColor: wait,  backgroundColor: wait  + '66', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Watching',       data: data.tlWatching, borderColor: watch, backgroundColor: watch + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Idle',           data: data.tlIdle,     borderColor: idle,  backgroundColor: idle  + '33', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
       ]
     },
     options: {
@@ -354,17 +364,20 @@ function render(data, nowSec) {
     chart.data.labels = labels;
     chart.data.datasets[0].data = data.tlWorking;
     chart.data.datasets[1].data = data.tlInput;
-    chart.data.datasets[2].data = data.tlIdle;
+    chart.data.datasets[2].data = data.tlWatching;
+    chart.data.datasets[3].data = data.tlIdle;
     chart.update('none');
   }
 
-  document.getElementById('now-working').textContent = data.nowCounts.working;
-  document.getElementById('now-input').textContent   = data.nowCounts.input;
-  document.getElementById('now-idle').textContent    = data.nowCounts.idle;
+  document.getElementById('now-working').textContent  = data.nowCounts.working;
+  document.getElementById('now-input').textContent    = data.nowCounts.input;
+  document.getElementById('now-watching').textContent = data.nowCounts.watching;
+  document.getElementById('now-idle').textContent     = data.nowCounts.idle;
 
-  document.getElementById('t-working').textContent = fmtDuration(data.totals.working);
-  document.getElementById('t-input').textContent   = fmtDuration(data.totals.input);
-  document.getElementById('t-idle').textContent    = fmtDuration(data.totals.idle);
+  document.getElementById('t-working').textContent  = fmtDuration(data.totals.working);
+  document.getElementById('t-input').textContent    = fmtDuration(data.totals.input);
+  document.getElementById('t-watching').textContent = fmtDuration(data.totals.watching);
+  document.getElementById('t-idle').textContent     = fmtDuration(data.totals.idle);
 
   document.getElementById('t-sessions').textContent = data.started;
   document.getElementById('t-latency').textContent  = fmtLatency(data.avgLat);

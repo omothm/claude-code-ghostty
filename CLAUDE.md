@@ -17,15 +17,24 @@ After every change, verify the following in order:
 3. **Notification text** — does any user-visible string need updating?
 4. **README.md** — does the human-facing documentation still reflect the
    current install flow? (Architecture details don't belong there.)
-5. **Hook parity** — `settings.json` (project) and `~/.claude/settings.json`
+5. **Dashboard** — open `.ccg/dashboard.html` and inspect every place that
+   enumerates session states (the `STATES` constant, per-state arrays in
+   `compute()`, the "Right now" cards, the "Last 24 hours · totals"
+   cards, the chart datasets, the `render()` block). If the change adds
+   or renames a state, every one of those must be updated; if it adds a
+   new metric, decide whether the dashboard should surface it. Confirm
+   the dashboard still renders after deploying — `open ~/.claude/.ccg/dashboard.html`
+   through the running server (`hooks/dashboard-server.sh start`) and
+   check that the new state shows up in the chart and totals.
+6. **Hook parity** — `settings.json` (project) and `~/.claude/settings.json`
    (global) must define the same core hook events (`SessionStart`,
    `Notification`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `StopFailure`,
    `SessionEnd`) with identical matchers and commands. The global file may have
    additional hooks (`PreToolUse`/unfence, `SubagentStop`/agent-arena,
    `Stop`/sync-permissions) that are intentionally absent from the project
    file. Any change to a shared hook must be applied to **both** files.
-6. **Local deploy** — ask the user whether the change should be copied to
-   `~/.claude/hooks/` / `~/swiftbar/`.
+7. **Local deploy** — ask the user whether the change should be copied to
+   `~/.claude/hooks/` / `~/swiftbar/` / `~/.claude/.ccg/`.
 
 ## Architecture
 
@@ -244,6 +253,37 @@ Exit code = number of failures. **Every code change must keep this passing,
 and any new observable behavior must get a corresponding check.** If you
 can't express the new behavior as a validator check, push back on the
 change or lean on `BELL_TRACE` to make it observable first.
+
+## Picking SF Symbols
+
+When choosing an SF Symbol for the menubar (the SwiftBar plugin, status
+icons, dashboard entries — anything rendered with `sfimage=…` or `:name:`
+syntax), DEFAULT to rendering a temporary preview plugin so the user can
+see all candidates rendered live in their menubar before deciding. Do not
+ask the user to pick from a written list of names — SF Symbols don't read
+the same way in prose as they do at menubar size, and the visual will
+change the answer.
+
+The temp-plugin pattern:
+
+1. Drop a one-shot plugin into the SwiftBar dir with a name that sorts
+   AFTER the real plugin (e.g. `zzz-symbol-demo.5s.sh`) so the menubar
+   stays mostly normal.
+2. The plugin's title line should put every candidate side-by-side using
+   the `:name:` shorthand, e.g.
+   `echo "(picking) :eye: :binoculars: :waveform.path.ecg: :eye.circle: | font=.AppleSystemUIFontBold"`.
+3. The dropdown should list each candidate with `sfimage=<name>` and a
+   short description of when it'd fit, so the user can see each one
+   rendered at dropdown size too.
+4. Refresh SwiftBar (`open -g swiftbar://refreshallplugins`) and ask the
+   user to look at the menubar.
+5. AFTER the user picks, remove the demo plugin file (and any transient
+   state files you wrote to make a real state visible) and refresh again.
+
+Always offer at least 3–4 candidates including one that's a clear
+thematic fit and one that's deliberately different in style (filled vs
+outline, abstract vs literal), so the comparison is informative rather
+than confirming a single guess.
 
 ## Gotchas
 
