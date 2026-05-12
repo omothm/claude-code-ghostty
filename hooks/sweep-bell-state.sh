@@ -2,17 +2,24 @@
 # Sweep stale entries from ~/.claude/bell-state/.
 #
 # A state file becomes stale when the Claude session that wrote it ended
-# without firing the `idle` / `working` hook (process killed, Ghostty tab
-# closed mid-prompt, macOS reboot while awaiting input, etc.). Without
-# cleanup it lingers as a phantom dropdown entry.
+# without firing the `end` hook (process killed, Ghostty tab closed
+# mid-prompt, macOS reboot while awaiting input, etc.). Without cleanup it
+# lingers as a phantom dropdown entry.
 #
-# Two cleanup passes:
-#   1. Hard age cap (24h): deletes any file this old regardless of AX,
-#      so leftover state from a prior uptime gets cleared on next plugin run.
-#   2. AX verification (5 min grace period): deletes files whose title is
-#      not present in Ghostty's current tab tree. The grace period tolerates
-#      the macOS Accessibility API lag we observed (up to ~60s after an ANSI
-#      title write while Ghostty is backgrounded).
+# Cleanup is a single hard-age pass: any file older than 12h is deleted
+# unconditionally. The normal cleanup path is `tab-title.sh end` invoked
+# from the SessionEnd hook, which removes the state file the moment a
+# session exits cleanly — so this pass only matters for crashes and
+# similar irregular exits.
+#
+# History: a previous version of this script also ran an "AX-verified"
+# pass that queried Ghostty's tab tree via AppleScript and pruned any
+# state file whose title wasn't present in the result. The AppleScript
+# query intermittently returns partial tab lists (radio-button
+# enumeration races with Ghostty's own tab-bar redraws), and ~1% of
+# queries dropped multiple tabs. That made the pass spuriously delete
+# state files for sessions that were still alive, so the menubar would
+# silently lose idle sessions over time. The pass has been removed.
 #
 # Invoked by the SwiftBar plugin as a background process. Safe to run
 # standalone. No-op when the state dir is empty.
@@ -36,53 +43,16 @@ HOOKS_DIR="$(dirname "$0")"
 __trace "entry"
 pruned=0
 
-# Pass 1: hard age cap (24h).
+# Hard age cap (12h): delete any state file older than this unconditionally.
+# Anything still in the dir after 12h is almost certainly a phantom from a
+# session that didn't fire `end` — and even on the off chance it's a real
+# long-lived idle session, the next user interaction (UserPromptSubmit /
+# PostToolUse / Stop) re-creates the state file with the current state.
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   rm -f "$f" && pruned=$((pruned + 1))
   __trace "hard-expire: $f"
-done < <(find "$STATE_DIR" -type f -mmin +1440 2>/dev/null)
-
-# Pass 2: AX verification for files past the 5-min grace period. Skip
-# (conservatively) if AX returns empty — Ghostty isn't running, accessibility
-# permissions aren't granted, or a transient error. Better to leave a phantom
-# for one more cycle than wrongly nuke a live bell.
-ax_titles=$(osascript <<'AXEOF' 2>/dev/null
-set found to {}
-tell application "System Events"
-    if not (exists process "Ghostty") then return ""
-    tell process "Ghostty"
-        repeat with w in (every window)
-            try
-                set tabButtons to every radio button of tab group "tab bar" of w
-                repeat with btn in tabButtons
-                    set end of found to (name of btn)
-                end repeat
-            on error
-                try
-                    set end of found to (name of w)
-                end try
-            end try
-        end repeat
-    end tell
-end tell
-set text item delimiters of AppleScript to linefeed
-return found as text
-AXEOF
-)
-if [ -n "$ax_titles" ]; then
-  while IFS= read -r f; do
-    [ -z "$f" ] || [ ! -f "$f" ] && continue
-    title=$(head -n1 "$f" 2>/dev/null)
-    [ -z "$title" ] && continue
-    if ! printf '%s\n' "$ax_titles" | grep -qF -- "$title"; then
-      rm -f "$f" && pruned=$((pruned + 1))
-      __trace "ax-prune: $f (title=\"$title\" not present in Ghostty AX)"
-    fi
-  done < <(find "$STATE_DIR" -type f -mmin +5 2>/dev/null)
-else
-  __trace "ax empty — skipping AX pass (Ghostty not running, no permissions, or transient error)"
-fi
+done < <(find "$STATE_DIR" -type f -mmin +720 2>/dev/null)
 
 __trace "exit pruned=$pruned"
 

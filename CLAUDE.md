@@ -35,6 +35,11 @@ After every change, verify the following in order:
    file. Any change to a shared hook must be applied to **both** files.
 7. **Local deploy** — ask the user whether the change should be copied to
    `~/.claude/hooks/` / `~/swiftbar/` / `~/.claude/.ccg/`.
+8. **Commit and push** — every change ends with a commit and a push to
+   *all* configured remotes (this overrides the default "only commit
+   when explicitly asked" rule for this repo). Don't wait for the user
+   to ask. Remotes to push to are whatever `git remote` lists; today
+   that's `origin` and `trilogy`. Push to each one in sequence.
 
 ## Architecture
 
@@ -149,20 +154,24 @@ gets every transition. Sandbox via `CCG_EVENT_LOG` and
 
 ### Stale-state cleanup
 
-A session can end without firing `idle`/`working` — process killed, Ghostty
-tab closed mid-prompt, macOS reboot while awaiting input. Its state file
-would otherwise linger as a phantom dropdown entry. `sweep-bell-state.sh`
-handles this in two passes:
+A session can end without firing `end` — process killed, Ghostty tab
+closed mid-prompt, macOS reboot while the SessionEnd hook is mid-flight.
+Its state file would otherwise linger as a phantom dropdown entry.
+`sweep-bell-state.sh` handles this with a single hard-age pass: any state
+file older than 12 h is deleted unconditionally. The graceful path is the
+SessionEnd hook calling `tab-title.sh end`, which removes the file the
+moment a session exits cleanly; the sweep only matters for crashes and
+similar irregular exits.
 
-1. **Hard age cap (24 h)** — unconditional delete. Works even when Ghostty
-   isn't running and AX permissions are missing, so leftover state from a
-   prior uptime is cleared on the next plugin run.
-2. **AX-verified prune (5-min grace)** — for files past the grace period,
-   query Ghostty's tab tree via AppleScript and delete any state file whose
-   title isn't present. Grace period comfortably covers the AX lag above.
-   Conservatively skipped if AX returns empty (Ghostty not running, no
-   permission, transient error) — better to leave a phantom for one cycle
-   than wrongly nuke a live bell.
+An earlier version of the sweep also ran an "AX-verified" pass that
+queried Ghostty's tab tree via AppleScript and pruned any state file
+whose title was missing. We removed it because the AppleScript query
+races with Ghostty's own tab-bar redraws and intermittently returns
+partial tab lists (empirically, ~14% of queries omit a tab; ~1% omit
+multiple). That made the pass spuriously delete state files for live
+idle sessions, so the menubar would silently lose entries over time.
+The 12 h cap is the trade-off: phantoms can linger up to 12 h, but
+real sessions are never wrongly evicted.
 
 The sweep is dispatched in the background by the plugin after it emits
 output, so it never blocks menubar rendering. When it prunes anything, it
@@ -183,7 +192,7 @@ visible display text. `param1=` retains the original 🔔-prefixed title for
 | `hooks/notify.sh` | Sends `terminal-notifier`; skips if user is already on that tab; routes to `tab-title.sh` for title updates | `Notification`, `Stop` |
 | `hooks/focus-ghostty-tab.sh` | AppleScript to focus a Ghostty tab by title-contains match; works across windows and single-tab windows | Notification `-execute`, SwiftBar dropdown |
 | `hooks/refresh-menubar.sh` | `open -g swiftbar://refreshallplugins`; silent no-op if SwiftBar isn't installed | `tab-title.sh` on state change; `sweep-bell-state.sh` after pruning |
-| `hooks/sweep-bell-state.sh` | Prunes stale state files (hard-age + AX-verified) | Background job dispatched by the SwiftBar plugin after each run |
+| `hooks/sweep-bell-state.sh` | Prunes state files older than 12 h | Background job dispatched by the SwiftBar plugin after each run |
 | `hooks/dashboard-server.sh` | Manages the metrics-dashboard HTTP server (`start`/`stop`/`status`/`toggle`); writes `~/.claude/.ccg/server.pid` and opens browser on start | SwiftBar dropdown entry click |
 | `swiftbar/ghostty-bells.30s.sh` | Reads state dir, emits dropdown (sessions + dashboard entry), dispatches sweep in background | SwiftBar 30 s poll + push-refresh URL |
 | `.ccg/dashboard.html` | Single-file metrics dashboard; fetches `events.jsonl` over HTTP every second | Served via `python3 -m http.server` from `~/.claude/.ccg/` |
@@ -233,8 +242,8 @@ gating (fire vs skip), event-log dedup + JSON shape, `refresh-menubar.sh`
 gate paths, plugin output (SF Symbol + count, param1 preservation,
 ` | ` → ` — ` swap, empty-dir hiding), dashboard-entry toggle (open/stop
 based on PID file, stale-PID handling, position after sessions),
-`dashboard-server.sh status` modes, stale-file sweep (hard age, grace
-protection, AX-verified prune, refresh-after-prune), watching state
+`dashboard-server.sh status` modes, stale-file sweep (hard-age prune
+at 12 h, fresh files protected, refresh-after-prune), watching state
 (3-line state-file shape with claude PID on line 3, event log records
 `watching`, notifs mode suppresses the state file, plugin downgrades
 stale watching files to idle, `Watching` section ordered between

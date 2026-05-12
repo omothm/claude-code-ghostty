@@ -449,37 +449,36 @@ section "sweep-bell-state.sh"
 export BELL_STATE_DIR="$TMPROOT/sweep-state"
 mkdir -p "$BELL_STATE_DIR"
 
-# Hard-age: 25h-old file pruned unconditionally
+# Hard-age: 13h-old file pruned unconditionally (cap is 12h)
 write_sf "sH" "🔔 Claude Code | hard-aged (sH12345)"
-age_file "25 hours ago" "$BELL_STATE_DIR/sH"
+age_file "13 hours ago" "$BELL_STATE_DIR/sH"
 export BELL_TRACE=1; trace_reset
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
-if ! sf_exists "sH"; then ok "hard-age cap (24h) prunes"; else ng "hard-age did not prune"; fi
+if ! sf_exists "sH"; then ok "hard-age cap (12h) prunes"; else ng "hard-age did not prune"; fi
 grep -q "hard-expire" "$BELL_TRACE_LOG" && ok "sweep logs hard-expire" || ng "no hard-expire in trace"
 
-# Grace protects fresh file even with fake title
-write_sf "sF" "🔔 Claude Code | never-seen-by-ax (sFresh)"
+# Fresh file (no age manipulation) is protected from the hard-age cap.
+write_sf "sF" "🔔 Claude Code | fresh-survives-sweep (sFresh)"
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
-if sf_exists "sF"; then ok "grace period protects fresh files"; else ng "fresh file pruned — grace period failed"; fi
+if sf_exists "sF"; then ok "fresh file (< 12h) survives sweep"; else ng "fresh file pruned by hard-age cap"; fi
 rm -f "$BELL_STATE_DIR/sF"
 
-# AX-verified prune for past-grace files not in Ghostty
-ghostty_running=0
-osascript -e 'tell application "System Events" to return (exists process "Ghostty")' 2>/dev/null | grep -q true && ghostty_running=1
-if [ "$ghostty_running" = "1" ]; then
-  write_sf "sO" "🔔 Claude Code | never-seen-by-ax-orphan (sOrphan$(date +%s))"
-  age_file "6 minutes ago" "$BELL_STATE_DIR/sO"
-  trace_reset
-  "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
-  if ! sf_exists "sO"; then ok "AX prunes past-grace orphan"; else ng "AX did not prune past-grace orphan"; fi
-  grep -q "ax-prune" "$BELL_TRACE_LOG" && ok "sweep logs ax-prune" || ng "no ax-prune in trace"
-else
-  skip "AX-verified prune (Ghostty not running)"
-fi
+# Regression guard: the sweep must NOT prune based on Ghostty's tab tree.
+# A previous version queried AppleScript for live tab titles and deleted
+# state files whose titles weren't present, but the AX query races with
+# Ghostty's tab-bar redraws and intermittently returns partial lists,
+# which silently dropped live idle sessions from the menubar. The sweep
+# is now hard-age-only.
+write_sf "sN" "🔔 Claude Code | not-in-any-ax (sN-$(date +%s))"
+age_file "6 minutes ago" "$BELL_STATE_DIR/sN"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+if sf_exists "sN"; then ok "AX-verified prune is gone (past-grace file with absent title survives)"
+else ng "sweep deleted a file that's only past the old 5-min grace — AX prune re-introduced?"; fi
+rm -f "$BELL_STATE_DIR/sN"
 
 # Sweep fires refresh after pruning
 write_sf "sR" "🔔 Claude Code | sweep-refresh-trigger (sR)"
-age_file "25 hours ago" "$BELL_STATE_DIR/sR"
+age_file "13 hours ago" "$BELL_STATE_DIR/sR"
 trace_reset
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
 grep -q "refresh-menubar.sh" "$BELL_TRACE_LOG" && ok "sweep triggers refresh after pruning" || ng "sweep did not trigger refresh after pruning"
