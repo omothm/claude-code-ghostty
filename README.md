@@ -8,6 +8,7 @@ Each session's tab title encodes its state:
 
 - `⏳ Claude Code | …` — working
 - `🔔 Claude Code | …` — awaiting input
+- `👀 Claude Code | …` — idle, but a Claude-owned background task (a `Monitor` tool call or a `Bash(run_in_background)`) is still running
 - `Claude Code | <dir> (<shortID>)` — idle (or `Claude Code | <summary>` if `/rename`d)
 
 Notifications use `terminal-notifier` with an `-execute` script that finds and clicks the matching tab by partial title match, so it works across windows and tab reorders. Ghostty's native notifications are disabled to avoid duplicates.
@@ -90,10 +91,10 @@ A [SwiftBar](https://swiftbar.app/) plugin shows a menubar indicator for Claude 
 | `off` | Always hidden even if the plugin is installed |
 | `always-on` | Always visible; shows counts for all session states; emoji bell appears in header (yellow) when any session needs input |
 
-**`always-on` example** — when one session awaits input and two others are active:
+**`always-on` example** — when one session awaits input, one is working, one has a background monitor running, and one is idle:
 
 ```
-🔔 1 ⏳ 1 💤 1   ← bold numbers; emoji bell when any session awaits input
+🔔 1 ⏳ 1 👀 1 💤 1   ← bold numbers; emoji bell when any session awaits input
 ─────────────────────
 Awaiting input
   🔔 api-service (a1b2c3d4)
@@ -101,11 +102,14 @@ Awaiting input
 Working
   ⏳ frontend (e5f6a7b8)
 ─────────────────────
+Watching
+  👀 ci-tracker (b3c4d5e6)
+─────────────────────
 Idle
   💤 devtools (c9d0e1f2)
 ```
 
-When no sessions are awaiting input the header shows only `⏳ N 💤 N` (no bell). Clicking any entry focuses that Ghostty tab.
+When no sessions are awaiting input the header omits the bell (`⏳ N 👀 N 💤 N`). The `👀` count and section appear only when at least one idle session has a live background task; otherwise the watching count shows `0` and the section is hidden. Clicking any entry focuses that Ghostty tab.
 
 ### Configuration
 

@@ -75,11 +75,30 @@ _emit_dashboard_entry() {
 
 # Returns status for a state file, or empty string if the file is not a
 # recognised session state file (e.g. stray files in the state directory).
+#
+# For status=watching, line 3 holds the claude ancestor PID. If that PID is
+# either dead or no longer owns a Claude-bash-marker child process (the
+# Monitor / run_in_background process has exited), we downgrade to idle in
+# memory so the dropdown reflects reality without waiting for the next hook
+# firing (which may be far in the future — there's no hook for "monitor
+# exited while session is still idle").
 _file_status() {
   local f="$1"
   local st
   st=$(sed -n '2p' "$f" 2>/dev/null)
   case "$st" in
+    watching)
+      local cpid
+      cpid=$(sed -n '3p' "$f" 2>/dev/null | tr -d ' ')
+      if [ -n "$cpid" ] && kill -0 "$cpid" 2>/dev/null && \
+         [ "$(ps -axo ppid=,command= 2>/dev/null \
+                | awk -v p="$cpid" '$1 == p && /\/tmp\/claude-[0-9a-f]+-cwd/ { n++ } END { print n+0 }')" -gt 0 ]; then
+        printf 'watching'
+      else
+        printf 'idle'
+      fi
+      return
+      ;;
     input|working|idle) printf '%s' "$st"; return ;;
   esac
   # Backwards compat: infer from line-1 prefix for single-line state files.
@@ -88,6 +107,7 @@ _file_status() {
   case "$t" in
     "🔔 "*)            printf 'input'   ;;
     "⏳ "*)            printf 'working' ;;
+    "👀 "*)            printf 'watching' ;;
     "Claude Code | "*) printf 'idle'    ;;
     # Not a recognised state file — return empty so callers can skip it.
   esac
@@ -152,7 +172,7 @@ fi
 # always-on mode: show all sessions with counts; attention color on bell
 # -------------------------------------------------------------------------
 
-n_input=0; n_working=0; n_idle=0
+n_input=0; n_working=0; n_watching=0; n_idle=0
 any_files=0
 
 # First pass: count by status.
@@ -161,36 +181,44 @@ while IFS= read -r f; do
   [ -z "$st" ] && continue
   any_files=1
   case "$st" in
-    input)   n_input=$((n_input+1))   ;;
-    working) n_working=$((n_working+1)) ;;
-    *)       n_idle=$((n_idle+1))     ;;
+    input)    n_input=$((n_input+1))     ;;
+    working)  n_working=$((n_working+1)) ;;
+    watching) n_watching=$((n_watching+1)) ;;
+    *)        n_idle=$((n_idle+1))       ;;
   esac
 done < <(_read_state_files)
 
-if [ "$any_files" = "0" ] || [ $((n_input + n_working + n_idle)) -eq 0 ]; then
+if [ "$any_files" = "0" ] || [ $((n_input + n_working + n_watching + n_idle)) -eq 0 ]; then
   __trace "result=hidden (always-on zero sessions)"
   exit 0
 fi
 
-__trace "result=visible always-on input=$n_input working=$n_working idle=$n_idle"
+__trace "result=visible always-on input=$n_input working=$n_working watching=$n_watching idle=$n_idle"
 
 # When sessions are awaiting input, prepend the emoji bell (yellow) so it
 # stands out against the monochrome SF Symbol icons. When there are none,
 # omit the bell entirely — it would only ever show :bell:0 which is pointless.
+# The 👀 emoji sits between :hourglass: and :zzz: so the header reads in
+# the same order as the sections below (working → watching → idle).
 if [ "$n_input" -gt 0 ]; then
-  echo "🔔 ${n_input} :hourglass: ${n_working} :zzz: ${n_idle} | font=.AppleSystemUIFontBold"
+  echo "🔔 ${n_input} :hourglass: ${n_working} 👀 ${n_watching} :zzz: ${n_idle} | font=.AppleSystemUIFontBold"
 else
-  echo ":hourglass: ${n_working} :zzz: ${n_idle} | font=.AppleSystemUIFontBold"
+  echo ":hourglass: ${n_working} 👀 ${n_watching} :zzz: ${n_idle} | font=.AppleSystemUIFontBold"
 fi
 echo "---"
 
 # Second pass: collect entries by status group, then emit with section headers.
-input_entries=""; working_entries=""; idle_entries=""
+input_entries=""; working_entries=""; watching_entries=""; idle_entries=""
 while IFS= read -r f; do
   st=$(_file_status "$f")
   [ -z "$st" ] && continue
   title=$(head -n1 "$f" 2>/dev/null)
   [ -z "$title" ] && continue
+  # When _file_status downgraded a stale watching file, drop the 👀 prefix
+  # from the displayed title so the dropdown matches the section it lands in.
+  if [ "$st" = "idle" ]; then
+    title="${title#"👀 "}"
+  fi
   # Strip "Claude Code | " prefix and icon prefix.
   case "$title" in
     *"Claude Code | "*) dir_part="${title#*Claude Code | }" ;;
@@ -204,6 +232,9 @@ while IFS= read -r f; do
         "$display" "$FOCUS" "$title")"$'\n' ;;
     working)
       working_entries="${working_entries}$(printf '%s | sfimage=hourglass shell="%s" param1="%s" terminal=false' \
+        "$display" "$FOCUS" "$title")"$'\n' ;;
+    watching)
+      watching_entries="${watching_entries}$(printf '%s | sfimage=eye shell="%s" param1="%s" terminal=false' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     *)
       idle_entries="${idle_entries}$(printf '%s | sfimage=zzz shell="%s" param1="%s" terminal=false' \
@@ -221,6 +252,12 @@ if [ -n "$working_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
   echo "Working | size=11 color=gray"
   printf '%s' "$working_entries"
+  need_sep=1
+fi
+if [ -n "$watching_entries" ]; then
+  [ "$need_sep" = "1" ] && echo "---"
+  echo "Watching | size=11 color=gray"
+  printf '%s' "$watching_entries"
   need_sep=1
 fi
 if [ -n "$idle_entries" ]; then

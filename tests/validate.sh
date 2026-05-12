@@ -52,6 +52,13 @@ export BELL_TRACE_LOG="$TMPROOT/trace.log"
 export BELL_CONFIG="$TMPROOT/bell-config"
 export CCG_EVENT_LOG="$TMPROOT/events.jsonl"
 export CCG_SESSION_STATE_DIR="$TMPROOT/sessions"
+# The validator typically runs INSIDE a live Claude Code session, whose
+# claude process has live Monitor descendants. Without an override, every
+# `idle` test would walk up the process tree, find that claude, and upgrade
+# to `watching` — breaking unrelated tests. Pin CCG_CLAUDE_PID to a dead
+# PID so the upgrade path is disabled by default; the watching section
+# overrides it explicitly per-test to a controlled PID we own.
+export CCG_CLAUDE_PID=999999
 mkdir -p "$BELL_STATE_DIR" "$CCG_SESSION_STATE_DIR"
 touch "$BELL_TRACE_LOG"
 # Start with an empty (notifs-default) config.
@@ -72,10 +79,15 @@ ng()      { FAIL=$((FAIL+1)); printf '  %s✗%s %s\n' "$C_NG" "$C_R" "$*"; retur
 skip()    { SKIP=$((SKIP+1)); [ "$VERBOSE" -eq 1 ] && printf '  %s·%s %s %s(skipped)%s\n' "$C_SK" "$C_R" "$*" "$C_SK" "$C_R"; return 0; }
 section() { printf '\n%s==>%s %s%s%s\n' "$C_B" "$C_R" "$C_B" "$*" "$C_R"; }
 
+FAKE_MONITOR_PIDS=""
 cleanup() {
+  # Kill any fake-monitor sleep processes the watching section may have spawned.
+  for _fp in $FAKE_MONITOR_PIDS; do
+    kill "$_fp" 2>/dev/null
+  done
   rm -rf "$TMPROOT"
   unset BELL_STATE_DIR BELL_TRACE BELL_TRACE_LOG BELL_CONFIG GHOSTTY_HOOKS_DIR \
-        CCG_EVENT_LOG CCG_SESSION_STATE_DIR
+        CCG_EVENT_LOG CCG_SESSION_STATE_DIR CCG_CLAUDE_PID
 }
 trap cleanup EXIT
 
@@ -472,6 +484,195 @@ trace_reset
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
 grep -q "refresh-menubar.sh" "$BELL_TRACE_LOG" && ok "sweep triggers refresh after pruning" || ng "sweep did not trigger refresh after pruning"
 unset BELL_TRACE
+
+# Restore to the canonical sandbox state-dir for the remaining sections.
+export BELL_STATE_DIR="$TMPROOT/state"
+mkdir -p "$BELL_STATE_DIR"
+
+# ---------------------------------------------------------------------------
+section "watching state (idle + live Claude-owned monitor)"
+
+# Reset the event log and per-session state so this section's counts are
+# independent of earlier sections.
+: > "$CCG_EVENT_LOG"
+rm -rf "$CCG_SESSION_STATE_DIR"
+mkdir -p "$CCG_SESSION_STATE_DIR"
+
+# Spawn a fake "monitor" — a child of THIS validator process whose argv
+# contains the same /tmp/claude-<hex>-cwd marker Claude Code emits for its
+# bash-tool wrapper. exec -a rewrites argv[0] so ps -o command= sees the
+# marker, which is what tab-title.sh and the plugin grep for. The marker
+# hex must be all [0-9a-f] — `fakebeef` works because every char is hex;
+# anything like `fake1234` would also pass the regex.
+(exec -a "_fake-mon /tmp/claude-deef-cwd live" sleep 60) &
+FAKE_MON_PID=$!
+FAKE_MONITOR_PIDS="$FAKE_MONITOR_PIDS $FAKE_MON_PID"
+sleep 0.2
+
+# Confirm the marker process is visible to ps under our PID. If this fails
+# the rest of the section is meaningless (exec -a may have been intercepted
+# by some shell quirk), so we ng + skip.
+ps_seen=$(ps -axo ppid=,command= 2>/dev/null \
+  | awk -v p="$$" '$1 == p && /\/tmp\/claude-[0-9a-f]+-cwd/ { n++ } END { print n+0 }')
+if [ "$ps_seen" -gt 0 ]; then
+  ok "fake monitor visible under validator PID (ps awk count = $ps_seen)"
+
+  # always-on so we can observe the state file.
+  printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+
+  # Pipeline-aware hook invoker. `VAR=x cmd1 | cmd2` only exports VAR to
+  # cmd1, so we have to set CCG_CLAUDE_PID inside a subshell that owns both
+  # ends of the pipe.
+  _run_hook_with_cpid() {
+    local cpid="$1" status="$2" sid="$3"
+    ( export CCG_CLAUDE_PID="$cpid"
+      printf '{"session_id":"%s"}\n' "$sid" | "$HOOKS_DIR/tab-title.sh" "$status" > /dev/null 2>&1 )
+  }
+
+  # 1. idle + live monitor + CCG_CLAUDE_PID override → upgrades to watching.
+  WSID="wA-$$"
+  _run_hook_with_cpid "$$" idle "$WSID"
+  if sf_exists "$WSID"; then ok "watching: state file written"; else ng "watching: no state file"; fi
+  line1=$(sed -n '1p' "$BELL_STATE_DIR/$WSID" 2>/dev/null)
+  line2=$(sed -n '2p' "$BELL_STATE_DIR/$WSID" 2>/dev/null)
+  line3=$(sed -n '3p' "$BELL_STATE_DIR/$WSID" 2>/dev/null)
+  case "$line1" in "👀 "*) ok "watching: state file line 1 has 👀 prefix" ;; *) ng "watching: line 1 missing 👀: $line1" ;; esac
+  [ "$line2" = "watching" ] && ok "watching: state file line 2 = 'watching'" || ng "watching: line 2 wrong (got '$line2')"
+  [ "$line3" = "$$" ] && ok "watching: state file line 3 = validator PID" || ng "watching: line 3 wrong (got '$line3', expected '$$')"
+
+  # 2. Event log records the watching transition (not idle).
+  last_state=$(jq -r --arg sid "$WSID" 'select(.session_id == $sid) | .state' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
+  [ "$last_state" = "watching" ] && ok "watching: event log state == 'watching'" || ng "watching: event log state wrong (got '$last_state')"
+
+  # 3. Per-session logical-state file uses 'watching' so a repeat idle
+  #    transition with the monitor still alive doesn't re-log.
+  events_before=$(jq -rc --arg sid "$WSID" 'select(.session_id == $sid)' "$CCG_EVENT_LOG" 2>/dev/null | wc -l | tr -d ' ')
+  _run_hook_with_cpid "$$" idle "$WSID"
+  events_after=$(jq -rc --arg sid "$WSID" 'select(.session_id == $sid)' "$CCG_EVENT_LOG" 2>/dev/null | wc -l | tr -d ' ')
+  [ "$events_before" = "$events_after" ] && ok "watching: repeat idle with same monitor does not duplicate event" \
+    || ng "watching: repeat idle re-logged (before=$events_before after=$events_after)"
+
+  rm -f "$BELL_STATE_DIR/$WSID"
+
+  # 4. idle WITHOUT a monitor → plain idle (override at a PID with no marker
+  #    children; the global default CCG_CLAUDE_PID=999999 already does this,
+  #    but we make the test explicit by pointing at PID 1).
+  ISID="iA-$$"
+  _run_hook_with_cpid 1 idle "$ISID"
+  line2=$(sed -n '2p' "$BELL_STATE_DIR/$ISID" 2>/dev/null)
+  line3=$(sed -n '3p' "$BELL_STATE_DIR/$ISID" 2>/dev/null)
+  [ "$line2" = "idle" ] && ok "no-monitor idle: line 2 = 'idle'" || ng "no-monitor idle: line 2 wrong (got '$line2')"
+  [ -z "$line3" ] && ok "no-monitor idle: no line 3 (claude_pid only stored for watching)" \
+    || ng "no-monitor idle: spurious line 3 = '$line3'"
+
+  last_state=$(jq -r --arg sid "$ISID" 'select(.session_id == $sid) | .state' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
+  [ "$last_state" = "idle" ] && ok "no-monitor idle: event log state == 'idle'" || ng "no-monitor idle: event state wrong (got '$last_state')"
+  rm -f "$BELL_STATE_DIR/$ISID"
+
+  # 5. notifs mode: watching does NOT write a state file (watching is a
+  #    refinement of idle, and idle is invisible in notifs mode).
+  : > "$BELL_CONFIG"  # empty → notifs default
+  NSID="nA-$$"
+  _run_hook_with_cpid "$$" idle "$NSID"
+  if ! sf_exists "$NSID"; then ok "notifs mode: watching writes no state file (idle-equivalent)"
+  else ng "notifs mode: watching wrote a state file"; fi
+  # Event log still records the watching transition (events are mode-independent).
+  last_state=$(jq -r --arg sid "$NSID" 'select(.session_id == $sid) | .state' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
+  [ "$last_state" = "watching" ] && ok "notifs mode: event log still records watching" || ng "notifs mode: event state wrong (got '$last_state')"
+
+  # 6. Plugin output (always-on): watching session shows up under its own
+  #    section, positioned between Working and Idle, with the 👀 emoji in
+  #    the header count and sfimage=eye on the entry. Stale watching files
+  #    (claude_pid alive but no marker child OR claude_pid dead) are
+  #    downgraded to idle so the dropdown reflects current reality.
+  if [ "$plugin" = "1" ]; then
+    printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+    rm -f "$BELL_STATE_DIR"/*
+
+    # One live watching file (line 3 = $$, which has the fake-mon child).
+    printf '👀 Claude Code | live-watch (lW1)\nwatching\n%s\n' "$$" > "$BELL_STATE_DIR/lW1"
+    # One stale watching file (line 3 = dead PID 999999).
+    printf '👀 Claude Code | stale-watch (sW1)\nwatching\n999999\n'  > "$BELL_STATE_DIR/sW1"
+    # One working + one idle so we can verify section order.
+    printf '⏳ Claude Code | working-sess (wK1)\nworking\n'          > "$BELL_STATE_DIR/wK1"
+    printf 'Claude Code | idle-sess (iD1)\nidle\n'                    > "$BELL_STATE_DIR/iD1"
+
+    out=$(BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+
+    # Header includes the 👀 count == 1 (only the live watching file).
+    echo "$out" | head -n1 | grep -q '👀 1' \
+      && ok "plugin: always-on header includes '👀 1'" \
+      || ng "plugin: header missing '👀 1': $(echo "$out" | head -n1)"
+
+    # Header :zzz: count == 2 (idle-sess + downgraded stale-watch).
+    echo "$out" | head -n1 | grep -q ':zzz: 2' \
+      && ok "plugin: stale watching counts toward :zzz:" \
+      || ng "plugin: :zzz: count wrong: $(echo "$out" | head -n1)"
+
+    # Section "Watching" present with the live entry.
+    echo "$out" | grep -q '^Watching | size=11' \
+      && ok "plugin: 'Watching' section header emitted" \
+      || ng "plugin: 'Watching' section header missing"
+    echo "$out" | grep -q 'live-watch.*sfimage=eye' \
+      && ok "plugin: live watching entry uses sfimage=eye" \
+      || ng "plugin: live watching entry missing sfimage=eye"
+
+    # Stale watching demoted into the Idle section, 👀 prefix stripped from
+    # the display path (param1 is read by focus-ghostty-tab.sh — the actual
+    # tab title still has 👀 until the next hook firing, so we don't rewrite
+    # the file, just the display).
+    echo "$out" | grep -q 'stale-watch.*sfimage=zzz' \
+      && ok "plugin: stale watching downgrades to sfimage=zzz" \
+      || ng "plugin: stale watching not downgraded: $out"
+
+    # Section order: Working appears before Watching appears before Idle.
+    working_line=$(echo "$out" | grep -n '^Working | size=11' | head -n1 | cut -d: -f1)
+    watching_line=$(echo "$out" | grep -n '^Watching | size=11' | head -n1 | cut -d: -f1)
+    idle_line=$(echo "$out" | grep -n '^Idle | size=11' | head -n1 | cut -d: -f1)
+    if [ -n "$working_line" ] && [ -n "$watching_line" ] && [ -n "$idle_line" ] \
+       && [ "$working_line" -lt "$watching_line" ] \
+       && [ "$watching_line" -lt "$idle_line" ]; then
+      ok "plugin: section order is Working → Watching → Idle"
+    else
+      ng "plugin: section order wrong (working=$working_line watching=$watching_line idle=$idle_line)"
+    fi
+
+    # Watching count zero → emoji still present with '0' (consistent with
+    # how :hourglass: and :zzz: render zero counts in always-on).
+    rm -f "$BELL_STATE_DIR/lW1" "$BELL_STATE_DIR/sW1"
+    out2=$(BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+    echo "$out2" | head -n1 | grep -q '👀 0' \
+      && ok "plugin: header shows '👀 0' when no watching sessions" \
+      || ng "plugin: header should show '👀 0' but doesn't: $(echo "$out2" | head -n1)"
+    # And no 'Watching' section is emitted when count is zero.
+    echo "$out2" | grep -qv '^Watching | size=11' \
+      && ok "plugin: 'Watching' section suppressed when count is 0" \
+      || ng "plugin: 'Watching' section present despite zero count"
+
+    rm -f "$BELL_STATE_DIR/wK1" "$BELL_STATE_DIR/iD1"
+  else
+    skip "plugin: watching display tests"
+  fi
+else
+  ng "fake monitor not detectable via ps (exec -a may have failed) — skipping watching tests"
+  skip "watching: state-file shape"
+  skip "watching: event log"
+  skip "watching: repeat idle dedup"
+  skip "no-monitor idle"
+  skip "notifs mode watching"
+  skip "plugin watching display"
+fi
+
+# Tidy up the fake monitor (cleanup trap also handles this).
+kill $FAKE_MON_PID 2>/dev/null
+wait $FAKE_MON_PID 2>/dev/null
+# Restore the dead-PID default so subsequent sections don't accidentally
+# upgrade their idle tests to watching by walking up to the real claude
+# process the validator is running under.
+export CCG_CLAUDE_PID=999999
+
+# Restore to notifs default for the remaining sections.
+: > "$BELL_CONFIG"
 
 # ---------------------------------------------------------------------------
 section "Mode=off"

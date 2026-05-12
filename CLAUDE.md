@@ -32,11 +32,16 @@ After every change, verify the following in order:
 Four layers cooperate:
 
 1. **Tab title (ANSI)** — `tab-title.sh` writes `⏳ Claude Code | …`,
-   `🔔 Claude Code | …`, or the base title (no prefix) via
-   `\033]2;<title>\007`. Primary user-visible signal.
+   `🔔 Claude Code | …`, `👀 Claude Code | …` (idle session with a live
+   Claude-owned monitor — see "Watching state" below), or the base title
+   (no prefix) via `\033]2;<title>\007`. Primary user-visible signal.
 2. **State files** — `tab-title.sh` also maintains one file per bell-state
-   session at `~/.claude/bell-state/<session_id>`, containing the 🔔-prefixed
-   title. The SwiftBar plugin reads this directory as its source of truth.
+   session at `~/.claude/bell-state/<session_id>`. The SwiftBar plugin
+   reads this directory as its source of truth. Format:
+   - Line 1: full tab title with icon prefix
+   - Line 2: status string (`input` | `working` | `watching` | `idle`)
+   - Line 3: only present for `watching` — the claude ancestor PID, used
+     by the plugin to verify the monitor is still alive on each poll.
 3. **Push refresh** — on actual state transitions, `refresh-menubar.sh` fires
    `open -g swiftbar://refreshallplugins` so SwiftBar re-runs the plugin
    within a few hundred ms. The plugin's filename-encoded 30 s poll is a
@@ -64,6 +69,42 @@ The plugin filename encodes its poll interval (`.30s.sh`), and users may
 rename it (e.g. `.1m.sh`). `refreshallplugins` is resilient to that. The
 externality (other SwiftBar plugins re-run) is negligible because we only
 trigger on bell transitions — typically a few times a minute at most.
+
+### Watching state
+
+A session in `idle` state is upgraded to `watching` when the `claude`
+ancestor process still has at least one live child whose command line
+contains the `/tmp/claude-<hex>-cwd` marker. That marker is emitted by
+Claude Code's bash-tool wrapper, so it's present on synchronous Bash
+calls, `Bash(run_in_background: true)` shells, and the `Monitor` tool's
+long-running background command. Synchronous calls exit in seconds, so
+any match while the session has reported idle is a live Monitor or
+background bash — work the user should "keep an eye on."
+
+Detection happens entirely in `tab-title.sh`'s `idle` branch:
+
+1. Walk up from `$PPID` (max 8 hops) looking for a process whose `comm`
+   is `claude`. The hook's invocation chain is usually `claude → shell →
+   tab-title.sh`, so this lands in 1–2 hops. The `CCG_CLAUDE_PID` env
+   var short-circuits the walk (used by the validator to point at a PID
+   it owns).
+2. Run `ps -axo ppid=,command=` and awk-count immediate children of that
+   PID whose command matches `/\/tmp\/claude-[0-9a-f]+-cwd/`.
+3. If the count is >0, treat the effective status as `watching` for
+   title, state file, and event log.
+
+Stale watching is handled in the plugin, not the hook: when the plugin
+reads a `watching` state file it `kill -0`s line 3 (the claude PID) and
+re-runs the awk count, downgrading to `idle` in memory if either check
+fails. This lets a session reflect a monitor that exited *after* `Stop`
+fired — there's no hook for that transition, so polling on each plugin
+run is the only way the dropdown can stay honest.
+
+Sub-agent (`Task` tool) monitors are not detected — they're children of
+a *sub-agent* claude PID, not the main session's. If you need to extend
+this, change `_count_live_monitors` to a transitive descendant walk.
+Immediate children covers Monitor and `run_in_background` for the main
+session, which is the common case.
 
 ### Refresh gating
 
@@ -155,6 +196,13 @@ visible display text. `param1=` retains the original 🔔-prefixed title for
 - **`CCG_SESSION_STATE_DIR`** — override the per-session logical-state
   directory used for event-log dedup (default `~/.claude/.ccg/sessions`).
   The validator uses this to sandbox.
+- **`CCG_CLAUDE_PID`** — short-circuit the watching-detection walk in
+  `tab-title.sh`. When set, `_find_claude_pid` returns this value
+  immediately instead of walking up from `$PPID` looking for a `claude`
+  ancestor. The validator sets it to `999999` (a dead PID) globally so
+  no test accidentally walks up to the real claude process the validator
+  is running under, and overrides it per-test in the watching section.
+  Not used in production hook invocations.
 - **`CCG_DIR`** — override the dashboard-server's working directory
   (default `~/.claude/.ccg`). Determines where the PID file and server
   log live, and the directory `python3 -m http.server` serves.
@@ -173,9 +221,12 @@ gate paths, plugin output (SF Symbol + count, param1 preservation,
 ` | ` → ` — ` swap, empty-dir hiding), dashboard-entry toggle (open/stop
 based on PID file, stale-PID handling, position after sessions),
 `dashboard-server.sh status` modes, stale-file sweep (hard age, grace
-protection, AX-verified prune, refresh-after-prune), `BELL_TRACE` toggle
-(off = 0 bytes, on = populated), and end-to-end `input`→state→plugin
-latency.
+protection, AX-verified prune, refresh-after-prune), watching state
+(3-line state-file shape with claude PID on line 3, event log records
+`watching`, notifs mode suppresses the state file, plugin downgrades
+stale watching files to idle, `Watching` section ordered between
+`Working` and `Idle`), `BELL_TRACE` toggle (off = 0 bytes, on =
+populated), and end-to-end `input`→state→plugin latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches
 real session state.
