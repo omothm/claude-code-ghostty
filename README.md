@@ -94,7 +94,7 @@ A [SwiftBar](https://swiftbar.app/) plugin shows a menubar indicator for Claude 
 **`always-on` example** — when one session awaits input, one is working, one has a background monitor running, and one is idle:
 
 ```
-🔔 1 ⏳ 1 👀 1 💤 1   ← bold numbers; emoji bell when any session awaits input
+🔔 1 ⏳ 1 🔭 1 💤 1   ← bold numbers; emoji bell when any session awaits input
 ─────────────────────
 Awaiting input
   🔔 api-service (a1b2c3d4)
@@ -103,13 +103,13 @@ Working
   ⏳ frontend (e5f6a7b8)
 ─────────────────────
 Watching
-  👀 ci-tracker (b3c4d5e6)
+  🔭 ci-tracker (b3c4d5e6)
 ─────────────────────
 Idle
   💤 devtools (c9d0e1f2)
 ```
 
-When no sessions are awaiting input the header omits the bell (`⏳ N 👀 N 💤 N`). The `👀` count and section appear only when at least one idle session has a live background task; otherwise the watching count shows `0` and the section is hidden. Clicking any entry focuses that Ghostty tab.
+(The 🔭 above is a placeholder for the SF Symbol `binoculars`, which is rendered live in the menubar.) When no sessions are awaiting input the header omits the bell (`⏳ N 💤 N` or `⏳ N 🔭 N 💤 N`). The binoculars count and "Watching" section appear only when at least one idle session has a live background task; otherwise both are hidden. Clicking any entry focuses that Ghostty tab.
 
 ### Configuration
 

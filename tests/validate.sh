@@ -582,7 +582,7 @@ if [ "$ps_seen" -gt 0 ]; then
 
   # 6. Plugin output (always-on): watching session shows up under its own
   #    section, positioned between Working and Idle, with the 👀 emoji in
-  #    the header count and sfimage=eye on the entry. Stale watching files
+  #    the header count and sfimage=binoculars on the entry. Stale watching files
   #    (claude_pid alive but no marker child OR claude_pid dead) are
   #    downgraded to idle so the dropdown reflects current reality.
   if [ "$plugin" = "1" ]; then
@@ -599,10 +599,12 @@ if [ "$ps_seen" -gt 0 ]; then
 
     out=$(BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
 
-    # Header includes the 👀 count == 1 (only the live watching file).
-    echo "$out" | head -n1 | grep -q '👀 1' \
-      && ok "plugin: always-on header includes '👀 1'" \
-      || ng "plugin: header missing '👀 1': $(echo "$out" | head -n1)"
+    # Header includes the :binoculars: count == 1 (only the live watching file).
+    # The segment is shown only when count > 0 (otherwise it would clutter
+    # the menubar — watching is rare).
+    echo "$out" | head -n1 | grep -q ':binoculars: 1' \
+      && ok "plugin: always-on header includes ':binoculars: 1'" \
+      || ng "plugin: header missing ':binoculars: 1': $(echo "$out" | head -n1)"
 
     # Header :zzz: count == 2 (idle-sess + downgraded stale-watch).
     echo "$out" | head -n1 | grep -q ':zzz: 2' \
@@ -613,9 +615,9 @@ if [ "$ps_seen" -gt 0 ]; then
     echo "$out" | grep -q '^Watching | size=11' \
       && ok "plugin: 'Watching' section header emitted" \
       || ng "plugin: 'Watching' section header missing"
-    echo "$out" | grep -q 'live-watch.*sfimage=eye' \
-      && ok "plugin: live watching entry uses sfimage=eye" \
-      || ng "plugin: live watching entry missing sfimage=eye"
+    echo "$out" | grep -q 'live-watch.*sfimage=binoculars' \
+      && ok "plugin: live watching entry uses sfimage=binoculars" \
+      || ng "plugin: live watching entry missing sfimage=binoculars"
 
     # Stale watching demoted into the Idle section, 👀 prefix stripped from
     # the display path (param1 is read by focus-ghostty-tab.sh — the actual
@@ -637,13 +639,20 @@ if [ "$ps_seen" -gt 0 ]; then
       ng "plugin: section order wrong (working=$working_line watching=$watching_line idle=$idle_line)"
     fi
 
-    # Watching count zero → emoji still present with '0' (consistent with
-    # how :hourglass: and :zzz: render zero counts in always-on).
+    # Watching count zero → the :binoculars: segment must be entirely absent from
+    # the header (the same hide-when-zero behavior the 🔔 segment has).
     rm -f "$BELL_STATE_DIR/lW1" "$BELL_STATE_DIR/sW1"
     out2=$(BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
-    echo "$out2" | head -n1 | grep -q '👀 0' \
-      && ok "plugin: header shows '👀 0' when no watching sessions" \
-      || ng "plugin: header should show '👀 0' but doesn't: $(echo "$out2" | head -n1)"
+    echo "$out2" | head -n1 | grep -qv ':binoculars:' \
+      && ok "plugin: ':binoculars:' segment hidden when watching count is 0" \
+      || ng "plugin: ':binoculars:' segment shown despite zero count: $(echo "$out2" | head -n1)"
+    # Sanity: the other always-shown segments are still there.
+    echo "$out2" | head -n1 | grep -q ':hourglass:' \
+      && ok "plugin: ':hourglass:' segment still shown alongside" \
+      || ng "plugin: ':hourglass:' segment missing: $(echo "$out2" | head -n1)"
+    echo "$out2" | head -n1 | grep -q ':zzz:' \
+      && ok "plugin: ':zzz:' segment still shown alongside" \
+      || ng "plugin: ':zzz:' segment missing: $(echo "$out2" | head -n1)"
     # And no 'Watching' section is emitted when count is zero.
     echo "$out2" | grep -qv '^Watching | size=11' \
       && ok "plugin: 'Watching' section suppressed when count is 0" \

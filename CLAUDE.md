@@ -35,6 +35,10 @@ Four layers cooperate:
    `🔔 Claude Code | …`, `👀 Claude Code | …` (idle session with a live
    Claude-owned monitor — see "Watching state" below), or the base title
    (no prefix) via `\033]2;<title>\007`. Primary user-visible signal.
+   The menubar plugin uses the `binoculars` SF Symbol for the same state
+   (SF Symbols render better than emojis at menubar height); the tab
+   title keeps the 👀 emoji because terminal ANSI titles render emojis
+   reliably across UIs but can't reference SF Symbols.
 2. **State files** — `tab-title.sh` also maintains one file per bell-state
    session at `~/.claude/bell-state/<session_id>`. The SwiftBar plugin
    reads this directory as its source of truth. Format:

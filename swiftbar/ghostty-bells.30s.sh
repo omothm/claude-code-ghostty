@@ -195,16 +195,21 @@ fi
 
 __trace "result=visible always-on input=$n_input working=$n_working watching=$n_watching idle=$n_idle"
 
-# When sessions are awaiting input, prepend the emoji bell (yellow) so it
-# stands out against the monochrome SF Symbol icons. When there are none,
-# omit the bell entirely — it would only ever show :bell:0 which is pointless.
-# The 👀 emoji sits between :hourglass: and :zzz: so the header reads in
-# the same order as the sections below (working → watching → idle).
-if [ "$n_input" -gt 0 ]; then
-  echo "🔔 ${n_input} :hourglass: ${n_working} 👀 ${n_watching} :zzz: ${n_idle} | font=.AppleSystemUIFontBold"
-else
-  echo ":hourglass: ${n_working} 👀 ${n_watching} :zzz: ${n_idle} | font=.AppleSystemUIFontBold"
-fi
+# Header segments:
+#   - 🔔 (emoji): only when input > 0 — input is yellow attention; "0" would
+#     just be noise. The emoji also stands out against the monochrome SF
+#     Symbols, which is the point.
+#   - :hourglass: + :zzz: (SF Symbols): always shown, "working" and "idle"
+#     are the steady-state baselines.
+#   - :binoculars:  (SF Symbol): only when watching > 0. Watching is rare enough
+#     that ":binoculars: 0" would just clutter the menubar most of the time. The
+#     section below the separator only renders when count > 0 too.
+header=""
+[ "$n_input" -gt 0 ] && header="🔔 ${n_input} "
+header="${header}:hourglass: ${n_working} "
+[ "$n_watching" -gt 0 ] && header="${header}:binoculars: ${n_watching} "
+header="${header}:zzz: ${n_idle}"
+echo "${header} | font=.AppleSystemUIFontBold"
 echo "---"
 
 # Second pass: collect entries by status group, then emit with section headers.
@@ -234,7 +239,7 @@ while IFS= read -r f; do
       working_entries="${working_entries}$(printf '%s | sfimage=hourglass shell="%s" param1="%s" terminal=false' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     watching)
-      watching_entries="${watching_entries}$(printf '%s | sfimage=eye shell="%s" param1="%s" terminal=false' \
+      watching_entries="${watching_entries}$(printf '%s | sfimage=binoculars shell="%s" param1="%s" terminal=false' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     *)
       idle_entries="${idle_entries}$(printf '%s | sfimage=zzz shell="%s" param1="%s" terminal=false' \
