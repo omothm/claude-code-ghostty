@@ -70,6 +70,7 @@ h2 {
 }
 .row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
 .row.row3 { grid-template-columns: repeat(3, 1fr); }
+.row.row2 { grid-template-columns: repeat(2, 1fr); }
 .card {
   background: var(--card-bg);
   border-radius: 10px;
@@ -91,6 +92,22 @@ h2 {
 .card.wait .value { color: var(--accent-wait); }
 .card.watch .value { color: var(--accent-watch); }
 .card.idle .value { color: var(--accent-idle); }
+.card.hero { padding: 22px 24px; background: rgba(212,101,26,0.10); }
+@media (prefers-color-scheme: dark) {
+  .card.hero { background: rgba(240,133,64,0.12); }
+}
+.card.hero .value {
+  font-size: 48px;
+}
+.card.small .value { font-size: 24px; }
+.card.small { padding: 14px 18px; }
+.caption {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 10px 2px 0;
+  letter-spacing: 0.01em;
+}
+.caption code { font-size: 12px; }
 .chart-wrap {
   background: var(--card-bg);
   border-radius: 10px;
@@ -138,26 +155,36 @@ h2 {
 
 <h2>Right now</h2>
 <div class="row">
+  <div class="card wait"><div class="label">Awaiting input</div><div class="value" id="now-input">0</div><div class="sub">🔔 blocked on you · act now</div></div>
   <div class="card work"><div class="label">Working</div><div class="value" id="now-working">0</div><div class="sub">⏳ active sessions</div></div>
-  <div class="card wait"><div class="label">Awaiting input</div><div class="value" id="now-input">0</div><div class="sub">🔔 blocked on you</div></div>
   <div class="card watch"><div class="label">Watching</div><div class="value" id="now-watching">0</div><div class="sub">👀 idle but supervising</div></div>
   <div class="card idle"><div class="label">Idle</div><div class="value" id="now-idle">0</div><div class="sub">💤 between prompts</div></div>
 </div>
 
+<h2>Your wait debt · last 24h</h2>
+<div class="row">
+  <div class="card wait hero"><div class="label">Total wait</div><div class="value" id="t-input">—</div><div class="sub">summed across all 🔔 · minimize this</div></div>
+  <div class="card hero"><div class="label">Bells answered</div><div class="value" id="t-bells">0</div><div class="sub">🔔 → next-prompt pairs</div></div>
+  <div class="card wait hero"><div class="label">Avg per bell</div><div class="value" id="t-latency">—</div><div class="sub">typical wait you cost each 🔔</div></div>
+  <div class="card wait hero"><div class="label">Worst bell</div><div class="value" id="t-max-latency">—</div><div class="sub">longest single 🔔 · the tail</div></div>
+</div>
+<p class="caption"><strong>Total ≈ Bells × Avg.</strong> <em>Total</em> is the volume of waste; <em>Avg</em> is the per-bell lever you actually pull. <em>Worst</em> flags the tail you might be tolerating.</p>
+
 <h2>Last 24 hours · concurrency</h2>
 <div class="chart-wrap"><canvas id="timeline"></canvas></div>
 
-<h2>Last 24 hours · totals</h2>
+<h2>Output &amp; parallelism · last 24h</h2>
 <div class="row">
   <div class="card work"><div class="label">Time working</div><div class="value" id="t-working">—</div><div class="sub">summed across sessions</div></div>
-  <div class="card wait"><div class="label">Time awaiting you</div><div class="value" id="t-input">—</div><div class="sub">minimize this</div></div>
-  <div class="card watch"><div class="label">Time watching</div><div class="value" id="t-watching">—</div><div class="sub">supervising background work</div></div>
-  <div class="card idle"><div class="label">Time idle</div><div class="value" id="t-idle">—</div><div class="sub">summed across sessions</div></div>
-</div>
-<div class="row row3" style="margin-top:12px;">
-  <div class="card"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
-  <div class="card"><div class="label">Avg response latency</div><div class="value" id="t-latency">—</div><div class="sub">🔔 → next prompt</div></div>
   <div class="card"><div class="label">Peak concurrent working</div><div class="value" id="t-peak">0</div><div class="sub">max parallelism reached</div></div>
+  <div class="card"><div class="label">Concurrent share</div><div class="value" id="t-concurrent-share">—</div><div class="sub">working-time with ≥2 sessions</div></div>
+  <div class="card"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
+</div>
+
+<h2>Background · last 24h</h2>
+<div class="row row2">
+  <div class="card watch small"><div class="label">Time watching</div><div class="value" id="t-watching">—</div><div class="sub">supervising background work</div></div>
+  <div class="card idle small"><div class="label">Time idle</div><div class="value" id="t-idle">—</div><div class="sub">parked between prompts</div></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
@@ -191,6 +218,11 @@ function fmtLatency(secs) {
     return `${h}h ${(m % 60).toString().padStart(2, '0')}m`;
   }
   return `${m}m ${s.toString().padStart(2, '0')}s`;
+}
+
+function fmtPct(x) {
+  if (x == null) return '—';
+  return `${Math.round(x * 100)}%`;
 }
 
 async function fetchEvents() {
@@ -297,12 +329,21 @@ function compute(events, nowSec) {
   let peak = 0;
   for (const v of tlWorking) if (v > peak) peak = v;
 
-  let avgLat = null;
+  let workingBins = 0, multiWorkingBins = 0;
+  for (const v of tlWorking) {
+    if (v >= 1) workingBins += 1;
+    if (v >= 2) multiWorkingBins += 1;
+  }
+  const concurrentShare = workingBins > 0 ? multiWorkingBins / workingBins : null;
+
+  let avgLat = null, maxLat = null;
   if (latencies.length > 0) {
     avgLat = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+    maxLat = latencies.reduce((a, b) => (b > a ? b : a), 0);
   }
+  const bells = latencies.length;
 
-  return { totals, nowCounts, started, peak, avgLat, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
+  return { totals, nowCounts, started, peak, avgLat, maxLat, bells, concurrentShare, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
 }
 
 function buildChart(labels, data) {
@@ -381,7 +422,10 @@ function render(data, nowSec) {
 
   document.getElementById('t-sessions').textContent = data.started;
   document.getElementById('t-latency').textContent  = fmtLatency(data.avgLat);
+  document.getElementById('t-max-latency').textContent = fmtLatency(data.maxLat);
+  document.getElementById('t-bells').textContent    = data.bells;
   document.getElementById('t-peak').textContent     = data.peak;
+  document.getElementById('t-concurrent-share').textContent = fmtPct(data.concurrentShare);
 }
 
 function showError(html, statusVariant) {
