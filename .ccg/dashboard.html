@@ -277,17 +277,27 @@ function compute(events, nowSec) {
   let started = 0;
   const latest = new Map();
 
-  // 5-min bin counters across the 24h window.
+  // 5-min bin counters across the 24h window. Each bin tracks the SET of
+  // session_ids whose DOMINANT state was X during that bin — a session
+  // contributes to exactly one band per bin, by majority time. This
+  // makes the four states mutually exclusive per (session, bin) so the
+  // stacked total equals the number of distinct active sessions and can
+  // never exceed it.
   const bins = Math.floor(WINDOW_SEC / BIN_SEC);
-  const tlWorking  = new Array(bins).fill(0);
-  const tlInput    = new Array(bins).fill(0);
-  const tlWatching = new Array(bins).fill(0);
-  const tlIdle     = new Array(bins).fill(0);
+  const tlSets = {
+    working:  Array.from({ length: bins }, () => new Set()),
+    input:    Array.from({ length: bins }, () => new Set()),
+    watching: Array.from({ length: bins }, () => new Set()),
+    idle:     Array.from({ length: bins }, () => new Set()),
+  };
 
-  for (const [, evs] of sessions) {
+  for (const [sid, evs] of sessions) {
     if (evs.length === 0) continue;
     if (evs[0].ts >= cutoff) started += 1;
     latest.set(evs[evs.length - 1].session_id, evs[evs.length - 1]);
+
+    // Per-bin time-per-state for this session. Sparse: bin -> { state: secs }.
+    const perBin = new Map();
 
     for (let i = 0; i < evs.length; i++) {
       const e = evs[i];
@@ -301,14 +311,32 @@ function compute(events, nowSec) {
       // Time-in-state totals (clipped to window).
       totals[e.state] += en - s;
 
-      // Concurrency bins. Bin k covers [cutoff + k*BIN_SEC, cutoff + (k+1)*BIN_SEC).
+      // Split this interval across the bins it touches and accumulate
+      // seconds-in-state per bin for this session. The dominant state per
+      // bin is decided after all of this session's intervals are walked.
       const startBin = Math.max(0, Math.floor((s - cutoff) / BIN_SEC));
       const endBin   = Math.min(bins - 1, Math.floor((en - cutoff - 1e-6) / BIN_SEC));
-      const arr = e.state === 'working'  ? tlWorking
-                : e.state === 'input'    ? tlInput
-                : e.state === 'watching' ? tlWatching
-                : tlIdle;
-      for (let b = startBin; b <= endBin; b++) arr[b] += 1;
+      for (let b = startBin; b <= endBin; b++) {
+        const binStart = cutoff + b * BIN_SEC;
+        const binEnd   = binStart + BIN_SEC;
+        const slice    = Math.min(en, binEnd) - Math.max(s, binStart);
+        if (slice <= 0) continue;
+        let entry = perBin.get(b);
+        if (!entry) { entry = { working: 0, input: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
+        entry[e.state] += slice;
+      }
+    }
+
+    // Assign this session to its dominant state per bin. Ties resolve by
+    // STATES order (working > input > watching > idle) — first state seen
+    // with the max time keeps it.
+    for (const [b, times] of perBin) {
+      let bestState = null;
+      let bestTime  = -1;
+      for (const st of STATES) {
+        if (times[st] > bestTime) { bestTime = times[st]; bestState = st; }
+      }
+      if (bestState && bestTime > 0) tlSets[bestState][b].add(sid);
     }
 
     // Latency: input → next event for same session.
@@ -325,6 +353,12 @@ function compute(events, nowSec) {
     if (e.ts < nowCutoff) continue;
     if (e.state in nowCounts) nowCounts[e.state] += 1;
   }
+
+  // Materialise the int-array timelines from the per-bin session-id sets.
+  const tlWorking  = tlSets.working.map(s => s.size);
+  const tlInput    = tlSets.input.map(s => s.size);
+  const tlWatching = tlSets.watching.map(s => s.size);
+  const tlIdle     = tlSets.idle.map(s => s.size);
 
   let peak = 0;
   for (const v of tlWorking) if (v > peak) peak = v;
