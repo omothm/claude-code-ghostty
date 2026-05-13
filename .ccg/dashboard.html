@@ -261,8 +261,17 @@ function spanFor(evs, i, nowSec) {
   return [e.ts, Math.min(nowSec, e.ts + TRAILING_CAP_SEC)];
 }
 
+// Anchor the bin grid to absolute wall-clock boundaries: bin b covers
+// [b*BIN_SEC, (b+1)*BIN_SEC) in Unix seconds. Without this, cutoff slides
+// every tick and past bin values mutate as old data flows into adjacent bins.
+function windowCutoff(nowSec) {
+  const bins = Math.floor(WINDOW_SEC / BIN_SEC);
+  const currentBin = Math.floor(nowSec / BIN_SEC);
+  return (currentBin - bins + 1) * BIN_SEC;
+}
+
 function compute(events, nowSec) {
-  const cutoff = nowSec - WINDOW_SEC;
+  const cutoff = windowCutoff(nowSec);
 
   // Group by session, preserving sort order.
   const sessions = new Map();
@@ -423,7 +432,7 @@ function buildChart(labels, data) {
 }
 
 function buildLabels(nowSec) {
-  const cutoff = nowSec - WINDOW_SEC;
+  const cutoff = windowCutoff(nowSec);
   const bins = Math.floor(WINDOW_SEC / BIN_SEC);
   const labels = new Array(bins);
   for (let i = 0; i < bins; i++) {
