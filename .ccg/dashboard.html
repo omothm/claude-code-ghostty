@@ -71,6 +71,7 @@ h2 {
 .row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
 .row.row3 { grid-template-columns: repeat(3, 1fr); }
 .row.row2 { grid-template-columns: repeat(2, 1fr); }
+.row + .row { margin-top: 12px; }
 .card {
   background: var(--card-bg);
   border-radius: 10px;
@@ -92,12 +93,19 @@ h2 {
 .card.wait .value { color: var(--accent-wait); }
 .card.watch .value { color: var(--accent-watch); }
 .card.idle .value { color: var(--accent-idle); }
-.card.hero { padding: 22px 24px; background: rgba(212,101,26,0.10); }
-@media (prefers-color-scheme: dark) {
-  .card.hero { background: rgba(240,133,64,0.12); }
-}
+.card.hero { padding: 22px 24px; }
 .card.hero .value {
   font-size: 48px;
+}
+.row.wait-row > .card:nth-child(1),
+.row.wait-row > .card:nth-child(2) {
+  background: rgba(212,101,26,0.10);
+}
+@media (prefers-color-scheme: dark) {
+  .row.wait-row > .card:nth-child(1),
+  .row.wait-row > .card:nth-child(2) {
+    background: rgba(240,133,64,0.12);
+  }
 }
 .card.small .value { font-size: 24px; }
 .card.small { padding: 14px 18px; }
@@ -161,29 +169,31 @@ h2 {
   <div class="card idle"><div class="label">Idle</div><div class="value" id="now-idle">0</div><div class="sub">💤 between prompts</div></div>
 </div>
 
-<h2>Your wait debt · last 24h</h2>
-<div class="row">
-  <div class="card wait hero"><div class="label">Total wait</div><div class="value" id="t-input">—</div><div class="sub">summed across all 🔔 · minimize this</div></div>
-  <div class="card hero"><div class="label">Bells answered</div><div class="value" id="t-bells">0</div><div class="sub">🔔 → next-prompt pairs</div></div>
+<h2>Last 24h</h2>
+<div class="row wait-row">
   <div class="card wait hero"><div class="label">Avg per bell</div><div class="value" id="t-latency">—</div><div class="sub">typical wait you cost each 🔔</div></div>
-  <div class="card wait hero"><div class="label">Worst bell</div><div class="value" id="t-max-latency">—</div><div class="sub">longest single 🔔 · the tail</div></div>
+  <div class="card hero"><div class="label">Bells answered</div><div class="value" id="t-bells">0</div><div class="sub">🔔 → next-prompt pairs</div></div>
+  <div class="card hero"><div class="label">Concurrent share</div><div class="value" id="t-concurrent-share">—</div><div class="sub">working-time with ≥2 sessions</div></div>
+  <div class="card hero"><div class="label">Peak concurrent working</div><div class="value" id="t-peak">0</div><div class="sub">max parallelism reached</div></div>
 </div>
-<p class="caption"><strong>Total ≈ Bells × Avg.</strong> <em>Total</em> is the volume of waste; <em>Avg</em> is the per-bell lever you actually pull. <em>Worst</em> flags the tail you might be tolerating.</p>
+<div class="row wait-row">
+  <div class="card wait small"><div class="label">Worst bell</div><div class="value" id="t-max-latency">—</div><div class="sub">longest single 🔔 · the tail</div></div>
+  <div class="card wait small"><div class="label">Total wait</div><div class="value" id="t-input">—</div><div class="sub">summed across all 🔔</div></div>
+  <div class="card work small"><div class="label">Time working</div><div class="value" id="t-working">—</div><div class="sub">summed across sessions</div></div>
+  <div class="card small"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
+</div>
+<p class="caption">Top row are the levers — pull <em>avg per bell</em> down, push <em>concurrent share</em> up. Bottom row diagnoses where the time actually went.</p>
 
 <h2>Avg wait per bell · last 30 days</h2>
 <div class="chart-wrap"><canvas id="trend"></canvas></div>
 <p class="caption">Daily average of <em>input → next prompt</em> latency. Today's bar is partial. Lower is better; flat-or-falling is the trend you want.</p>
 
+<h2>Concurrent share · last 30 days</h2>
+<div class="chart-wrap"><canvas id="concurrent-trend"></canvas></div>
+<p class="caption">Daily share of working-time bins with ≥2 sessions running in parallel. Today's bar is partial. Higher is better; the trend you want climbing.</p>
+
 <h2>Last 24 hours · concurrency</h2>
 <div class="chart-wrap"><canvas id="timeline"></canvas></div>
-
-<h2>Output &amp; parallelism · last 24h</h2>
-<div class="row">
-  <div class="card work"><div class="label">Time working</div><div class="value" id="t-working">—</div><div class="sub">summed across sessions</div></div>
-  <div class="card"><div class="label">Peak concurrent working</div><div class="value" id="t-peak">0</div><div class="sub">max parallelism reached</div></div>
-  <div class="card"><div class="label">Concurrent share</div><div class="value" id="t-concurrent-share">—</div><div class="sub">working-time with ≥2 sessions</div></div>
-  <div class="card"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
-</div>
 
 <h2>Background · last 24h</h2>
 <div class="row row2">
@@ -204,6 +214,7 @@ const TREND_DAYS = 30;             // daily-trend chart window
 
 let chart = null;
 let trendChart = null;
+let concurrentTrendChart = null;
 
 function fmtDuration(secs) {
   if (!secs || secs <= 0) return '0m';
@@ -443,6 +454,82 @@ function computeDailyTrend(events, nowSec) {
   return { labels, values, counts };
 }
 
+// Daily concurrent share over TREND_DAYS days. For each day, share = fraction
+// of working-bins where ≥2 sessions had 'working' as their dominant state.
+// Today's bar is partial. Higher is better — more parallel work, less serial
+// waiting. Reuses the dominant-state-per-(session,bin) rule from compute() so
+// the chart is consistent with the 24h "Concurrent share" card.
+function computeDailyConcurrentShare(events, nowSec) {
+  const today = new Date(nowSec * 1000);
+  today.setHours(0, 0, 0, 0);
+  const todayStart = today.getTime() / 1000;
+  const oldestStart = todayStart - (TREND_DAYS - 1) * 86400;
+  const windowEnd = todayStart + 86400;
+
+  const binsPerDay = Math.floor(86400 / BIN_SEC);
+  const totalBins = binsPerDay * TREND_DAYS;
+  const tlWorking = Array.from({ length: totalBins }, () => new Set());
+
+  const sessions = new Map();
+  for (const e of events) {
+    let arr = sessions.get(e.session_id);
+    if (!arr) { arr = []; sessions.set(e.session_id, arr); }
+    arr.push(e);
+  }
+
+  for (const [sid, evs] of sessions) {
+    if (evs.length === 0) continue;
+    const perBin = new Map();
+
+    for (let i = 0; i < evs.length; i++) {
+      const e = evs[i];
+      if (!STATES.includes(e.state)) continue;
+      const [spanStart, spanEnd] = spanFor(evs, i, nowSec);
+      const s = Math.max(spanStart, oldestStart);
+      const en = Math.min(spanEnd, windowEnd);
+      if (en <= s) continue;
+
+      const startBin = Math.max(0, Math.floor((s - oldestStart) / BIN_SEC));
+      const endBin   = Math.min(totalBins - 1, Math.floor((en - oldestStart - 1e-6) / BIN_SEC));
+      for (let b = startBin; b <= endBin; b++) {
+        const binStart = oldestStart + b * BIN_SEC;
+        const binEnd   = binStart + BIN_SEC;
+        const slice    = Math.min(en, binEnd) - Math.max(s, binStart);
+        if (slice <= 0) continue;
+        let entry = perBin.get(b);
+        if (!entry) { entry = { working: 0, input: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
+        entry[e.state] += slice;
+      }
+    }
+
+    for (const [b, times] of perBin) {
+      let bestState = null;
+      let bestTime  = -1;
+      for (const st of STATES) {
+        if (times[st] > bestTime) { bestTime = times[st]; bestState = st; }
+      }
+      if (bestState === 'working' && bestTime > 0) tlWorking[b].add(sid);
+    }
+  }
+
+  const labels = new Array(TREND_DAYS);
+  const values = new Array(TREND_DAYS);
+  const counts = new Array(TREND_DAYS);
+  for (let d = 0; d < TREND_DAYS; d++) {
+    labels[d] = new Date((oldestStart + d * 86400) * 1000);
+    let wb = 0, mwb = 0;
+    for (let b = d * binsPerDay; b < (d + 1) * binsPerDay; b++) {
+      const v = tlWorking[b].size;
+      if (v >= 1) wb += 1;
+      if (v >= 2) mwb += 1;
+    }
+    counts[d] = wb;
+    values[d] = wb > 0 ? mwb / wb : null;
+  }
+
+  return { labels, values, counts };
+}
+
 function trendBarColors(trend) {
   const css = getComputedStyle(document.documentElement);
   const wait = css.getPropertyValue('--accent-wait').trim();
@@ -512,6 +599,71 @@ function renderTrend(trend) {
     return `Avg ${fmtLatency(lat)} · ${n} bell${n === 1 ? '' : 's'}`;
   };
   trendChart.update('none');
+}
+
+function concurrentTrendBarColors(trend) {
+  const css = getComputedStyle(document.documentElement);
+  const work = css.getPropertyValue('--accent-work').trim();
+  return trend.values.map((_, i) => i === trend.values.length - 1 ? work : work + '80');
+}
+
+function concurrentTooltipLabel(trend) {
+  return (c) => {
+    const pct = c.parsed.y;
+    const n = trend.counts[c.dataIndex];
+    if (pct == null || n === 0) return 'No working time';
+    return `${Math.round(pct)}% · ${fmtDuration(n * BIN_SEC)} working`;
+  };
+}
+
+function buildConcurrentTrendChart(trend) {
+  const ctx = document.getElementById('concurrent-trend').getContext('2d');
+  return new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: trend.labels,
+      datasets: [{
+        label: 'Concurrent share',
+        data: trend.values.map(v => v == null ? null : v * 100),
+        backgroundColor: concurrentTrendBarColors(trend),
+        borderWidth: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: {
+          type: 'time',
+          time: { unit: 'day', tooltipFormat: 'EEE MMM d', displayFormats: { day: 'MMM d' } },
+          grid: { display: false },
+          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
+        },
+        y: {
+          beginAtZero: true,
+          max: 100,
+          ticks: { callback: (v) => `${v}%` },
+          grid: { color: 'rgba(127,127,127,0.15)' }
+        }
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: concurrentTooltipLabel(trend) } }
+      }
+    }
+  });
+}
+
+function renderConcurrentTrend(trend) {
+  if (!concurrentTrendChart) { concurrentTrendChart = buildConcurrentTrendChart(trend); return; }
+  concurrentTrendChart.data.labels = trend.labels;
+  concurrentTrendChart.data.datasets[0].data = trend.values.map(v => v == null ? null : v * 100);
+  concurrentTrendChart.data.datasets[0].backgroundColor = concurrentTrendBarColors(trend);
+  // Rebind counts closure so the tooltip reflects fresh data, not the array
+  // captured at first build.
+  concurrentTrendChart.options.plugins.tooltip.callbacks.label = concurrentTooltipLabel(trend);
+  concurrentTrendChart.update('none');
 }
 
 function buildChart(labels, data) {
@@ -629,6 +781,7 @@ async function tick() {
     const data = compute(events, nowSec);
     render(data, nowSec);
     renderTrend(computeDailyTrend(events, nowSec));
+    renderConcurrentTrend(computeDailyConcurrentShare(events, nowSec));
     clearError();
   } catch (e) {
     const isFileScheme = location.protocol === 'file:';
