@@ -354,9 +354,14 @@ function compute(events, nowSec) {
       if (bestState && bestTime > 0) tlSets[bestState][b].add(sid);
     }
 
-    // Latency: input → next event for same session.
+    // Latency: input → next event for same session. Attribute the bell to
+    // the day of the `input` event (matches the 30-day trend chart's
+    // attribution rule) and clip to the 24h window so the cards under
+    // "Your wait debt · last 24h" actually reflect 24h, not all-time.
     for (let i = 0; i < evs.length - 1; i++) {
-      if (evs[i].state === 'input') latencies.push(evs[i + 1].ts - evs[i].ts);
+      if (evs[i].state !== 'input') continue;
+      if (evs[i].ts < cutoff) continue;
+      latencies.push(evs[i + 1].ts - evs[i].ts);
     }
   }
 
