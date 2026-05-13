@@ -170,6 +170,10 @@ h2 {
 </div>
 <p class="caption"><strong>Total ≈ Bells × Avg.</strong> <em>Total</em> is the volume of waste; <em>Avg</em> is the per-bell lever you actually pull. <em>Worst</em> flags the tail you might be tolerating.</p>
 
+<h2>Avg wait per bell · last 30 days</h2>
+<div class="chart-wrap"><canvas id="trend"></canvas></div>
+<p class="caption">Daily average of <em>input → next prompt</em> latency. Today's bar is partial. Lower is better; flat-or-falling is the trend you want.</p>
+
 <h2>Last 24 hours · concurrency</h2>
 <div class="chart-wrap"><canvas id="timeline"></canvas></div>
 
@@ -196,8 +200,10 @@ const BIN_SEC = 5 * 60;            // 5-min bins → 288 points across 24h
 const TRAILING_CAP_SEC = 30 * 60;  // cap open-ended trailing spans at 30 min
 const NOW_RECENT_SEC = 30 * 60;    // a session counts as "right now" if its last event is ≤ 30 min old
 const STATES = ['working', 'input', 'watching', 'idle'];
+const TREND_DAYS = 30;             // daily-trend chart window
 
 let chart = null;
+let trendChart = null;
 
 function fmtDuration(secs) {
   if (!secs || secs <= 0) return '0m';
@@ -389,6 +395,120 @@ function compute(events, nowSec) {
   return { totals, nowCounts, started, peak, avgLat, maxLat, bells, concurrentShare, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
 }
 
+// Daily avg latency over the last TREND_DAYS days. Each bell is attributed to
+// the local calendar day of its `input` event (when the user incurred the
+// wait), not the day it was answered. Today's bar is partial by definition.
+function computeDailyTrend(events, nowSec) {
+  const today = new Date(nowSec * 1000);
+  today.setHours(0, 0, 0, 0);
+  const todayStart = today.getTime() / 1000;
+  const oldestStart = todayStart - (TREND_DAYS - 1) * 86400;
+
+  const sums = new Array(TREND_DAYS).fill(0);
+  const counts = new Array(TREND_DAYS).fill(0);
+
+  const sessions = new Map();
+  for (const e of events) {
+    let arr = sessions.get(e.session_id);
+    if (!arr) { arr = []; sessions.set(e.session_id, arr); }
+    arr.push(e);
+  }
+
+  for (const [, evs] of sessions) {
+    for (let i = 0; i < evs.length - 1; i++) {
+      if (evs[i].state !== 'input') continue;
+      const lat = evs[i + 1].ts - evs[i].ts;
+      // Day index from local-time midnight of the input event.
+      const d = new Date(evs[i].ts * 1000);
+      d.setHours(0, 0, 0, 0);
+      const dayStart = d.getTime() / 1000;
+      const idx = Math.round((dayStart - oldestStart) / 86400);
+      if (idx < 0 || idx >= TREND_DAYS) continue;
+      sums[idx] += lat;
+      counts[idx] += 1;
+    }
+  }
+
+  const labels = new Array(TREND_DAYS);
+  const values = new Array(TREND_DAYS);
+  for (let i = 0; i < TREND_DAYS; i++) {
+    labels[i] = new Date((oldestStart + i * 86400) * 1000);
+    values[i] = counts[i] > 0 ? sums[i] / counts[i] : null;
+  }
+  return { labels, values, counts };
+}
+
+function trendBarColors(trend) {
+  const css = getComputedStyle(document.documentElement);
+  const wait = css.getPropertyValue('--accent-wait').trim();
+  // Past days at reduced opacity; today (last bar) at full opacity so it
+  // visually pops as "in progress."
+  return trend.values.map((_, i) => i === trend.values.length - 1 ? wait : wait + '80');
+}
+
+function buildTrendChart(trend) {
+  const ctx = document.getElementById('trend').getContext('2d');
+  return new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: trend.labels,
+      datasets: [{
+        label: 'Avg per bell',
+        data: trend.values,
+        backgroundColor: trendBarColors(trend),
+        borderWidth: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: {
+          type: 'time',
+          time: { unit: 'day', tooltipFormat: 'EEE MMM d', displayFormats: { day: 'MMM d' } },
+          grid: { display: false },
+          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
+        },
+        y: {
+          beginAtZero: true,
+          ticks: { callback: (v) => fmtLatency(v) },
+          grid: { color: 'rgba(127,127,127,0.15)' }
+        }
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (c) => {
+              const lat = c.parsed.y;
+              const n = trend.counts[c.dataIndex];
+              if (lat == null || n === 0) return 'No bells';
+              return `Avg ${fmtLatency(lat)} · ${n} bell${n === 1 ? '' : 's'}`;
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function renderTrend(trend) {
+  if (!trendChart) { trendChart = buildTrendChart(trend); return; }
+  trendChart.data.labels = trend.labels;
+  trendChart.data.datasets[0].data = trend.values;
+  trendChart.data.datasets[0].backgroundColor = trendBarColors(trend);
+  // Re-bind counts for the tooltip closure: rebuild the tooltip callback so
+  // it sees the fresh counts array, not a stale reference from first build.
+  trendChart.options.plugins.tooltip.callbacks.label = (c) => {
+    const lat = c.parsed.y;
+    const n = trend.counts[c.dataIndex];
+    if (lat == null || n === 0) return 'No bells';
+    return `Avg ${fmtLatency(lat)} · ${n} bell${n === 1 ? '' : 's'}`;
+  };
+  trendChart.update('none');
+}
+
 function buildChart(labels, data) {
   const ctx = document.getElementById('timeline').getContext('2d');
   const css = getComputedStyle(document.documentElement);
@@ -503,6 +623,7 @@ async function tick() {
     const nowSec = Date.now() / 1000;
     const data = compute(events, nowSec);
     render(data, nowSec);
+    renderTrend(computeDailyTrend(events, nowSec));
     clearError();
   } catch (e) {
     const isFileScheme = location.protocol === 'file:';

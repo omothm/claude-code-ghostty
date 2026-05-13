@@ -22,10 +22,16 @@ After every change, verify the following in order:
    `compute()`, the "Right now" cards, the "Last 24 hours · totals"
    cards, the chart datasets, the `render()` block). If the change adds
    or renames a state, every one of those must be updated; if it adds a
-   new metric, decide whether the dashboard should surface it. Confirm
-   the dashboard still renders after deploying — `open ~/.claude/.ccg/dashboard.html`
-   through the running server (`hooks/dashboard-server.sh start`) and
-   check that the new state shows up in the chart and totals.
+   new metric, decide whether the dashboard should surface it. **For
+   any dashboard change, always (a) deploy the updated file to
+   `~/.claude/.ccg/dashboard.html` — don't ask, this overrides item 7 —
+   then (b) view it through the running server via the
+   `chrome-devtools` MCP, list console messages, and take a snapshot or
+   screenshot. Treat any console error, network failure, or visibly
+   broken section as a blocking issue and fix it before moving on.**
+   The point is to surface render bugs (missing canvases, undefined
+   refs, mis-sized charts) before the user sees them, not just to
+   confirm the file parses.
 6. **Hook parity** — `settings.json` (project) and `~/.claude/settings.json`
    (global) must define the same core hook events (`SessionStart`,
    `Notification`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `StopFailure`,
