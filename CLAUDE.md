@@ -46,6 +46,10 @@ After every change, verify the following in order:
    when explicitly asked" rule for this repo). Don't wait for the user
    to ask. Remotes to push to are whatever `git remote` lists; today
    that's `origin` and `trilogy`. Push to each one in sequence.
+   **For bug fixes: do not commit until the fix is proven working** —
+   hold the commit until the user confirms the fix is behaving correctly
+   in practice. Once confirmed, commit and push immediately without
+   asking.
 
 ## Architecture
 

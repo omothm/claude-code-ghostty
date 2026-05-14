@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/notify.sh '🔔' 'Needs your input' input permission_prompt"
+            "command": "~/.claude/hooks/notify.sh '🔔' 'Needs your input' input"
           }
         ]
       }
