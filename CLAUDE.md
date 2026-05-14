@@ -3,6 +3,17 @@
 This file is for anyone (human or agent) making code changes. End-user install
 and usage live in `README.md`; everything architectural lives here.
 
+## Session start
+
+**Read `~/.claude/.ccg/changelog.md` before doing any work in this repo.**
+The `SessionStart` hook (`.claude/hooks/fetch-changelog.sh`) fetches the Claude Code
+changelog and caches it there (12 h TTL). Use the `Read` tool to load it into
+context. Missing a changelog entry has caused real debugging time (e.g.
+`terminalSequence` was in the 2.1.141 notes but unknown until we hit the
+problem). This hook lives in `.claude/settings.json` (project-scoped,
+untracked) — absent from both the root `settings.json` and
+`~/.claude/settings.json` so it fires only for sessions in this repo.
+
 ## Post-change checklist
 
 After every change, verify the following in order:
@@ -38,7 +49,10 @@ After every change, verify the following in order:
    `SessionEnd`) with identical matchers and commands. The global file may have
    additional hooks (`PreToolUse`/unfence, `SubagentStop`/agent-arena,
    `Stop`/sync-permissions) that are intentionally absent from the project
-   file. Any change to a shared hook must be applied to **both** files.
+   file. **Project-specific hooks go in `.claude/settings.json`** (untracked,
+   not the root `settings.json` which is the source for the deployed global
+   config). Any change to a shared hook must be applied to **both** the root
+   `settings.json` and `~/.claude/settings.json`.
 7. **Local deploy** — ask the user whether the change should be copied to
    `~/.claude/hooks/` / `~/swiftbar/` / `~/.claude/.ccg/`.
 8. **Commit and push** — every change ends with a commit and a push to
@@ -198,11 +212,12 @@ visible display text. `param1=` retains the original 🔔-prefixed title for
 
 | Script | Purpose | Triggered by |
 |--------|---------|--------------|
-| `hooks/tab-title.sh` | Sets the ANSI tab title; writes/removes `~/.claude/bell-state/<session_id>`; appends real state transitions to `~/.claude/.ccg/events.jsonl`; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `notify.sh` (for `input`) |
+| `hooks/tab-title.sh` | Sets the terminal tab title via `terminalSequence` JSON output (Claude Code 2.1.141+) with a direct `/dev/tty` write as fallback; writes/removes `~/.claude/bell-state/<session_id>`; appends real state transitions to `~/.claude/.ccg/events.jsonl`; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `notify.sh` (for `input`) |
 | `hooks/notify.sh` | Sends `terminal-notifier`; skips if user is already on that tab; routes to `tab-title.sh` for title updates | `Notification`, `Stop` |
 | `hooks/focus-ghostty-tab.sh` | AppleScript to focus a Ghostty tab by title-contains match; works across windows and single-tab windows | Notification `-execute`, SwiftBar dropdown |
 | `hooks/refresh-menubar.sh` | `open -g swiftbar://refreshallplugins`; silent no-op if SwiftBar isn't installed | `tab-title.sh` on state change; `sweep-bell-state.sh` after pruning |
 | `hooks/sweep-bell-state.sh` | Prunes state files older than 12 h | Background job dispatched by the SwiftBar plugin after each run |
+| `.claude/hooks/fetch-changelog.sh` | Fetches `https://code.claude.com/docs/en/changelog`, strips HTML via `textutil`, caches to `~/.claude/.ccg/changelog.md` (12 h TTL) | `SessionStart` (project-only, via `.claude/settings.json`) |
 | `hooks/dashboard-server.sh` | Manages the metrics-dashboard HTTP server (`start`/`stop`/`status`/`toggle`); writes `~/.claude/.ccg/server.pid` and opens browser on start | SwiftBar dropdown entry click |
 | `swiftbar/ghostty-bells.30s.sh` | Reads state dir, emits dropdown (sessions + dashboard entry), dispatches sweep in background | SwiftBar 30 s poll + push-refresh URL |
 | `.ccg/dashboard.html` | Single-file metrics dashboard; fetches `events.jsonl` over HTTP every second | Served via `python3 -m http.server` from `~/.claude/.ccg/` |

@@ -204,6 +204,29 @@ fi
 rm -f "$BELL_STATE_DIR/tw-$$"
 
 # ---------------------------------------------------------------------------
+section "tab-title.sh terminalSequence JSON output"
+
+# Non-query statuses must emit JSON {"terminalSequence":"..."} containing an
+# OSC 2 sequence so Claude Code 2.1.141+ can write it to the terminal directly.
+ts_out=$(echo '{"session_id":"ts-test"}' | "$HOOKS_DIR/tab-title.sh" idle 2>/dev/null)
+ts_seq=$(printf '%s' "$ts_out" | jq -r '.terminalSequence // empty' 2>/dev/null)
+if printf '%s' "$ts_seq" | grep -q $'\033]2;'; then
+  ok "non-query stdout is JSON with terminalSequence containing OSC 2"
+else
+  ng "non-query stdout missing terminalSequence OSC 2 (got: $ts_out)"
+fi
+rm -f "$BELL_STATE_DIR/ts-test"
+
+# query must still output two plain lines (used by notify.sh subprocess calls)
+q_out=$(echo '{"session_id":"ts-test"}' | "$HOOKS_DIR/tab-title.sh" query 2>/dev/null)
+q_line1=$(printf '%s' "$q_out" | sed -n '1p')
+if [ -n "$q_line1" ] && printf '%s' "$q_line1" | grep -q "Claude Code"; then
+  ok "query stdout is plain text (base_title on line 1)"
+else
+  ng "query stdout format broken (line 1: '$q_line1')"
+fi
+
+# ---------------------------------------------------------------------------
 section "tab-title.sh refresh gating"
 
 export BELL_TRACE=1

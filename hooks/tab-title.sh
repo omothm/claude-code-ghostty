@@ -7,10 +7,15 @@
 #
 # Sets the terminal tab title with the appropriate icon and maintains the
 # per-session bell-state file used by the SwiftBar menubar plugin.
-# Outputs two lines to stdout:
-#   Line 1: base title (without icon)
-#   Line 2: session summary (empty if none)
-# Use status "query" to get the output without changing the terminal tab title.
+#
+# Stdout behaviour:
+#   status="query"  → two plain lines: base_title on line 1, summary on line 2.
+#                     Used by notify.sh subprocess calls; format must stay stable.
+#   other statuses  → JSON {"terminalSequence":"<OSC2 escape>"} so Claude Code
+#                     2.1.141+ can emit the sequence on our behalf (no TTY needed).
+#                     The direct /dev/tty write below remains as fallback for older
+#                     versions and for subprocess calls where stdout is discarded.
+# Use status "query" to read titles without changing terminal state.
 #
 # Debug: set BELL_TRACE=1 to append diagnostics to $BELL_TRACE_LOG
 # (defaults to /tmp/bell-trace.log). See README for details.
@@ -263,5 +268,19 @@ else
 fi
 
 __trace "exit"
-echo "$base_title"
-echo "$summary"
+if [ "$status" = "query" ]; then
+  echo "$base_title"
+  echo "$summary"
+else
+  # Emit terminalSequence JSON for Claude Code 2.1.141+ direct hook calls.
+  # Claude Code writes the sequence to the terminal on our behalf, which is
+  # race-free and works without a controlling TTY. The /dev/tty write above
+  # stays as the fallback for older versions and subprocess invocations.
+  _seq=$(printf '\033]2;%s\007' "$title")
+  __trace "terminalSequence title=\"$title\""
+  jq -nc --arg seq "$_seq" '{terminalSequence: $seq}'
+  printf '%s title="%s" session=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$title" "$short_id" \
+    >> "${CCG_DIR:-$HOME/.claude/.ccg}/termseq.log" 2>/dev/null
+  unset _seq
+fi
