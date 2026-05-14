@@ -49,10 +49,11 @@ After every change, verify the following in order:
    `SessionEnd`) with identical matchers and commands. The global file may have
    additional hooks (`PreToolUse`/unfence, `SubagentStop`/agent-arena,
    `Stop`/sync-permissions) that are intentionally absent from the project
-   file. **Project-specific hooks go in `.claude/settings.json`** (untracked,
-   not the root `settings.json` which is the source for the deployed global
-   config). Any change to a shared hook must be applied to **both** the root
-   `settings.json` and `~/.claude/settings.json`.
+   file. **Project-specific hooks go in `.claude/settings.json`** (not in the
+   root `settings.json`, which is the source for the deployed global config;
+   not in `~/.claude/settings.json`). Their scripts live in `.claude/hooks/`,
+   not in `hooks/`. Any change to a shared hook must be applied to **both** the
+   root `settings.json` and `~/.claude/settings.json`.
 7. **Local deploy** — ask the user whether the change should be copied to
    `~/.claude/hooks/` / `~/swiftbar/` / `~/.claude/.ccg/`.
 8. **Commit and push** — every change ends with a commit and a push to
@@ -209,6 +210,10 @@ visible display text. `param1=` retains the original 🔔-prefixed title for
 `focus-ghostty-tab.sh`'s contains-match.
 
 ## Scripts
+
+`hooks/` contains scripts that are **installed globally** (`~/.claude/hooks/`).
+`.claude/hooks/` contains scripts that are **project-local** (used only when
+Claude runs in this repo, referenced from `.claude/settings.json`).
 
 | Script | Purpose | Triggered by |
 |--------|---------|--------------|
