@@ -72,31 +72,6 @@ else
   match_key="$short_id"
 fi
 
-# Skip if user is looking at this exact tab
-active_app=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)
-if [ "$active_app" = "ghostty" ]; then
-  this_tab_active=$(osascript -e '
-    tell application "System Events"
-      tell process "Ghostty"
-        set tabButtons to every radio button of tab group "tab bar" of front window
-        repeat with btn in tabButtons
-          if name of btn contains "'"$match_key"'" and value of btn is true then
-            return 1
-          end if
-        end repeat
-      end tell
-    end tell
-    return 0' 2>/dev/null)
-
-  __trace "active-app=$active_app this_tab_active=$this_tab_active match_key=$match_key"
-  if [ "$this_tab_active" = "1" ]; then
-    __trace "early-exit reason=user-on-this-tab"
-    exit 0
-  fi
-else
-  __trace "active-app=$active_app (not ghostty) — proceeding"
-fi
-
 # Update tab title if requested
 if [ -n "$tab_status" ]; then
   __trace "calling tab-title.sh $tab_status"
