@@ -208,7 +208,7 @@ const REFRESH_MS = 1000;
 const WINDOW_SEC = 24 * 3600;
 const BIN_SEC = 5 * 60;            // 5-min bins → 288 points across 24h
 const TRAILING_CAP_SEC = 30 * 60;  // cap open-ended trailing spans at 30 min
-const NOW_RECENT_SEC = 30 * 60;    // a session counts as "right now" if its last event is ≤ 30 min old
+const NOW_RECENT_SEC = 12 * 3600;  // a session counts as "right now" if its last event is ≤ 12 h old (matches sweep interval)
 const STATES = ['working', 'input', 'watching', 'idle'];
 const TREND_DAYS = 30;             // daily-trend chart window
 
