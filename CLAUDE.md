@@ -83,8 +83,10 @@ Four layers cooperate:
    reads this directory as its source of truth. Format:
    - Line 1: full tab title with icon prefix
    - Line 2: status string (`input` | `working` | `watching` | `idle`)
-   - Line 3: only present for `watching` — the claude ancestor PID, used
-     by the plugin to verify the monitor is still alive on each poll.
+   - Line 3: the claude ancestor PID (stored for all write states).
+     `sweep-bell-state.sh` uses it to prune orphaned files when the
+     process has exited. The plugin also uses it for `watching` files
+     to verify the monitored process is still alive on each poll.
 3. **Push refresh** — on actual state transitions, `refresh-menubar.sh` fires
    `open -g swiftbar://refreshallplugins` so SwiftBar re-runs the plugin
    within a few hundred ms. The plugin's filename-encoded 30 s poll is a
@@ -273,12 +275,13 @@ gate paths, plugin output (SF Symbol + count, param1 preservation,
 ` | ` → ` — ` swap, empty-dir hiding), dashboard-entry toggle (open/stop
 based on PID file, stale-PID handling, position after sessions),
 `dashboard-server.sh status` modes, stale-file sweep (hard-age prune
-at 12 h, fresh files protected, refresh-after-prune), watching state
-(3-line state-file shape with claude PID on line 3, event log records
-`watching`, notifs mode suppresses the state file, plugin downgrades
-stale watching files to idle, `Watching` section ordered between
-`Working` and `Idle`), `BELL_TRACE` toggle (off = 0 bytes, on =
-populated), and end-to-end `input`→state→plugin latency.
+at 12 h, fresh files protected, PID-liveness prune for orphaned sessions,
+legacy no-PID files skipped, refresh-after-prune), watching state
+(3-line state-file shape with claude PID on line 3 for all write states,
+event log records `watching`, notifs mode suppresses the state file,
+plugin downgrades stale watching files to idle, `Watching` section
+ordered between `Working` and `Idle`), `BELL_TRACE` toggle (off = 0
+bytes, on = populated), and end-to-end `input`→state→plugin latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches
 real session state.

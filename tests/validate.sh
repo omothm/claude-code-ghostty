@@ -505,6 +505,27 @@ age_file "13 hours ago" "$BELL_STATE_DIR/sR"
 trace_reset
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
 grep -q "refresh-menubar.sh" "$BELL_TRACE_LOG" && ok "sweep triggers refresh after pruning" || ng "sweep did not trigger refresh after pruning"
+
+# PID-liveness: file with dead PID is pruned quickly (no need to wait 12h).
+printf '⏳ Claude Code | orphan-working (sPL1)\nworking\n999999\n' > "$BELL_STATE_DIR/sPL1"
+export BELL_TRACE=1; trace_reset
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+if ! sf_exists "sPL1"; then ok "pid-liveness: orphaned working (dead PID) pruned"; else ng "pid-liveness: orphaned file not pruned"; fi
+grep -q "pid-expire" "$BELL_TRACE_LOG" && ok "sweep logs pid-expire" || ng "no pid-expire in trace"
+
+# PID-liveness: file with live PID is preserved.
+printf '⏳ Claude Code | live-working (sPL2)\nworking\n%s\n' "$$" > "$BELL_STATE_DIR/sPL2"
+trace_reset
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+if sf_exists "sPL2"; then ok "pid-liveness: live session (live PID) preserved"; else ng "pid-liveness: live session wrongly pruned"; fi
+rm -f "$BELL_STATE_DIR/sPL2"
+
+# PID-liveness: file with no PID (legacy 2-line format) is not touched.
+printf '🔔 Claude Code | no-pid-legacy (sPL3)\ninput\n' > "$BELL_STATE_DIR/sPL3"
+trace_reset
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+if sf_exists "sPL3"; then ok "pid-liveness: no-PID (legacy format) not pruned"; else ng "pid-liveness: no-PID file wrongly pruned"; fi
+rm -f "$BELL_STATE_DIR/sPL3"
 unset BELL_TRACE
 
 # Restore to the canonical sandbox state-dir for the remaining sections.
@@ -584,8 +605,8 @@ if [ "$ps_seen" -gt 0 ]; then
   line2=$(sed -n '2p' "$BELL_STATE_DIR/$ISID" 2>/dev/null)
   line3=$(sed -n '3p' "$BELL_STATE_DIR/$ISID" 2>/dev/null)
   [ "$line2" = "idle" ] && ok "no-monitor idle: line 2 = 'idle'" || ng "no-monitor idle: line 2 wrong (got '$line2')"
-  [ -z "$line3" ] && ok "no-monitor idle: no line 3 (claude_pid only stored for watching)" \
-    || ng "no-monitor idle: spurious line 3 = '$line3'"
+  [ "$line3" = "1" ] && ok "no-monitor idle: line 3 holds claude_pid" \
+    || ng "no-monitor idle: line 3 wrong (got '$line3', expected '1')"
 
   last_state=$(jq -r --arg sid "$ISID" 'select(.session_id == $sid) | .state' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
   [ "$last_state" = "idle" ] && ok "no-monitor idle: event log state == 'idle'" || ng "no-monitor idle: event state wrong (got '$last_state')"

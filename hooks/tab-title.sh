@@ -105,13 +105,18 @@ _count_live_monitors() {
 # input/working/end pass through unchanged.
 effective_status="$status"
 claude_pid=""
-if [ "$status" = "idle" ]; then
-  claude_pid=$(_find_claude_pid 2>/dev/null || true)
-  if [ -n "$claude_pid" ]; then
-    if [ "$(_count_live_monitors "$claude_pid")" -gt 0 ]; then
-      effective_status="watching"
-      __trace "idle upgraded to watching (claude_pid=$claude_pid)"
-    fi
+# Resolve the ancestor claude PID for all write states (input/working/idle).
+# The PID is stored on line 3 of state files so sweep-bell-state.sh can prune
+# orphaned files the moment the process exits, rather than waiting 12h.
+case "$status" in
+  working|input|idle)
+    claude_pid=$(_find_claude_pid 2>/dev/null || true)
+    ;;
+esac
+if [ "$status" = "idle" ] && [ -n "$claude_pid" ]; then
+  if [ "$(_count_live_monitors "$claude_pid")" -gt 0 ]; then
+    effective_status="watching"
+    __trace "idle upgraded to watching (claude_pid=$claude_pid)"
   fi
 fi
 
@@ -151,9 +156,10 @@ fi
 # State file format:
 #   Line 1: full tab title with icon prefix (matches the ANSI title set above)
 #   Line 2: status string (input | working | idle | watching)
-#   Line 3: only present for status=watching; the claude ancestor PID. The
-#           plugin uses it to detect when the monitored process has exited
-#           and downgrade the file to plain idle on the fly.
+#   Line 3: the claude ancestor PID (stored for all write states).
+#           sweep-bell-state.sh uses it to prune orphaned files when the
+#           process has exited. The plugin also uses it for watching files
+#           to detect when the monitored process has exited.
 STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 state_file="$STATE_DIR/$session_id"
 state_changed=0
@@ -194,10 +200,10 @@ case "$BELL_MODE" in
     ;;
   always-on)
     case "$effective_status" in
-      input)    _write_state "🔔 $base_title" "input"   "" ;;
-      working)  _write_state "⏳ $base_title" "working" "" ;;
+      input)    _write_state "🔔 $base_title" "input"   "$claude_pid" ;;
+      working)  _write_state "⏳ $base_title" "working" "$claude_pid" ;;
       watching) _write_state "👀 $base_title" "watching" "$claude_pid" ;;
-      idle)     _write_state "$base_title"    "idle"    "" ;;
+      idle)     _write_state "$base_title"    "idle"    "$claude_pid" ;;
       end)      _remove_state ;;
       *)        __trace "state-file unchanged (status=$effective_status)" ;;
     esac
@@ -207,7 +213,7 @@ case "$BELL_MODE" in
     # watching is a refinement of idle and is not surfaced in notifs mode.
     case "$effective_status" in
       input)
-        _write_state "🔔 $base_title" "input" ""
+        _write_state "🔔 $base_title" "input" "$claude_pid"
         ;;
       idle|watching|working|end)
         _remove_state

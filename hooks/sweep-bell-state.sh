@@ -54,6 +54,19 @@ while IFS= read -r f; do
   __trace "hard-expire: $f"
 done < <(find "$STATE_DIR" -type f -mmin +720 2>/dev/null)
 
+# PID-liveness pass: delete state files whose owning claude process has exited.
+# Line 3 holds the ancestor claude PID (written by tab-title.sh for all write
+# states). This catches orphaned sessions within one sweep cycle (~30s) rather
+# than waiting the full 12h hard-age cap.
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  cpid=$(sed -n '3p' "$f" 2>/dev/null | tr -d ' ')
+  [ -n "$cpid" ] || continue                       # no PID stored — legacy or partial write; skip
+  kill -0 "$cpid" 2>/dev/null && continue           # process still alive; leave it
+  rm -f "$f" && pruned=$((pruned + 1))
+  __trace "pid-expire: $f (pid=$cpid dead)"
+done < <(find "$STATE_DIR" -type f 2>/dev/null)
+
 __trace "exit pruned=$pruned"
 
 # If anything was removed, nudge SwiftBar so the dropdown reflects reality
