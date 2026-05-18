@@ -14,9 +14,9 @@
         ]
       }
     ],
-    "Notification": [
+    "PermissionRequest": [
       {
-        "matcher": "permission_prompt",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",

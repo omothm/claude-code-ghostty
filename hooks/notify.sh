@@ -1,15 +1,13 @@
 #!/bin/bash
 # Base notification script for Ghostty tab-targeted notifications.
-# Usage: notify.sh <icon> <default_message> [tab_status] [required_notification_type]
+# Usage: notify.sh <icon> <default_message> [tab_status]
 #
-# Reads hook JSON from stdin. Sends a macOS notification via terminal-notifier
-# and skips if the user is already looking at the tab.
+# Reads hook JSON from stdin. Sends a macOS notification via terminal-notifier.
 #
 # Arguments:
-#   icon                        Emoji for the notification title (e.g., 🔔 ✅)
-#   default_message             Fallback message if none in the hook JSON
-#   tab_status (optional)       If set, updates the tab title to this status
-#   required_notification_type  If set, exit unless notification_type matches
+#   icon             Emoji for the notification title (e.g., 🔔 ✅)
+#   default_message  Fallback message if none in the hook JSON
+#   tab_status       If set, updates the tab title to this status
 #
 # Debug: set BELL_TRACE=1 to append diagnostics to $BELL_TRACE_LOG
 # (defaults to /tmp/bell-trace.log).
@@ -26,7 +24,6 @@ __trace "entry argc=$# args=[$*]"
 icon="$1"
 default_message="$2"
 tab_status="$3"
-required_type="$4"
 
 # Read JSON data from stdin
 input=$(cat)
@@ -44,15 +41,7 @@ if [ -n "$cursor_version" ]; then
   exit 0
 fi
 
-# Filter by notification type if required
-if [ -n "$required_type" ]; then
-  notification_type=$(echo "$input" | jq -r '.notification_type // empty' 2>/dev/null)
-  __trace "type-filter required=$required_type received=$notification_type"
-  if [ "$notification_type" != "$required_type" ]; then
-    __trace "early-exit reason=type-mismatch"
-    exit 0
-  fi
-fi
+__trace "notification_type=$(echo "$input" | jq -r '.notification_type // empty' 2>/dev/null)"
 
 # Extract fields
 title=$(echo "$input" | jq -r '.title // "Claude Code"' 2>/dev/null)
