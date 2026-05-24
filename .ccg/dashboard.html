@@ -216,6 +216,22 @@ let chart = null;
 let trendChart = null;
 let concurrentTrendChart = null;
 
+function trendlineData(values) {
+  const defined = [];
+  values.forEach((v, i) => { if (v != null) defined.push([i, v]); });
+  if (defined.length < 2) return new Array(values.length).fill(null);
+  const n = defined.length;
+  const sumX  = defined.reduce((s, [x]) => s + x, 0);
+  const sumY  = defined.reduce((s, [, y]) => s + y, 0);
+  const sumXY = defined.reduce((s, [x, y]) => s + x * y, 0);
+  const sumXX = defined.reduce((s, [x]) => s + x * x, 0);
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return new Array(values.length).fill(null);
+  const slope = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+  return values.map((_, i) => slope * i + intercept);
+}
+
 function fmtDuration(secs) {
   if (!secs || secs <= 0) return '0m';
   const h = Math.floor(secs / 3600);
@@ -540,16 +556,31 @@ function trendBarColors(trend) {
 
 function buildTrendChart(trend) {
   const ctx = document.getElementById('trend').getContext('2d');
+  const css = getComputedStyle(document.documentElement);
+  const wait = css.getPropertyValue('--accent-wait').trim();
   return new Chart(ctx, {
     type: 'bar',
     data: {
       labels: trend.labels,
-      datasets: [{
-        label: 'Avg per bell',
-        data: trend.values,
-        backgroundColor: trendBarColors(trend),
-        borderWidth: 0,
-      }]
+      datasets: [
+        {
+          label: 'Avg per bell',
+          data: trend.values,
+          backgroundColor: trendBarColors(trend),
+          borderWidth: 0,
+        },
+        {
+          label: 'Trend',
+          type: 'line',
+          data: trendlineData(trend.values),
+          borderColor: wait + '99',
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+        },
+      ]
     },
     options: {
       responsive: true,
@@ -571,6 +602,7 @@ function buildTrendChart(trend) {
       plugins: {
         legend: { display: false },
         tooltip: {
+          filter: (item) => item.datasetIndex === 0,
           callbacks: {
             label: (c) => {
               const lat = c.parsed.y;
@@ -590,6 +622,7 @@ function renderTrend(trend) {
   trendChart.data.labels = trend.labels;
   trendChart.data.datasets[0].data = trend.values;
   trendChart.data.datasets[0].backgroundColor = trendBarColors(trend);
+  trendChart.data.datasets[1].data = trendlineData(trend.values);
   // Re-bind counts for the tooltip closure: rebuild the tooltip callback so
   // it sees the fresh counts array, not a stale reference from first build.
   trendChart.options.plugins.tooltip.callbacks.label = (c) => {
@@ -618,16 +651,32 @@ function concurrentTooltipLabel(trend) {
 
 function buildConcurrentTrendChart(trend) {
   const ctx = document.getElementById('concurrent-trend').getContext('2d');
+  const css = getComputedStyle(document.documentElement);
+  const work = css.getPropertyValue('--accent-work').trim();
+  const pctValues = trend.values.map(v => v == null ? null : v * 100);
   return new Chart(ctx, {
     type: 'bar',
     data: {
       labels: trend.labels,
-      datasets: [{
-        label: 'Concurrent share',
-        data: trend.values.map(v => v == null ? null : v * 100),
-        backgroundColor: concurrentTrendBarColors(trend),
-        borderWidth: 0,
-      }]
+      datasets: [
+        {
+          label: 'Concurrent share',
+          data: pctValues,
+          backgroundColor: concurrentTrendBarColors(trend),
+          borderWidth: 0,
+        },
+        {
+          label: 'Trend',
+          type: 'line',
+          data: trendlineData(pctValues),
+          borderColor: work + '99',
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+        },
+      ]
     },
     options: {
       responsive: true,
@@ -641,7 +690,7 @@ function buildConcurrentTrendChart(trend) {
           ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
         },
         y: {
-          beginAtZero: true,
+          min: 0,
           max: 100,
           ticks: { callback: (v) => `${v}%` },
           grid: { color: 'rgba(127,127,127,0.15)' }
@@ -649,7 +698,10 @@ function buildConcurrentTrendChart(trend) {
       },
       plugins: {
         legend: { display: false },
-        tooltip: { callbacks: { label: concurrentTooltipLabel(trend) } }
+        tooltip: {
+          filter: (item) => item.datasetIndex === 0,
+          callbacks: { label: concurrentTooltipLabel(trend) },
+        }
       }
     }
   });
@@ -657,9 +709,11 @@ function buildConcurrentTrendChart(trend) {
 
 function renderConcurrentTrend(trend) {
   if (!concurrentTrendChart) { concurrentTrendChart = buildConcurrentTrendChart(trend); return; }
+  const pctValues = trend.values.map(v => v == null ? null : v * 100);
   concurrentTrendChart.data.labels = trend.labels;
-  concurrentTrendChart.data.datasets[0].data = trend.values.map(v => v == null ? null : v * 100);
+  concurrentTrendChart.data.datasets[0].data = pctValues;
   concurrentTrendChart.data.datasets[0].backgroundColor = concurrentTrendBarColors(trend);
+  concurrentTrendChart.data.datasets[1].data = trendlineData(pctValues);
   // Rebind counts closure so the tooltip reflects fresh data, not the array
   // captured at first build.
   concurrentTrendChart.options.plugins.tooltip.callbacks.label = concurrentTooltipLabel(trend);
