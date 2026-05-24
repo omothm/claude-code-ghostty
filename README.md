@@ -1,17 +1,29 @@
-# Ghostty + Claude Code: Tab-Targeted Notifications
+# Ghostty + Claude Code: Smart Notifications
 
-When running multiple Claude Code agents in Ghostty tabs, clicking a notification activates Ghostty and focuses the correct tab. Tab titles show the agent's state at a glance. An optional menubar indicator tracks sessions.
+Running multiple Claude Code sessions in Ghostty tabs? This gives you three things:
 
-## How It Works
+- **Clickable notifications** — clicking a notification focuses the exact Ghostty tab that needs your attention, not just the app
+- **Tab titles that show session state** — glance at your tab bar and know which agents are working, waiting, or idle
+- **An optional menubar indicator** — a SwiftBar plugin that shows session counts and a one-click jump to any session, without leaving your current app
 
-Each session's tab title encodes its state:
+## Install
 
-- `⏳ Claude Code | …` — working
-- `🔔 Claude Code | …` — awaiting input
-- `👀 Claude Code | …` — idle, but a Claude-owned background task (a `Monitor` tool call or a `Bash(run_in_background)`) is still running
-- `Claude Code | <dir> (<shortID>)` — idle (or `Claude Code | <summary>` if `/rename`d)
+```sh
+git clone https://github.com/omothm/claude-code-ghostty
+cd claude-code-ghostty
+./install.sh
+```
 
-Notifications use `terminal-notifier` with an `-execute` script that finds and clicks the matching tab by partial title match, so it works across windows and tab reorders. Ghostty's native notifications are disabled to avoid duplicates.
+Then add two lines to your Ghostty config (`~/Library/Application Support/com.mitchellh.ghostty/config`):
+
+```
+desktop-notifications = false
+bell-features = no-title
+```
+
+The first disables Ghostty's own notifications (which would duplicate ours). The second disables Ghostty's native bell icon in non-Claude tabs.
+
+To update: `git pull && ./install.sh`. The script is idempotent — it only touches what has changed.
 
 ## Prerequisites
 
@@ -19,157 +31,64 @@ Notifications use `terminal-notifier` with an `-execute` script that finds and c
 - [Ghostty](https://ghostty.org/) (`brew install --cask ghostty`)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 - `brew install jq terminal-notifier coreutils`
-- Grant accessibility permissions to `terminal-notifier` and `osascript` (System Settings > Privacy & Security > Accessibility)
+- Accessibility permissions for `terminal-notifier` and `osascript` (macOS will prompt on first use; grant in System Settings > Privacy & Security > Accessibility)
 
-## Installation
+## What you get
 
-### 1. Copy hook scripts
+**Tab titles** always show each session's state:
 
-```sh
-mkdir -p ~/.claude/hooks
-cp hooks/* ~/.claude/hooks/
-chmod +x ~/.claude/hooks/*.sh
-```
+| Title prefix | Meaning |
+|---|---|
+| `⏳ Claude Code \| …` | Working |
+| `🔔 Claude Code \| …` | Waiting for your input |
+| `👀 Claude Code \| …` | Idle, but a background task is still running |
+| `Claude Code \| <dir>` | Idle |
 
-### 2. Configure Claude Code settings
-
-```sh
-cp settings.json ~/.claude/settings.json
-```
-
-If you already have a `~/.claude/settings.json`, merge the `env` and `hooks` keys manually.
-
-### 3. Configure Ghostty
-
-Add to `~/Library/Application Support/com.mitchellh.ghostty/config`:
-
-```
-desktop-notifications = false
-```
-
-This avoids duplicate notifications and prevents Ghostty from yanking the whole window across desktops. Optionally also add:
-
-```
-bell-features = no-title
-```
-
-to disable Ghostty's native bell icon in non-Claude tabs (our notifications handle that signaling).
-
-### 4. Grant accessibility permissions
-
-macOS will prompt on first use for `terminal-notifier` and `osascript`. Grant both in System Settings > Privacy & Security > Accessibility. Notification click-to-navigate won't work without this.
+**Notifications** fire when a session completes a task or needs your input. The notification's `-execute` action focuses the exact tab by partial title match — works across windows and regardless of tab order.
 
 ## Optional: menubar indicator
 
-A [SwiftBar](https://swiftbar.app/) plugin shows a menubar indicator for Claude Code sessions. Three modes are available; the default (`notifs`) requires no configuration.
-
-1. `brew install --cask swiftbar`
-2. Create a plugins directory:
-
-   ```sh
-   mkdir -p ~/swiftbar
-   ```
-
-3. Launch SwiftBar (`open -a SwiftBar`). On first launch it opens a folder picker; select the directory you just created.
-
-   To start SwiftBar automatically at login: click the SwiftBar menubar icon → **SwiftBar** → **Preferences…** and check **Launch at login**.
-
-4. Copy the plugin:
-
-   ```sh
-   cp swiftbar/ghostty-bells.30s.sh ~/swiftbar/
-   chmod +x ~/swiftbar/ghostty-bells.30s.sh
-   ```
-
-   SwiftBar auto-detects new plugin files. The `.30s` in the filename is a background poll interval; rename to tune it (e.g. `.1m.sh`). Live transitions update the menubar within ~200 ms via push refresh.
-
-### Menubar modes
-
-| Mode | Behavior |
-|------|----------|
-| `notifs` (default) | Hidden when all sessions are idle or working; shows a bell icon + count when one or more sessions are awaiting input |
-| `off` | Always hidden even if the plugin is installed |
-| `always-on` | Always visible; shows counts for all session states; emoji bell appears in header (yellow) when any session needs input |
-
-**`always-on` example** — when one session awaits input, one is working, one has a background monitor running, and one is idle:
-
-```
-🔔 1 ⏳ 1 🔭 1 💤 1   ← bold numbers; emoji bell when any session awaits input
-─────────────────────
-Awaiting input
-  🔔 api-service (a1b2c3d4)
-─────────────────────
-Working
-  ⏳ frontend (e5f6a7b8)
-─────────────────────
-Watching
-  🔭 ci-tracker (b3c4d5e6)
-─────────────────────
-Idle
-  💤 devtools (c9d0e1f2)
-```
-
-(The 🔭 above is a placeholder for the SF Symbol `binoculars`, which is rendered live in the menubar.) When no sessions are awaiting input the header omits the bell (`⏳ N 💤 N` or `⏳ N 🔭 N 💤 N`). The binoculars count and "Watching" section appear only when at least one idle session has a live background task; otherwise both are hidden. Clicking any entry focuses that Ghostty tab.
-
-### Configuration
-
-Configuration and dashboard artifacts live under `~/.claude/.ccg/`. Set the mode by creating `~/.claude/.ccg/config.json`:
+Install [SwiftBar](https://swiftbar.app/) and the install script deploys the plugin automatically.
 
 ```sh
-mkdir -p ~/.claude/.ccg
-cp .ccg/config.json ~/.claude/.ccg/config.json    # ships with {"mode":"always-on"}
+brew install --cask swiftbar
+mkdir -p ~/swiftbar
+open -a SwiftBar  # pick ~/swiftbar as the plugins directory on first launch
+./install.sh      # deploys the plugin
 ```
+
+The menubar icon shows live session counts. Clicking any entry focuses that tab. Three modes control when the icon appears:
+
+| Mode | Behavior |
+|---|---|
+| `always-on` (default) | Always visible; shows counts for all states |
+| `notifs` | Hidden when all sessions are idle or working; appears when a session needs input |
+| `off` | Always hidden |
+
+Change the mode by editing `~/.claude/.ccg/config.json`:
 
 ```json
-{
-  "mode": "always-on"
-}
+{ "mode": "notifs" }
 ```
-
-- **`mode`** — `"notifs"` (default) | `"off"` | `"always-on"`
 
 ## Optional: metrics dashboard
 
-The hooks log every state transition to `~/.claude/.ccg/events.jsonl` (append-only JSONL). A self-contained dashboard reads this log and shows live + last-24h metrics: concurrent working / awaiting / idle right now, time spent in each state, sessions started, average response latency (🔔 → next prompt), and peak concurrent working.
+The hooks log every state transition to `~/.claude/.ccg/events.jsonl`. A self-contained dashboard reads this log and shows live and last-24h metrics: sessions active, time in each state, average response latency, and peak concurrency.
 
-1. Copy the dashboard:
+If the SwiftBar plugin is installed, click **Open dashboard** in the menubar dropdown — it starts a local HTTP server and opens the dashboard automatically.
 
-   ```sh
-   mkdir -p ~/.claude/.ccg
-   cp .ccg/dashboard.html ~/.claude/.ccg/
-   ```
-
-2. Open it. Two ways:
-
-   - **From the SwiftBar dropdown** (recommended) — the menubar plugin appends an **Open dashboard** entry below the session list. Click it: the plugin starts `python3 -m http.server 8765` from `~/.claude/.ccg/` and opens http://localhost:8765/dashboard.html. The entry then becomes **Stop dashboard server**.
-
-   - **Manually** — the dashboard fetches `events.jsonl` over HTTP and refuses to run from `file://`:
-
-     ```sh
-     cd ~/.claude/.ccg
-     python3 -m http.server 8765
-     ```
-
-     Then open http://localhost:8765/dashboard.html.
-
-3. The dashboard auto-refreshes every second.
-
-The dashboard is a single HTML file that imports Chart.js from a CDN; there are no build steps and no other files to install. The PID of the running server is tracked at `~/.claude/.ccg/server.pid` so the menubar entry stays in sync across SwiftBar refreshes.
-
-## Validation
+To open it manually:
 
 ```sh
-./tests/validate.sh            # test deployed scripts (~/.claude/hooks/)
-./tests/validate.sh .          # test project scripts without deploying
-./tests/validate.sh --verbose  # show every passing check
+cd ~/.claude/.ccg
+python3 -m http.server 8765
+# then open http://localhost:8765/dashboard.html
 ```
-
-Runs ~99 end-to-end checks. Safe to run anytime (sandboxed temp directories). Exits non-zero on any failure.
 
 ## Why Ghostty
 
-Ghostty uses native macOS tab groups, which are exposed to the accessibility framework. This lets AppleScript find and click tabs by title. Warp and Alacritty don't support this.
+Ghostty exposes its tab bar through the macOS Accessibility API, which lets AppleScript find and click a tab by title. Warp and Alacritty don't support this, so the click-to-navigate notification action only works with Ghostty.
 
 ---
 
-Contributors: see [CLAUDE.md](CLAUDE.md) for architecture, script reference, environment variables, and validator expectations.
+Contributors: see [CLAUDE.md](CLAUDE.md) for architecture, scripts, environment variables, and validator usage.
