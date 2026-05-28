@@ -74,6 +74,7 @@ terminal-notifier \
   -title "$icon $title" \
   -message "$message" \
   -subtitle "$subtitle" \
+  -group "ccg-$session_id" \
   -appIcon /Applications/Ghostty.app/Contents/Resources/AppIcon.icns \
   -execute "$HOME/.claude/hooks/focus-ghostty-tab.sh '$match_key'"
 __trace "terminal-notifier rc=$?"
