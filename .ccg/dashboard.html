@@ -177,7 +177,7 @@ h2 {
   <div class="card hero"><div class="label">Peak concurrent working</div><div class="value" id="t-peak">0</div><div class="sub">max parallelism reached</div></div>
 </div>
 <div class="row wait-row">
-  <div class="card wait small"><div class="label">Worst bell</div><div class="value" id="t-max-latency">—</div><div class="sub">longest single 🔔 · the tail</div></div>
+  <div class="card wait small"><div class="label">p90 per bell</div><div class="value" id="t-p90-latency">—</div><div class="sub">90% of 🔔 answered within</div></div>
   <div class="card wait small"><div class="label">Total wait</div><div class="value" id="t-input">—</div><div class="sub">summed across all 🔔</div></div>
   <div class="card work small"><div class="label">Time working</div><div class="value" id="t-working">—</div><div class="sub">summed across sessions</div></div>
   <div class="card small"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
@@ -211,6 +211,7 @@ const TRAILING_CAP_SEC = 30 * 60;  // cap open-ended trailing spans at 30 min
 const NOW_RECENT_SEC = 12 * 3600;  // a session counts as "right now" if its last event is ≤ 12 h old (matches sweep interval)
 const STATES = ['working', 'input', 'watching', 'idle'];
 const TREND_DAYS = 30;             // daily-trend chart window
+const P90_MIN_SAMPLE = 8;          // min bells in the window before p90 is stable enough to show
 
 let chart = null;
 let trendChart = null;
@@ -232,11 +233,18 @@ function trendlineData(values) {
   return values.map((_, i) => slope * i + intercept);
 }
 
-function median(values) {
+// Linear-interpolated percentile (p in [0,1]). percentile(xs, 0.5) is the
+// median; percentile(xs, 0.9) is p90. Returns null on an empty array.
+function percentile(values, p) {
   if (!values || values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  const idx = (sorted.length - 1) * p;
+  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+}
+
+function median(values) {
+  return percentile(values, 0.5);
 }
 
 function fmtDuration(secs) {
@@ -424,14 +432,14 @@ function compute(events, nowSec) {
   }
   const concurrentShare = workingBins > 0 ? multiWorkingBins / workingBins : null;
 
-  let medianLat = null, maxLat = null;
-  if (latencies.length > 0) {
-    medianLat = median(latencies);
-    maxLat = latencies.reduce((a, b) => (b > a ? b : a), 0);
-  }
+  let medianLat = null, p90Lat = null;
+  if (latencies.length > 0) medianLat = median(latencies);
+  // p90 needs a minimum sample or it's just "the worst-ish one" and swings
+  // wildly; gate it so a sparse window shows — rather than a misleading number.
+  if (latencies.length >= P90_MIN_SAMPLE) p90Lat = percentile(latencies, 0.9);
   const bells = latencies.length;
 
-  return { totals, nowCounts, started, peak, medianLat, maxLat, bells, concurrentShare, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
+  return { totals, nowCounts, started, peak, medianLat, p90Lat, bells, concurrentShare, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
 }
 
 // Daily median latency over the last TREND_DAYS days. Each bell is attributed
@@ -804,7 +812,7 @@ function render(data, nowSec) {
 
   document.getElementById('t-sessions').textContent = data.started;
   document.getElementById('t-latency').textContent  = fmtLatency(data.medianLat);
-  document.getElementById('t-max-latency').textContent = fmtLatency(data.maxLat);
+  document.getElementById('t-p90-latency').textContent = fmtLatency(data.p90Lat);
   document.getElementById('t-bells').textContent    = data.bells;
   document.getElementById('t-peak').textContent     = data.peak;
   document.getElementById('t-concurrent-share').textContent = fmtPct(data.concurrentShare);
