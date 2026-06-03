@@ -171,7 +171,7 @@ h2 {
 
 <h2>Last 24h</h2>
 <div class="row wait-row">
-  <div class="card wait hero"><div class="label">Avg per bell</div><div class="value" id="t-latency">—</div><div class="sub">typical wait you cost each 🔔</div></div>
+  <div class="card wait hero"><div class="label">Median per bell</div><div class="value" id="t-latency">—</div><div class="sub">typical wait you cost each 🔔</div></div>
   <div class="card hero"><div class="label">Bells answered</div><div class="value" id="t-bells">0</div><div class="sub">🔔 → next-prompt pairs</div></div>
   <div class="card hero"><div class="label">Concurrent share</div><div class="value" id="t-concurrent-share">—</div><div class="sub">working-time with ≥2 sessions</div></div>
   <div class="card hero"><div class="label">Peak concurrent working</div><div class="value" id="t-peak">0</div><div class="sub">max parallelism reached</div></div>
@@ -182,11 +182,11 @@ h2 {
   <div class="card work small"><div class="label">Time working</div><div class="value" id="t-working">—</div><div class="sub">summed across sessions</div></div>
   <div class="card small"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
 </div>
-<p class="caption">Top row are the levers — pull <em>avg per bell</em> down, push <em>concurrent share</em> up. Bottom row diagnoses where the time actually went.</p>
+<p class="caption">Top row are the levers — pull <em>median per bell</em> down, push <em>concurrent share</em> up. Bottom row diagnoses where the time actually went.</p>
 
-<h2>Avg wait per bell · last 30 days</h2>
+<h2>Median wait per bell · last 30 days</h2>
 <div class="chart-wrap"><canvas id="trend"></canvas></div>
-<p class="caption">Daily average of <em>input → next prompt</em> latency. Today's bar is partial. Lower is better; flat-or-falling is the trend you want.</p>
+<p class="caption">Daily median of <em>input → next prompt</em> latency — robust to the odd long wait. Today's bar is partial. Lower is better; flat-or-falling is the trend you want.</p>
 
 <h2>Concurrent share · last 30 days</h2>
 <div class="chart-wrap"><canvas id="concurrent-trend"></canvas></div>
@@ -230,6 +230,13 @@ function trendlineData(values) {
   const slope = (n * sumXY - sumX * sumY) / denom;
   const intercept = (sumY - slope * sumX) / n;
   return values.map((_, i) => slope * i + intercept);
+}
+
+function median(values) {
+  if (!values || values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 function fmtDuration(secs) {
@@ -417,27 +424,27 @@ function compute(events, nowSec) {
   }
   const concurrentShare = workingBins > 0 ? multiWorkingBins / workingBins : null;
 
-  let avgLat = null, maxLat = null;
+  let medianLat = null, maxLat = null;
   if (latencies.length > 0) {
-    avgLat = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+    medianLat = median(latencies);
     maxLat = latencies.reduce((a, b) => (b > a ? b : a), 0);
   }
   const bells = latencies.length;
 
-  return { totals, nowCounts, started, peak, avgLat, maxLat, bells, concurrentShare, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
+  return { totals, nowCounts, started, peak, medianLat, maxLat, bells, concurrentShare, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
 }
 
-// Daily avg latency over the last TREND_DAYS days. Each bell is attributed to
-// the local calendar day of its `input` event (when the user incurred the
-// wait), not the day it was answered. Today's bar is partial by definition.
+// Daily median latency over the last TREND_DAYS days. Each bell is attributed
+// to the local calendar day of its `input` event (when the user incurred the
+// wait), not the day it was answered. Median (not mean) so a single long wait
+// doesn't drag a whole day's bar up. Today's bar is partial by definition.
 function computeDailyTrend(events, nowSec) {
   const today = new Date(nowSec * 1000);
   today.setHours(0, 0, 0, 0);
   const todayStart = today.getTime() / 1000;
   const oldestStart = todayStart - (TREND_DAYS - 1) * 86400;
 
-  const sums = new Array(TREND_DAYS).fill(0);
-  const counts = new Array(TREND_DAYS).fill(0);
+  const dayLats = Array.from({ length: TREND_DAYS }, () => []);
 
   const sessions = new Map();
   for (const e of events) {
@@ -456,16 +463,17 @@ function computeDailyTrend(events, nowSec) {
       const dayStart = d.getTime() / 1000;
       const idx = Math.round((dayStart - oldestStart) / 86400);
       if (idx < 0 || idx >= TREND_DAYS) continue;
-      sums[idx] += lat;
-      counts[idx] += 1;
+      dayLats[idx].push(lat);
     }
   }
 
   const labels = new Array(TREND_DAYS);
   const values = new Array(TREND_DAYS);
+  const counts = new Array(TREND_DAYS);
   for (let i = 0; i < TREND_DAYS; i++) {
     labels[i] = new Date((oldestStart + i * 86400) * 1000);
-    values[i] = counts[i] > 0 ? sums[i] / counts[i] : null;
+    values[i] = dayLats[i].length > 0 ? median(dayLats[i]) : null;
+    counts[i] = dayLats[i].length;
   }
   return { labels, values, counts };
 }
@@ -564,7 +572,7 @@ function buildTrendChart(trend) {
       labels: trend.labels,
       datasets: [
         {
-          label: 'Avg per bell',
+          label: 'Median per bell',
           data: trend.values,
           backgroundColor: trendBarColors(trend),
           borderWidth: 0,
@@ -608,7 +616,7 @@ function buildTrendChart(trend) {
               const lat = c.parsed.y;
               const n = trend.counts[c.dataIndex];
               if (lat == null || n === 0) return 'No bells';
-              return `Avg ${fmtLatency(lat)} · ${n} bell${n === 1 ? '' : 's'}`;
+              return `Median ${fmtLatency(lat)} · ${n} bell${n === 1 ? '' : 's'}`;
             }
           }
         }
@@ -629,7 +637,7 @@ function renderTrend(trend) {
     const lat = c.parsed.y;
     const n = trend.counts[c.dataIndex];
     if (lat == null || n === 0) return 'No bells';
-    return `Avg ${fmtLatency(lat)} · ${n} bell${n === 1 ? '' : 's'}`;
+    return `Median ${fmtLatency(lat)} · ${n} bell${n === 1 ? '' : 's'}`;
   };
   trendChart.update('none');
 }
@@ -795,7 +803,7 @@ function render(data, nowSec) {
   document.getElementById('t-idle').textContent     = fmtDuration(data.totals.idle);
 
   document.getElementById('t-sessions').textContent = data.started;
-  document.getElementById('t-latency').textContent  = fmtLatency(data.avgLat);
+  document.getElementById('t-latency').textContent  = fmtLatency(data.medianLat);
   document.getElementById('t-max-latency').textContent = fmtLatency(data.maxLat);
   document.getElementById('t-bells').textContent    = data.bells;
   document.getElementById('t-peak').textContent     = data.peak;
