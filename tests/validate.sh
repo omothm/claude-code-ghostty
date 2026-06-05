@@ -843,6 +843,55 @@ trace_reset
 unset BELL_TRACE
 
 # ---------------------------------------------------------------------------
+section "notify.sh error mode (StopFailure)"
+
+# Stub terminal-notifier so no real notification fires; capture its argv.
+NOTIFY_BIN="$TMPROOT/bin"
+mkdir -p "$NOTIFY_BIN"
+TN_ARGS_FILE="$TMPROOT/tn-args.txt"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "%s"\n' "$TN_ARGS_FILE" > "$NOTIFY_BIN/terminal-notifier"
+chmod +x "$NOTIFY_BIN/terminal-notifier"
+_saved_path="$PATH"
+export PATH="$NOTIFY_BIN:$PATH"
+export CCG_DIR="$TMPROOT/ccg-err"
+
+# (a) error mode extracts the latest API-error text from the transcript,
+#     writes a readable log, surfaces the error as the message, and appends
+#     `open -t <log>` to the execute command.
+ERR_SID="errSID"
+ERR_TRANSCRIPT="$TMPROOT/err-transcript.jsonl"
+printf '%s\n' '{"type":"assistant","isApiErrorMessage":false,"message":{"content":[{"type":"text","text":"normal turn"}]}}' > "$ERR_TRANSCRIPT"
+printf '%s\n' '{"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"API Error: 429 throttled"}]}}' >> "$ERR_TRANSCRIPT"
+: > "$TN_ARGS_FILE"
+echo "{\"session_id\":\"$ERR_SID\",\"cwd\":\"/tmp/proj\",\"transcript_path\":\"$ERR_TRANSCRIPT\"}" \
+  | "$HOOKS_DIR/notify.sh" '❌' 'Claude stopped: API error' '' error > /dev/null 2>&1
+ERR_LOG="$CCG_DIR/last-error-$ERR_SID.log"
+tn=$(cat "$TN_ARGS_FILE" 2>/dev/null)
+
+[ -f "$ERR_LOG" ] && ok "error mode writes readable log file" || ng "error log not written ($ERR_LOG)"
+grep -qF "API Error: 429 throttled" "$ERR_LOG" 2>/dev/null \
+  && ok "error log contains extracted API-error text" || ng "error log missing API-error text"
+echo "$tn" | grep -qF -- "-message API Error: 429 throttled" \
+  && ok "notification message is the extracted error" || ng "message not set to extracted error (got: $tn)"
+echo "$tn" | grep -qF "open -t '$ERR_LOG'" \
+  && ok "execute focuses tab AND opens the error log" || ng "execute missing 'open -t <log>' (got: $tn)"
+
+# (b) no transcript → fall back to default message, write no log, no open -t.
+: > "$TN_ARGS_FILE"
+echo "{\"session_id\":\"noTrans\",\"cwd\":\"/tmp/proj\"}" \
+  | "$HOOKS_DIR/notify.sh" '❌' 'Claude stopped: API error' '' error > /dev/null 2>&1
+tn2=$(cat "$TN_ARGS_FILE" 2>/dev/null)
+echo "$tn2" | grep -qF -- "-message Claude stopped: API error" \
+  && ok "no transcript => falls back to default message" || ng "fallback message wrong (got: $tn2)"
+echo "$tn2" | grep -q "open -t" \
+  && ng "fallback appended 'open -t' with no log" || ok "no log => execute does not open anything"
+[ -f "$CCG_DIR/last-error-noTrans.log" ] \
+  && ng "wrote a log file with no error text" || ok "no error text => no log file written"
+
+export PATH="$_saved_path"
+unset CCG_DIR
+
+# ---------------------------------------------------------------------------
 section "End-to-end latency"
 
 if [ "$plugin" = "1" ]; then

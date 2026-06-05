@@ -70,7 +70,7 @@
           },
           {
             "type": "command",
-            "command": "~/.claude/hooks/notify.sh '⚠️' 'Claude stopped: API error'"
+            "command": "~/.claude/hooks/notify.sh '❌' 'Claude stopped: API error' '' error"
           }
         ]
       }
