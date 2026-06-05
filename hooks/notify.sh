@@ -23,7 +23,20 @@ __trace() {
     "$(gdate +%s.%3N 2>/dev/null || date +%s)" "$__N" "$$" "$PPID" "$*" \
     >> "${BELL_TRACE_LOG:-/tmp/bell-trace.log}"
 }
+
+# Always-on diagnostic log (independent of BELL_TRACE). Records every
+# notification the hook builds so click-navigation failures can be diagnosed
+# after the fact without having to reproduce with tracing enabled. Cheap:
+# a handful of lines per notification. Path overridable via CCG_DIR.
+__dbg() {
+  local _d="${CCG_DIR:-$HOME/.claude/.ccg}"
+  [ -d "$_d" ] || mkdir -p "$_d" 2>/dev/null
+  printf '%s [%s pid=%s] %s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$__N" "$$" "$*" \
+    >> "$_d/notify-debug.log" 2>/dev/null
+}
 __trace "entry argc=$# args=[$*]"
+__dbg "entry argc=$# args=[$*]"
 
 icon="$1"
 default_message="$2"
@@ -62,15 +75,40 @@ error_log=""
 if [ "$mode" = "error" ]; then
   transcript_path=$(echo "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
   __trace "error mode transcript_path=$transcript_path"
+  __dbg "error mode: transcript_path from payload=[$transcript_path] session_id=$session_id cwd=$cwd"
+
+  # Fallback: StopFailure may not always carry transcript_path. The transcript
+  # path is deterministic — ~/.claude/projects/<cwd-with-/-as-->/<sid>.jsonl —
+  # so derive it from cwd + session_id when the field is missing or stale.
+  if [ -z "$transcript_path" ] || [ ! -f "$transcript_path" ]; then
+    if [ "$cwd" != "unknown" ] && [ "$session_id" != "unknown" ]; then
+      mangled=$(printf '%s' "$cwd" | sed 's#/#-#g')
+      derived="$HOME/.claude/projects/$mangled/$session_id.jsonl"
+      __dbg "error mode: deriving transcript path -> $derived (exists=$([ -f "$derived" ] && echo yes || echo no))"
+      [ -f "$derived" ] && transcript_path="$derived"
+    fi
+  fi
+
   if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-    # Last assistant entry flagged as an API error → its text content.
-    error_text=$(jq -rs '
-      [ .[]
-        | select(.isApiErrorMessage == true)
-        | (.message.content // [])
-        | map(select(.type == "text") | .text)
-        | join("\n") ]
-      | last // empty' "$transcript_path" 2>/dev/null)
+    # Race: StopFailure fires and runs this hook concurrently with Claude Code
+    # writing the API-error entry to the transcript. Empirically the entry's
+    # timestamp lands in the same ~100 ms as the hook invocation, so a single
+    # read often misses it (the file is flushed a beat later). Poll for up to
+    # ~3 s (30 × 100 ms) for the error text to appear before giving up.
+    error_text=""
+    attempt=0
+    while [ "$attempt" -lt 30 ]; do
+      error_text=$(jq -rs '
+        [ .[]
+          | select(.isApiErrorMessage == true)
+          | (.message.content // [])
+          | map(select(.type == "text") | .text)
+          | join("\n") ]
+        | last // empty' "$transcript_path" 2>/dev/null)
+      [ -n "$error_text" ] && break
+      attempt=$((attempt + 1))
+      sleep 0.1
+    done
     if [ -n "$error_text" ]; then
       message="$error_text"
       error_log="${CCG_DIR:-$HOME/.claude/.ccg}/last-error-${session_id}.log"
@@ -83,9 +121,13 @@ if [ "$mode" = "error" ]; then
         printf '%s\n' "$error_text"
       } > "$error_log" 2>/dev/null
       __trace "wrote error_log=$error_log"
+      __dbg "error mode: wrote error_log=$error_log after ${attempt} retries (error_text len=${#error_text})"
     else
       __trace "error mode: no API error text found in transcript"
+      __dbg "error mode: NO API-error text found in $transcript_path after ${attempt} retries"
     fi
+  else
+    __dbg "error mode: no usable transcript -> falling back to generic message, no log"
   fi
 fi
 
@@ -100,6 +142,7 @@ else
   subtitle="$short_id ($dir_name)"
   match_key="$short_id"
 fi
+__dbg "match_key=[$match_key] (session_summary=[$session_summary] short_id=$short_id dir=$dir_name)"
 
 # Update tab title if requested
 if [ -n "$tab_status" ]; then
@@ -117,6 +160,7 @@ fi
 
 # Send notification - clicking will activate Ghostty and focus the correct tab
 __trace "sending terminal-notifier title=\"$icon $title\" match_key=$match_key"
+__dbg "execute_cmd=[$execute_cmd]"
 terminal-notifier \
   -title "$icon $title" \
   -message "$message" \
@@ -124,7 +168,9 @@ terminal-notifier \
   -group "ccg-$session_id" \
   -appIcon /Applications/Ghostty.app/Contents/Resources/AppIcon.icns \
   -execute "$execute_cmd"
-__trace "terminal-notifier rc=$?"
+tn_rc=$?
+__trace "terminal-notifier rc=$tn_rc"
+__dbg "terminal-notifier rc=$tn_rc"
 
 __trace "exit"
 exit 0

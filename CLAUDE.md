@@ -58,12 +58,17 @@ After every change, verify the following in order:
    `~/.claude/hooks/` / `~/swiftbar/` / `~/.claude/.ccg/`.
 8. **Commit and push** — every change ends with a commit and a push to
    *all* configured remotes (this overrides the default "only commit
-   when explicitly asked" rule for this repo). Don't wait for the user
-   to ask. Remotes to push to are whatever `git remote` lists; today
-   that's `origin` and `trilogy`. Push to each one in sequence.
-   **For bug fixes: do not commit until the fix is proven working** —
-   hold the commit until the user confirms the fix is behaving correctly
-   in practice. Once confirmed, commit and push immediately without
+   when explicitly asked" rule for this repo). Remotes to push to are
+   whatever `git remote` lists; today that's `origin` and `trilogy`.
+   Push to each one in sequence.
+   **Always hold the commit and push until the new feature or fix is
+   proven working** — not just for bug fixes but for any new behavior.
+   "Proven" means the user has confirmed it behaves correctly in
+   practice (or there is concrete in-situ evidence it does), NOT merely
+   that the validator passes or the code looks right. The validator and
+   local diagnostics are necessary but not sufficient. Deploy to
+   `~/.claude/...` so the change can be exercised live, then wait. Once
+   the user confirms it's working, commit and push immediately without
    asking.
 
 ## Architecture

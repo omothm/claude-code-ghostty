@@ -876,6 +876,11 @@ echo "$tn" | grep -qF -- "-message API Error: 429 throttled" \
 echo "$tn" | grep -qF "open -t '$ERR_LOG'" \
   && ok "execute focuses tab AND opens the error log" || ng "execute missing 'open -t <log>' (got: $tn)"
 
+# (a') the always-on debug log captures the invocation regardless of BELL_TRACE.
+[ -f "$CCG_DIR/notify-debug.log" ] && grep -q "match_key=" "$CCG_DIR/notify-debug.log" \
+  && ok "notify-debug.log records invocation (no BELL_TRACE needed)" \
+  || ng "notify-debug.log not written or missing match_key line"
+
 # (b) no transcript → fall back to default message, write no log, no open -t.
 : > "$TN_ARGS_FILE"
 echo "{\"session_id\":\"noTrans\",\"cwd\":\"/tmp/proj\"}" \
@@ -887,6 +892,47 @@ echo "$tn2" | grep -q "open -t" \
   && ng "fallback appended 'open -t' with no log" || ok "no log => execute does not open anything"
 [ -f "$CCG_DIR/last-error-noTrans.log" ] \
   && ng "wrote a log file with no error text" || ok "no error text => no log file written"
+
+# (c) transcript_path ABSENT from payload but derivable from cwd + session_id.
+#     This is the real StopFailure case: the hook JSON carries no
+#     transcript_path, so notify.sh must reconstruct the deterministic path
+#     ~/.claude/projects/<cwd-with-/-as-->/<sid>.jsonl. Sandbox HOME so the
+#     derived path lands in our temp tree, not the real ~/.claude.
+DERIVE_HOME="$TMPROOT/derive-home"
+DERIVE_CWD="/tmp/derive proj"   # space in path → also guards the mangle/quoting
+DERIVE_SID="derivedSID"
+mangled=$(printf '%s' "$DERIVE_CWD" | sed 's#/#-#g')
+mkdir -p "$DERIVE_HOME/.claude/projects/$mangled"
+DERIVE_TRANSCRIPT="$DERIVE_HOME/.claude/projects/$mangled/$DERIVE_SID.jsonl"
+printf '%s\n' '{"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"API Error: 529 overloaded"}]}}' > "$DERIVE_TRANSCRIPT"
+: > "$TN_ARGS_FILE"
+HOME="$DERIVE_HOME" CCG_DIR="$DERIVE_HOME/.claude/.ccg" \
+  bash -c "echo '{\"session_id\":\"$DERIVE_SID\",\"cwd\":\"$DERIVE_CWD\"}' | '$HOOKS_DIR/notify.sh' '❌' 'Claude stopped: API error' '' error" > /dev/null 2>&1
+tn3=$(cat "$TN_ARGS_FILE" 2>/dev/null)
+echo "$tn3" | grep -qF -- "-message API Error: 529 overloaded" \
+  && ok "missing transcript_path => derived from cwd+session_id" \
+  || ng "derivation fallback failed (got: $tn3)"
+[ -f "$DERIVE_HOME/.claude/.ccg/last-error-$DERIVE_SID.log" ] \
+  && ok "derived transcript still writes error log" \
+  || ng "derived transcript did not write error log"
+
+# (d) flush race: StopFailure runs notify.sh concurrently with Claude Code
+#     writing the API-error entry, so a single read misses it. notify.sh must
+#     poll. Start with no error entry, append it ~0.4s in, and confirm the
+#     poll picks it up rather than falling back to the generic message.
+RACE_SID="raceSID"
+RACE_TRANSCRIPT="$TMPROOT/race-transcript.jsonl"
+printf '%s\n' '{"type":"assistant","isApiErrorMessage":false,"message":{"content":[{"type":"text","text":"pre-error turn"}]}}' > "$RACE_TRANSCRIPT"
+( sleep 0.4; printf '%s\n' '{"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"API Error: 503 flushed late"}]}}' >> "$RACE_TRANSCRIPT" ) &
+RACE_WPID=$!
+: > "$TN_ARGS_FILE"
+echo "{\"session_id\":\"$RACE_SID\",\"cwd\":\"/tmp/proj\",\"transcript_path\":\"$RACE_TRANSCRIPT\"}" \
+  | "$HOOKS_DIR/notify.sh" '❌' 'Claude stopped: API error' '' error > /dev/null 2>&1
+wait "$RACE_WPID" 2>/dev/null
+tn4=$(cat "$TN_ARGS_FILE" 2>/dev/null)
+echo "$tn4" | grep -qF -- "-message API Error: 503 flushed late" \
+  && ok "flush race: poll picks up late-written error entry" \
+  || ng "flush race: did not pick up late error (got: $tn4)"
 
 export PATH="$_saved_path"
 unset CCG_DIR
