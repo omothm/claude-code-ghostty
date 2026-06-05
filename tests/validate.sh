@@ -39,11 +39,13 @@ if [ -n "$PROJECT_DIR" ]; then
   HOOKS_DIR="$PROJECT_DIR/hooks"
   export GHOSTTY_HOOKS_DIR="$HOOKS_DIR"
   PLUGIN_PATH="$PROJECT_DIR/swiftbar/ghostty-bells.30s.sh"
+  DASHBOARD_PATH="$PROJECT_DIR/.ccg/dashboard.html"
 else
   HOOKS_DIR="$HOME/.claude/hooks"
   SWIFTBAR_PLUGIN_DIR="$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)"
   PLUGIN_PATH=""
   [ -n "$SWIFTBAR_PLUGIN_DIR" ] && PLUGIN_PATH="$SWIFTBAR_PLUGIN_DIR/ghostty-bells.30s.sh"
+  DASHBOARD_PATH="$HOME/.claude/.ccg/dashboard.html"
 fi
 
 TMPROOT="$(mktemp -d -t bell-validate.XXXXXX)"
@@ -936,6 +938,63 @@ echo "$tn4" | grep -qF -- "-message API Error: 503 flushed late" \
 
 export PATH="$_saved_path"
 unset CCG_DIR
+
+# ---------------------------------------------------------------------------
+section "dashboard verdict logic"
+
+# The verdict banner names the single highest-leverage action from the live
+# levers. Its branch selection (verdictFor) is pure and lives in dashboard.html
+# between the <verdictFor> markers; slice it out and exercise every branch +
+# precedence boundary under Node so a regression in the advice can't slip past.
+if command -v node >/dev/null 2>&1 && [ -f "$DASHBOARD_PATH" ]; then
+  VERDICT_FN=$(awk '/\/\/ <verdictFor>/{f=1;next} /\/\/ <\/verdictFor>/{f=0} f' "$DASHBOARD_PATH")
+  if [ -z "$VERDICT_FN" ]; then
+    ng "could not extract verdictFor from $DASHBOARD_PATH (markers missing?)"
+  else
+    VERDICT_JS="$TMPROOT/verdict.js"
+    {
+      printf '%s\n' "$VERDICT_FN"
+      cat <<'NODE'
+const cases = [
+  // [stall, conc, workingSecs, expectedKind]
+  [null, null,  0,    'gated-quiet'],     // no signal at all
+  [null, 0.10,  3600, 'gated-fanout'],    // gated but low conc + real work → nudge fan-out
+  [null, 0.10,  600,  'gated-quiet'],     // gated, low conc, but barely any work → stay quiet
+  [null, 0.50,  3600, 'gated-quiet'],     // gated, conc healthy → quiet
+  [0.80, 0.90,  3600, 'stall-critical'],  // high stall dominates even with great conc
+  [0.50, 0.90,  3600, 'stall-critical'],  // boundary: 0.5 is critical
+  [0.49, 0.90,  3600, 'stall-high'],      // just below critical
+  [0.25, 0.90,  3600, 'stall-high'],      // boundary: 0.25 is high
+  [0.24, 0.10,  3600, 'fanout'],          // stall healthy, conc low → fan out
+  [0.10, 0.29,  3600, 'fanout'],          // boundary: 0.29 still fan-out
+  [0.10, 0.30,  3600, 'good'],            // boundary: 0.30 is healthy
+  [0.05, 0.80,  3600, 'good'],            // both levers healthy
+  [0.05, null,  3600, 'good'],            // stall healthy, no conc data → good (not fanout)
+];
+let bad = 0;
+for (const [s, c, w, want] of cases) {
+  const got = verdictFor(s, c, w).kind;
+  if (got !== want) { bad++; console.log(`FAIL stall=${s} conc=${c} work=${w}: want ${want}, got ${got}`); }
+}
+process.exit(bad);
+NODE
+    } > "$VERDICT_JS"
+    if node_out=$(node "$VERDICT_JS" 2>&1); then
+      ok "verdictFor selects correct branch across all cases + boundaries"
+    else
+      ng "verdictFor branch mismatch: $node_out"
+    fi
+    # Sanity: every branch kind the renderer switches on must be one verdictFor
+    # can actually return — guards against a renamed kind drifting out of sync.
+    for kind in gated-fanout gated-quiet stall-critical stall-high fanout good; do
+      grep -q "case '$kind'" "$DASHBOARD_PATH" \
+        && ok "renderVerdict handles '$kind'" \
+        || ng "renderVerdict missing case for '$kind'"
+    done
+  fi
+else
+  skip "dashboard verdict logic (node or dashboard.html absent)"
+fi
 
 # ---------------------------------------------------------------------------
 section "End-to-end latency"

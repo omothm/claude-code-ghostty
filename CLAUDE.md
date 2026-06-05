@@ -216,6 +216,72 @@ State file titles contain ` | ` (from `Claude Code | <dir>`). SwiftBar uses
 visible display text. `param1=` retains the original 🔔-prefixed title for
 `focus-ghostty-tab.sh`'s contains-match.
 
+### Dashboard north-star metric: "Fleet stalled on you"
+
+The dashboard's headline lever is **fleet-stall share**, not a per-bell
+latency. The reasoning behind every choice in its definition (arrived at
+empirically against real `events.jsonl` data — re-deriving it from scratch
+is expensive, so it's recorded here):
+
+- **Why not median/p90 per bell.** Any central tendency over "the bells that
+  survive" suffers two biases the user actively hits: *survivorship* (automating
+  trivial bells removes the easy members, so the median of what's left rises
+  even at constant behavior) and *queueing inflation* (more parallel agents →
+  each bell's latency includes time spent serving other bells, Little's Law).
+  Both make the number a moving goalpost that punishes good behavior. Median and
+  p90 are kept only as **diagnostics** (bottom row), never as the goal.
+
+- **The metric.** Per 5-min bin: a bin is *stalled* when ≥1 session is awaiting
+  input AND zero sessions are working. Share = stalled bins ÷ **bell-pending
+  bins** (bins with ≥1 session awaiting input). Reads as "of the time I was on
+  the hook, how much did I waste with no agent making progress." It is
+  *composition-invariant* (trimming easy bells doesn't move it) and
+  *concurrency-correct* (wall-clock bins, not summed-per-session, so more agents
+  don't inflate it) — the two properties median/p90 lack.
+
+- **Watching counts as idle.** A `watching` session is parked; only a background
+  monitor is alive, which isn't *your* forward progress. So `watching` is
+  excluded from both the stalled numerator and the engaged denominator — a bell
+  pending while only a monitor ticks still counts as a stall. (Chosen
+  deliberately over treating watching as activity.)
+
+- **Denominator = bell-pending bins, not "any engaged time."** The
+  bell-pending denominator gives a readable dynamic range (~20–60% on real days)
+  vs. the flat ~4–5% you get dividing by all-engaged time, which under-reads as
+  a lever. Verified: same stalls read 5% (engaged denom) vs 27% (bell-pending
+  denom) on the same day.
+
+- **The gate is on bell-pending bins** (`STALL_MIN_SAMPLE = 12` = 1 h on the
+  hook), NOT on bell count, session count, or work time. This is the metric's
+  own denominator, so gating on it is the textbook precision gate (standard
+  error of a proportion is governed by *its* `n`). The empirical clincher:
+  bell-count/session/work-time gates are *anti-correlated* with reliability on
+  real data — e.g. 05-13 (67 bells, 387 work-min, but only 9 bell-pending bins →
+  noisy 67%) vs 05-24 (25 bells, 87 work-min, but 220 bell-pending bins → the
+  genuine worst day at 100%). Any activity-based gate hides 05-24 (low bells)
+  while showing 05-13 (high bells) — exactly backwards. Only the
+  bell-pending-bin gate ranks them correctly. Below the floor the 24h card shows
+  `—` and chart days render blank (tooltip: "Too few bells to score").
+
+- **Bin size = 5 min.** The stall % is bin-invariant from 1–10 min on real data
+  (26/28/27/25%), so the choice isn't an artifact. 5 min is the sweet spot
+  because its gate floor lands at a meaningful 1 h (12 bins) — at 1 min the floor
+  would be a useless 12 min, at 15 min the dominant-state rule erases fast bells
+  entirely (a 4-min bell never dominates a 15-min bin → on-the-hook collapses to
+  0). Finer bins (2 min) capture sub-5-min bells more faithfully but cost chart
+  smoothness; only switch if rewarding sub-5-min responsiveness becomes a goal.
+
+- **Verdict banner.** The dashboard names the single highest-leverage action,
+  not just a number. `verdictFor(stall, conc, workingSecs)` is a pure function
+  (sliced out by `// <verdictFor>` markers for the validator) with precedence:
+  gated → stall-critical (≥50%) → stall-high (≥25%) → fanout (stall healthy but
+  concurrent share <30%) → good. **Stall dominates concurrency** because a
+  stalled fleet is wasted wall-clock you caused, whereas low concurrency is only
+  opportunity cost.
+
+- **Companion metric: concurrent share** (push *up*) is the mirror of fleet-stall
+  (pull *down*) — share of working-time bins with ≥2 sessions in parallel.
+
 ## Scripts
 
 `hooks/` contains scripts that are **installed globally** (`~/.claude/hooks/`).
@@ -286,7 +352,10 @@ legacy no-PID files skipped, refresh-after-prune), watching state
 event log records `watching`, notifs mode suppresses the state file,
 plugin downgrades stale watching files to idle, `Watching` section
 ordered between `Working` and `Idle`), `BELL_TRACE` toggle (off = 0
-bytes, on = populated), and end-to-end `input`→state→plugin latency.
+bytes, on = populated), dashboard verdict logic (slices `verdictFor` from
+`dashboard.html` by its `// <verdictFor>` markers and runs it under Node
+across every branch + precedence boundary; asserts `renderVerdict` has a
+`case` for each kind), and end-to-end `input`→state→plugin latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches
 real session state.

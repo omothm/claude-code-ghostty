@@ -116,6 +116,27 @@ h2 {
   letter-spacing: 0.01em;
 }
 .caption code { font-size: 12px; }
+.verdict {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 13px 16px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  background: var(--card-bg);
+  border-left: 3px solid var(--accent-idle);
+}
+.verdict.act   { background: rgba(212,101,26,0.12); border-left-color: var(--accent-wait); }
+.verdict.good  { background: rgba(46,139,87,0.12);  border-left-color: var(--accent-work); }
+@media (prefers-color-scheme: dark) {
+  .verdict.act  { background: rgba(240,133,64,0.14); }
+  .verdict.good { background: rgba(76,175,106,0.14); }
+}
+.verdict-icon { font-size: 15px; line-height: 1.35; flex: 0 0 auto; }
+.verdict b { font-weight: 600; }
+.verdict .lever { color: var(--fg); font-weight: 600; }
 .chart-wrap {
   background: var(--card-bg);
   border-radius: 10px;
@@ -171,22 +192,23 @@ h2 {
 
 <h2>Last 24h</h2>
 <div class="row wait-row">
-  <div class="card wait hero"><div class="label">Median per bell</div><div class="value" id="t-latency">—</div><div class="sub">typical wait you cost each 🔔</div></div>
-  <div class="card hero"><div class="label">Bells answered</div><div class="value" id="t-bells">0</div><div class="sub">🔔 → next-prompt pairs</div></div>
+  <div class="card wait hero"><div class="label">Fleet stalled on you</div><div class="value" id="t-stall-share">—</div><div class="sub">of on-the-hook time, share with no agent working</div></div>
   <div class="card hero"><div class="label">Concurrent share</div><div class="value" id="t-concurrent-share">—</div><div class="sub">working-time with ≥2 sessions</div></div>
+  <div class="card hero"><div class="label">Bells answered</div><div class="value" id="t-bells">0</div><div class="sub">🔔 → next-prompt pairs</div></div>
   <div class="card hero"><div class="label">Peak concurrent working</div><div class="value" id="t-peak">0</div><div class="sub">max parallelism reached</div></div>
 </div>
 <div class="row wait-row">
+  <div class="card wait small"><div class="label">Median per bell</div><div class="value" id="t-latency">—</div><div class="sub">typical wait you cost each 🔔</div></div>
   <div class="card wait small"><div class="label">p90 per bell</div><div class="value" id="t-p90-latency">—</div><div class="sub">90% of 🔔 answered within</div></div>
   <div class="card wait small"><div class="label">Total wait</div><div class="value" id="t-input">—</div><div class="sub">summed across all 🔔</div></div>
   <div class="card work small"><div class="label">Time working</div><div class="value" id="t-working">—</div><div class="sub">summed across sessions</div></div>
-  <div class="card small"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
 </div>
-<p class="caption">Top row are the levers — pull <em>median per bell</em> down, push <em>concurrent share</em> up. Bottom row diagnoses where the time actually went.</p>
+<div class="verdict" id="verdict"><span class="verdict-icon" id="verdict-icon">→</span><span id="verdict-text">reading your last 24h…</span></div>
+<p class="caption">Top row are the levers — pull <em>fleet stalled on you</em> down, push <em>concurrent share</em> up. Neither moves against you when you automate easy bells or run more agents. Bottom row diagnoses what a typical answered bell felt like.</p>
 
-<h2>Median wait per bell · last 30 days</h2>
+<h2>Fleet stalled on you · last 30 days</h2>
 <div class="chart-wrap"><canvas id="trend"></canvas></div>
-<p class="caption">Daily median of <em>input → next prompt</em> latency — robust to the odd long wait. Today's bar is partial. Lower is better; flat-or-falling is the trend you want.</p>
+<p class="caption">Daily share of your <em>on-the-hook</em> time (≥1 session awaiting you) that was a <em>full stall</em> — a 🔔 blocking with no agent working. Watching counts as idle: a background monitor isn't progress. Thin days (under an hour on the hook) are left blank rather than scored on noise. Today's bar is partial. Lower is better; flat-or-falling is the trend you want.</p>
 
 <h2>Concurrent share · last 30 days</h2>
 <div class="chart-wrap"><canvas id="concurrent-trend"></canvas></div>
@@ -196,9 +218,10 @@ h2 {
 <div class="chart-wrap"><canvas id="timeline"></canvas></div>
 
 <h2>Background · last 24h</h2>
-<div class="row row2">
+<div class="row row3">
   <div class="card watch small"><div class="label">Time watching</div><div class="value" id="t-watching">—</div><div class="sub">supervising background work</div></div>
   <div class="card idle small"><div class="label">Time idle</div><div class="value" id="t-idle">—</div><div class="sub">parked between prompts</div></div>
+  <div class="card small"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
@@ -212,6 +235,7 @@ const NOW_RECENT_SEC = 12 * 3600;  // a session counts as "right now" if its las
 const STATES = ['working', 'input', 'watching', 'idle'];
 const TREND_DAYS = 30;             // daily-trend chart window
 const P90_MIN_SAMPLE = 8;          // min bells in the window before p90 is stable enough to show
+const STALL_MIN_SAMPLE = 12;       // min bell-pending 5-min bins (=1h on the hook) before stall-share is stable enough to show — below this it's just noise
 
 let chart = null;
 let trendChart = null;
@@ -432,6 +456,25 @@ function compute(events, nowSec) {
   }
   const concurrentShare = workingBins > 0 ? multiWorkingBins / workingBins : null;
 
+  // Fleet-stall share: of your ON-THE-HOOK time (bins with ≥1 session awaiting
+  // input), the fraction STALLED ON YOU — a bell pending with zero sessions
+  // working. Watching counts as idle here: a parked session whose only activity
+  // is a background monitor isn't advancing the fleet's reasoning, so it neither
+  // buffers a pending bell nor counts as work. This reads as "of the time I was
+  // on the hook, how much did I waste with no agent making progress" — the
+  // actionable lever. It's composition-invariant (trimming easy bells doesn't
+  // move it) and concurrency-correct (wall-clock bins, not summed-per-session),
+  // so it doesn't rise when you automate trivial bells or run more agents. The
+  // bell-pending denominator gives it a readable dynamic range, but it's noisy
+  // on thin days, so the card/chart gate on STALL_MIN_SAMPLE bell-pending bins.
+  let bellPendingBins = 0, stalledBins = 0;
+  for (let b = 0; b < bins; b++) {
+    const w = tlWorking[b], inp = tlInput[b];
+    if (inp > 0) bellPendingBins += 1;
+    if (inp > 0 && w === 0) stalledBins += 1;
+  }
+  const stallShare = bellPendingBins >= STALL_MIN_SAMPLE ? stalledBins / bellPendingBins : null;
+
   let medianLat = null, p90Lat = null;
   if (latencies.length > 0) medianLat = median(latencies);
   // p90 needs a minimum sample or it's just "the worst-ish one" and swings
@@ -439,20 +482,32 @@ function compute(events, nowSec) {
   if (latencies.length >= P90_MIN_SAMPLE) p90Lat = percentile(latencies, 0.9);
   const bells = latencies.length;
 
-  return { totals, nowCounts, started, peak, medianLat, p90Lat, bells, concurrentShare, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
+  return { totals, nowCounts, started, peak, medianLat, p90Lat, bells, concurrentShare, stallShare, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
 }
 
-// Daily median latency over the last TREND_DAYS days. Each bell is attributed
-// to the local calendar day of its `input` event (when the user incurred the
-// wait), not the day it was answered. Median (not mean) so a single long wait
-// doesn't drag a whole day's bar up. Today's bar is partial by definition.
-function computeDailyTrend(events, nowSec) {
+// Daily fleet-stall share over the last TREND_DAYS days. For each day, share =
+// fraction of BELL-PENDING bins (≥1 session awaiting input) that were STALLED
+// ON YOU (a bell pending, zero working). Watching counts as idle. Days with
+// fewer than STALL_MIN_SAMPLE bell-pending bins are gated to null (no bar) so a
+// near-idle day can't paint a misleading spike. Today's bar is partial. Lower
+// is better. Reuses the dominant-state-per-(session,bin) rule from compute() so
+// the chart matches the 24h "Fleet stalled on you" card.
+function computeDailyStallShare(events, nowSec) {
   const today = new Date(nowSec * 1000);
   today.setHours(0, 0, 0, 0);
   const todayStart = today.getTime() / 1000;
   const oldestStart = todayStart - (TREND_DAYS - 1) * 86400;
+  const windowEnd = todayStart + 86400;
 
-  const dayLats = Array.from({ length: TREND_DAYS }, () => []);
+  const binsPerDay = Math.floor(86400 / BIN_SEC);
+  const totalBins = binsPerDay * TREND_DAYS;
+  // Only working/input are read by the stall metric; watching and idle are
+  // treated as non-engagement, so a session whose dominant state is either is
+  // simply not recorded (the `tl[bestState]` guard below skips it).
+  const tl = {
+    working:  Array.from({ length: totalBins }, () => new Set()),
+    input:    Array.from({ length: totalBins }, () => new Set()),
+  };
 
   const sessions = new Map();
   for (const e of events) {
@@ -461,28 +516,57 @@ function computeDailyTrend(events, nowSec) {
     arr.push(e);
   }
 
-  for (const [, evs] of sessions) {
-    for (let i = 0; i < evs.length - 1; i++) {
-      if (evs[i].state !== 'input') continue;
-      const lat = evs[i + 1].ts - evs[i].ts;
-      // Day index from local-time midnight of the input event.
-      const d = new Date(evs[i].ts * 1000);
-      d.setHours(0, 0, 0, 0);
-      const dayStart = d.getTime() / 1000;
-      const idx = Math.round((dayStart - oldestStart) / 86400);
-      if (idx < 0 || idx >= TREND_DAYS) continue;
-      dayLats[idx].push(lat);
+  for (const [sid, evs] of sessions) {
+    if (evs.length === 0) continue;
+    const perBin = new Map();
+
+    for (let i = 0; i < evs.length; i++) {
+      const e = evs[i];
+      if (!STATES.includes(e.state)) continue;
+      const [spanStart, spanEnd] = spanFor(evs, i, nowSec);
+      const s = Math.max(spanStart, oldestStart);
+      const en = Math.min(spanEnd, windowEnd);
+      if (en <= s) continue;
+
+      const startBin = Math.max(0, Math.floor((s - oldestStart) / BIN_SEC));
+      const endBin   = Math.min(totalBins - 1, Math.floor((en - oldestStart - 1e-6) / BIN_SEC));
+      for (let b = startBin; b <= endBin; b++) {
+        const binStart = oldestStart + b * BIN_SEC;
+        const binEnd   = binStart + BIN_SEC;
+        const slice    = Math.min(en, binEnd) - Math.max(s, binStart);
+        if (slice <= 0) continue;
+        let entry = perBin.get(b);
+        if (!entry) { entry = { working: 0, input: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
+        entry[e.state] += slice;
+      }
+    }
+
+    for (const [b, times] of perBin) {
+      let bestState = null;
+      let bestTime  = -1;
+      for (const st of STATES) {
+        if (times[st] > bestTime) { bestTime = times[st]; bestState = st; }
+      }
+      if (bestState && bestTime > 0 && tl[bestState]) tl[bestState][b].add(sid);
     }
   }
 
   const labels = new Array(TREND_DAYS);
   const values = new Array(TREND_DAYS);
   const counts = new Array(TREND_DAYS);
-  for (let i = 0; i < TREND_DAYS; i++) {
-    labels[i] = new Date((oldestStart + i * 86400) * 1000);
-    values[i] = dayLats[i].length > 0 ? median(dayLats[i]) : null;
-    counts[i] = dayLats[i].length;
+  for (let d = 0; d < TREND_DAYS; d++) {
+    labels[d] = new Date((oldestStart + d * 86400) * 1000);
+    let bellPending = 0, stalled = 0;
+    for (let b = d * binsPerDay; b < (d + 1) * binsPerDay; b++) {
+      const w = tl.working[b].size, inp = tl.input[b].size;
+      if (inp > 0) bellPending += 1;
+      if (inp > 0 && w === 0) stalled += 1;
+    }
+    counts[d] = bellPending;
+    // Gate thin days to null (no bar) so a 2-bell day can't paint a scary 86%.
+    values[d] = bellPending >= STALL_MIN_SAMPLE ? stalled / bellPending : null;
   }
+
   return { labels, values, counts };
 }
 
@@ -570,25 +654,38 @@ function trendBarColors(trend) {
   return trend.values.map((_, i) => i === trend.values.length - 1 ? wait : wait + '80');
 }
 
+function stallTooltipLabel(trend) {
+  return (c) => {
+    const pct = c.parsed.y;
+    const n = trend.counts[c.dataIndex];
+    // Gated days (pct null but n>0) read as "too few bells to score" rather
+    // than "no data" so the gap on the chart is explained, not mysterious.
+    if (n === 0) return 'No bells pending';
+    if (pct == null) return `Too few bells to score · ${fmtDuration(n * BIN_SEC)} on the hook`;
+    return `${Math.round(pct)}% stalled · ${fmtDuration(n * BIN_SEC)} on the hook`;
+  };
+}
+
 function buildTrendChart(trend) {
   const ctx = document.getElementById('trend').getContext('2d');
   const css = getComputedStyle(document.documentElement);
   const wait = css.getPropertyValue('--accent-wait').trim();
+  const pctValues = trend.values.map(v => v == null ? null : v * 100);
   return new Chart(ctx, {
     type: 'bar',
     data: {
       labels: trend.labels,
       datasets: [
         {
-          label: 'Median per bell',
-          data: trend.values,
+          label: 'Fleet stalled on you',
+          data: pctValues,
           backgroundColor: trendBarColors(trend),
           borderWidth: 0,
         },
         {
           label: 'Trend',
           type: 'line',
-          data: trendlineData(trend.values),
+          data: trendlineData(pctValues),
           borderColor: wait + '99',
           borderWidth: 1.5,
           borderDash: [5, 4],
@@ -610,8 +707,9 @@ function buildTrendChart(trend) {
           ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
         },
         y: {
-          beginAtZero: true,
-          ticks: { callback: (v) => fmtLatency(v) },
+          min: 0,
+          max: 100,
+          ticks: { callback: (v) => `${v}%` },
           grid: { color: 'rgba(127,127,127,0.15)' }
         }
       },
@@ -619,14 +717,7 @@ function buildTrendChart(trend) {
         legend: { display: false },
         tooltip: {
           filter: (item) => item.datasetIndex === 0,
-          callbacks: {
-            label: (c) => {
-              const lat = c.parsed.y;
-              const n = trend.counts[c.dataIndex];
-              if (lat == null || n === 0) return 'No bells';
-              return `Median ${fmtLatency(lat)} · ${n} bell${n === 1 ? '' : 's'}`;
-            }
-          }
+          callbacks: { label: stallTooltipLabel(trend) },
         }
       }
     }
@@ -635,18 +726,14 @@ function buildTrendChart(trend) {
 
 function renderTrend(trend) {
   if (!trendChart) { trendChart = buildTrendChart(trend); return; }
+  const pctValues = trend.values.map(v => v == null ? null : v * 100);
   trendChart.data.labels = trend.labels;
-  trendChart.data.datasets[0].data = trend.values;
+  trendChart.data.datasets[0].data = pctValues;
   trendChart.data.datasets[0].backgroundColor = trendBarColors(trend);
-  trendChart.data.datasets[1].data = trendlineData(trend.values);
-  // Re-bind counts for the tooltip closure: rebuild the tooltip callback so
-  // it sees the fresh counts array, not a stale reference from first build.
-  trendChart.options.plugins.tooltip.callbacks.label = (c) => {
-    const lat = c.parsed.y;
-    const n = trend.counts[c.dataIndex];
-    if (lat == null || n === 0) return 'No bells';
-    return `Median ${fmtLatency(lat)} · ${n} bell${n === 1 ? '' : 's'}`;
-  };
+  trendChart.data.datasets[1].data = trendlineData(pctValues);
+  // Rebind counts closure so the tooltip reflects fresh data, not the array
+  // captured at first build.
+  trendChart.options.plugins.tooltip.callbacks.label = stallTooltipLabel(trend);
   trendChart.update('none');
 }
 
@@ -788,6 +875,68 @@ function buildLabels(nowSec) {
   return labels;
 }
 
+// Pure branch-selection for the verdict banner. Given the live levers it picks
+// the ONE highest-leverage move and returns {kind, cls, icon}. Kept pure (no
+// DOM, no formatting) so the validator can assert precedence in isolation —
+// renderVerdict() below wraps it with the human copy. Order of precedence:
+// not enough signal → stall too high → low parallelism → all good. Stall
+// dominates concurrency because a stalled fleet is wasted wall-clock you
+// caused; low concurrency is only opportunity cost.
+// The markers below are load-bearing: tests/validate.sh slices this function
+// out by them to test it under Node. Keep them on their own lines.
+// <verdictFor>
+function verdictFor(stall, conc, workingSecs) {
+  // stall is null when gated (too few bell-pending bins); conc is null with no
+  // working time. workingSecs is total seconds working in the window.
+  if (stall == null) {
+    if (conc != null && conc < 0.25 && workingSecs > 1800) return { kind: 'gated-fanout', cls: '', icon: '·' };
+    return { kind: 'gated-quiet', cls: '', icon: '·' };
+  }
+  if (stall >= 0.5)  return { kind: 'stall-critical', cls: 'act',  icon: '▲' };
+  if (stall >= 0.25) return { kind: 'stall-high',     cls: 'act',  icon: '▲' };
+  if (conc != null && conc < 0.3) return { kind: 'fanout', cls: '', icon: '→' };
+  return { kind: 'good', cls: 'good', icon: '✓' };
+}
+// </verdictFor>
+
+// Turn the numbers into a single instruction. The whole point of the dashboard
+// is to name the ONE highest-leverage move right now, not to be admired.
+function renderVerdict(data) {
+  const el = document.getElementById('verdict');
+  const icon = document.getElementById('verdict-icon');
+  const txt = document.getElementById('verdict-text');
+  el.classList.remove('act', 'good');
+
+  const stall = data.stallShare;
+  const conc  = data.concurrentShare;
+  const med   = data.medianLat;
+  const v = verdictFor(stall, conc, data.totals.working);
+
+  if (v.cls) el.classList.add(v.cls);
+  icon.textContent = v.icon;
+
+  switch (v.kind) {
+    case 'gated-fanout':
+      txt.innerHTML = `Too few bells to score stall yet. Meanwhile <span class="lever">concurrent share is ${fmtPct(conc)}</span> — you're working mostly one agent at a time. Fan out: start a second task while the first runs.`;
+      break;
+    case 'gated-quiet':
+      txt.innerHTML = `Not enough on-the-hook time in the last 24h to score stall — the metric stays quiet rather than show a noisy number. Keep going.`;
+      break;
+    case 'stall-critical':
+      txt.innerHTML = `<b>${fmtPct(stall)} of your on-the-hook time the whole fleet sat idle waiting on you.</b> This is the lever. Two ways to pull it down: answer bells faster (median is <span class="lever">${fmtLatency(med)}</span>), or keep an agent working while you decide — start or queue the next task <em>before</em> you sit with a 🔔.`;
+      break;
+    case 'stall-high':
+      txt.innerHTML = `<b>${fmtPct(stall)} of on-the-hook time was a full stall</b> — a bell pending with no agent working. Cut it by overlapping: when one session rings, have another already running so your thinking time isn't dead fleet time.`;
+      break;
+    case 'fanout':
+      txt.innerHTML = `Stall is low at <span class="lever">${fmtPct(stall)}</span> — when you're on the hook, an agent is usually still working. Next gain is throughput: <span class="lever">concurrent share ${fmtPct(conc)}</span> means mostly serial work. Fan out a second or third task to get more done per hour.`;
+      break;
+    case 'good':
+      txt.innerHTML = `Both levers look good — stall <span class="lever">${fmtPct(stall)}</span>, concurrent share <span class="lever">${fmtPct(conc)}</span>. You're answering promptly and keeping agents busy in parallel. Hold the line.`;
+      break;
+  }
+}
+
 function render(data, nowSec) {
   const labels = buildLabels(nowSec);
   if (!chart) chart = buildChart(labels, data);
@@ -816,6 +965,9 @@ function render(data, nowSec) {
   document.getElementById('t-bells').textContent    = data.bells;
   document.getElementById('t-peak').textContent     = data.peak;
   document.getElementById('t-concurrent-share').textContent = fmtPct(data.concurrentShare);
+  document.getElementById('t-stall-share').textContent = fmtPct(data.stallShare);
+
+  renderVerdict(data);
 }
 
 function showError(html, statusVariant) {
@@ -850,7 +1002,7 @@ async function tick() {
     const nowSec = Date.now() / 1000;
     const data = compute(events, nowSec);
     render(data, nowSec);
-    renderTrend(computeDailyTrend(events, nowSec));
+    renderTrend(computeDailyStallShare(events, nowSec));
     renderConcurrentTrend(computeDailyConcurrentShare(events, nowSec));
     clearError();
   } catch (e) {
