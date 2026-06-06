@@ -69,6 +69,22 @@ done < <(find "$STATE_DIR" -type f 2>/dev/null)
 
 __trace "exit pruned=$pruned"
 
+# Pending-input set cleanup. tab-title.sh keeps a per-session dir of unanswered
+# permission requests at ~/.claude/.ccg/pending/<sid>/ to hold the bell up while
+# parallel subagents work. It's cleared on idle/end, but a crashed session (no
+# `end` hook) leaks its dir. Hard-age prune mirrors the state-file cap: any
+# pending dir untouched for 12h belongs to a session that's long gone. This is
+# tidy-up only — a dead session's pending dir is never read again — so it
+# doesn't trigger a menubar refresh.
+PENDING_DIR="${CCG_PENDING_DIR:-$HOME/.claude/.ccg/pending}"
+if [ -d "$PENDING_DIR" ]; then
+  while IFS= read -r d; do
+    [ -z "$d" ] && continue
+    rm -rf "$d"
+    __trace "pending hard-expire: $d"
+  done < <(find "$PENDING_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +720 2>/dev/null)
+fi
+
 # If anything was removed, nudge SwiftBar so the dropdown reflects reality
 # on the next plugin run.
 if [ "$pruned" -gt 0 ]; then

@@ -54,6 +54,7 @@ export BELL_TRACE_LOG="$TMPROOT/trace.log"
 export BELL_CONFIG="$TMPROOT/bell-config"
 export CCG_EVENT_LOG="$TMPROOT/events.jsonl"
 export CCG_SESSION_STATE_DIR="$TMPROOT/sessions"
+export CCG_PENDING_DIR="$TMPROOT/pending"
 # The validator typically runs INSIDE a live Claude Code session, whose
 # claude process has live Monitor descendants. Without an override, every
 # `idle` test would walk up the process tree, find that claude, and upgrade
@@ -89,7 +90,7 @@ cleanup() {
   done
   rm -rf "$TMPROOT"
   unset BELL_STATE_DIR BELL_TRACE BELL_TRACE_LOG BELL_CONFIG GHOSTTY_HOOKS_DIR \
-        CCG_EVENT_LOG CCG_SESSION_STATE_DIR CCG_CLAUDE_PID
+        CCG_EVENT_LOG CCG_SESSION_STATE_DIR CCG_CLAUDE_PID CCG_PENDING_DIR
 }
 trap cleanup EXIT
 
@@ -528,6 +529,17 @@ trace_reset
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
 if sf_exists "sPL3"; then ok "pid-liveness: no-PID (legacy format) not pruned"; else ng "pid-liveness: no-PID file wrongly pruned"; fi
 rm -f "$BELL_STATE_DIR/sPL3"
+
+# Pending-set cleanup: a leaked pending dir (crashed session, no end hook) older
+# than 12h is hard-expired; a fresh one is preserved.
+rm -rf "$CCG_PENDING_DIR"; mkdir -p "$CCG_PENDING_DIR/stale-sess" "$CCG_PENDING_DIR/fresh-sess"
+: > "$CCG_PENDING_DIR/stale-sess/AAAA"
+: > "$CCG_PENDING_DIR/fresh-sess/BBBB"
+age_file "13 hours ago" "$CCG_PENDING_DIR/stale-sess" 2>/dev/null
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ ! -d "$CCG_PENDING_DIR/stale-sess" ] && ok "pending sweep: stale (>12h) pending dir pruned" || ng "pending sweep: stale dir not pruned"
+[ -d "$CCG_PENDING_DIR/fresh-sess" ] && ok "pending sweep: fresh pending dir preserved" || ng "pending sweep: fresh dir wrongly pruned"
+rm -rf "$CCG_PENDING_DIR"
 unset BELL_TRACE
 
 # Restore to the canonical sandbox state-dir for the remaining sections.
@@ -726,6 +738,81 @@ wait $FAKE_MON_PID 2>/dev/null
 export CCG_CLAUDE_PID=999999
 
 # Restore to notifs default for the remaining sections.
+: > "$BELL_CONFIG"
+
+# ---------------------------------------------------------------------------
+section "pending-input set (parallel subagent bell hold)"
+
+# Regression guard for the bug where a bell raised by one actor (subagent A's
+# permission prompt) was cleared seconds later by a DIFFERENT actor's
+# PostToolUse(working) — subagent B grinding through tool calls under the same
+# session_id. The fix keys a per-actor pending set: working only returns to
+# `working` once EVERY pending actor has cleared.
+#
+# agent_id arrives two ways, both exercised here:
+#   - input  : via arg 3 (the notify.sh path forwards agent_id as an arg)
+#   - working: via stdin JSON .agent_id (the PostToolUse/SubagentStop path)
+rm -rf "$CCG_PENDING_DIR"
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+PSID="pend-$$"
+_p_line2() { sed -n '2p' "$BELL_STATE_DIR/$PSID" 2>/dev/null; }
+_p_count() { ls -A "$CCG_PENDING_DIR/$PSID" 2>/dev/null | wc -l | tr -d ' '; }
+
+# A raises a permission prompt (input, agent_id via arg 3 like notify.sh).
+printf '{"session_id":"%s","agent_id":"AAAA"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" input "$PSID" AAAA >/dev/null 2>&1
+[ "$(_p_line2)" = "input" ] && ok "pending: subagent A input writes bell" || ng "pending: A input wrong (got '$(_p_line2)')"
+[ "$(_p_count)" = "1" ] && ok "pending: set has 1 actor after A input" || ng "pending: set count wrong after A (got $(_p_count))"
+
+# B's PostToolUse (working, agent_id via stdin) must NOT clear A's bell.
+printf '{"session_id":"%s","agent_id":"BBBB"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(_p_line2)" = "input" ] && ok "pending: sibling B working HOLDS bell as input (the bug)" \
+  || ng "pending: B working cleared A's bell — regression! (got '$(_p_line2)')"
+[ "$(_p_count)" = "1" ] && ok "pending: B working leaves A in the set" || ng "pending: set count wrong after B (got $(_p_count))"
+
+# Repeat B working — still held.
+printf '{"session_id":"%s","agent_id":"BBBB"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(_p_line2)" = "input" ] && ok "pending: repeated sibling working still holds bell" || ng "pending: repeat B cleared bell (got '$(_p_line2)')"
+
+# A's own permission answered → A runs its tool → PostToolUse(working) for A.
+# Set now empty → genuine working.
+printf '{"session_id":"%s","agent_id":"AAAA"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(_p_line2)" = "working" ] && ok "pending: A working with empty set → true working" || ng "pending: A working did not clear (got '$(_p_line2)')"
+[ "$(_p_count)" = "0" ] && ok "pending: set empty after last actor clears" || ng "pending: set not empty (got $(_p_count))"
+
+# Reaper: a denied subagent never fires PostToolUse, but SubagentStop is wired
+# to `working`, so it removes that actor from the set. Without this the bell
+# would stick forever.
+printf '{"session_id":"%s","agent_id":"CCCC"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" input "$PSID" CCCC >/dev/null 2>&1
+[ "$(_p_count)" = "1" ] && ok "pending: denied actor C added on input" || ng "pending: C not added (got $(_p_count))"
+printf '{"session_id":"%s","agent_id":"CCCC"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(_p_count)" = "0" ] && ok "pending: SubagentStop(working) reaps denied actor C" || ng "pending: C not reaped (got $(_p_count))"
+
+# idle clears the entire set (turn truly ended) regardless of stragglers.
+printf '{"session_id":"%s","agent_id":"DDDD"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" input "$PSID" DDDD >/dev/null 2>&1
+printf '{"session_id":"%s","agent_id":"EEEE"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" input "$PSID" EEEE >/dev/null 2>&1
+[ "$(_p_count)" = "2" ] && ok "pending: two stragglers in set" || ng "pending: expected 2 (got $(_p_count))"
+printf '{"session_id":"%s"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" idle >/dev/null 2>&1
+[ ! -d "$CCG_PENDING_DIR/$PSID" ] && ok "pending: idle clears the whole set" || ng "pending: idle left set behind (count=$(_p_count))"
+
+# Main agent (no agent_id) maps to the __main__ sentinel and behaves normally.
+printf '{"session_id":"%s"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" input "$PSID" >/dev/null 2>&1
+[ "$(ls -A "$CCG_PENDING_DIR/$PSID" 2>/dev/null)" = "__main__" ] && ok "pending: main agent maps to __main__ key" \
+  || ng "pending: main agent key wrong (got '$(ls -A "$CCG_PENDING_DIR/$PSID" 2>/dev/null)')"
+printf '{"session_id":"%s"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(_p_line2)" = "working" ] && ok "pending: main agent working clears its own bell" || ng "pending: main working did not clear (got '$(_p_line2)')"
+
+# notifs mode (production default): the held bell writes the 🔔 file, and the
+# final clear removes it entirely (working is invisible in notifs mode).
+: > "$BELL_CONFIG"
+rm -rf "$CCG_PENDING_DIR" "$BELL_STATE_DIR/$PSID"
+printf '{"session_id":"%s","agent_id":"AAAA"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" input "$PSID" AAAA >/dev/null 2>&1
+sf_exists "$PSID" && grep -qF "🔔" "$BELL_STATE_DIR/$PSID" && ok "pending(notifs): A input writes 🔔 file" || ng "pending(notifs): no 🔔 file after A input"
+printf '{"session_id":"%s","agent_id":"BBBB"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+sf_exists "$PSID" && grep -qF "🔔" "$BELL_STATE_DIR/$PSID" && ok "pending(notifs): sibling working keeps 🔔 file" || ng "pending(notifs): 🔔 file lost on sibling working"
+printf '{"session_id":"%s","agent_id":"AAAA"}\n' "$PSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+! sf_exists "$PSID" && ok "pending(notifs): last actor clear removes file (working hidden)" || ng "pending(notifs): file lingered after set emptied"
+
+rm -rf "$CCG_PENDING_DIR" "$BELL_STATE_DIR/$PSID"
 : > "$BELL_CONFIG"
 
 # ---------------------------------------------------------------------------

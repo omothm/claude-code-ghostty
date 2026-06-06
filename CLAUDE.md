@@ -156,6 +156,49 @@ this, change `_count_live_monitors` to a transitive descendant walk.
 Immediate children covers Monitor and `run_in_background` for the main
 session, which is the common case.
 
+### Pending-input set (parallel-subagent bell hold)
+
+Subagents (`Agent`/`Task` tool) share the parent's `session_id` but fire their
+own hook events. With multiple subagents running, one subagent raising a
+permission prompt (`input`) and another finishing a tool call (`PostToolUse` →
+`working`) race over the *single* per-session state file — last write wins, so
+`working` clobbers the bell within seconds and it can never be answered. (This
+is distinct from the `watching` case: N subagents running means the **main agent
+is genuinely working** — it's blocked awaiting them — whereas a monitors-only
+session is parked. The two must not collapse to the same state.)
+
+The fix keys a **per-actor pending set** at `~/.claude/.ccg/pending/<sid>/`,
+one empty file per actor with an unanswered permission request:
+
+- The actor key is the hook payload's **`agent_id`** (verified empirically:
+  subagent `PostToolUse`/`PermissionRequest` payloads carry `agent_id` +
+  `agent_type`; the main agent's carry neither). The main agent maps to the
+  `__main__` sentinel — hex `agent_id`s can never collide with it.
+  `transcript_path` is **not** usable as the key: it points at the *parent*
+  transcript for subagent events too.
+- **`input`** → add this actor's file to the set.
+- **`working`** → remove *this actor's* file (match-by-id, not "clear any one"
+  — a busy sibling must not clear a different actor's bell), then if the set is
+  still non-empty, downgrade the effective status back to `input` so the bell
+  holds.
+- **`idle` / `end`** → clear the whole set (the turn genuinely ended; the main
+  `Stop` can't fire while a subagent is still pending).
+- Each actor only ever touches its **own** file, so concurrent subagent
+  processes never race on shared state — no lock needed.
+
+The reaper for the no-`PostToolUse` paths: a **denied** permission never runs a
+tool, so no `PostToolUse` ever fires for that actor. `SubagentStop` is therefore
+wired (in both `settings.json` files) to `tab-title.sh working`, which removes
+the actor via the same match-by-id path. Without it a denied subagent's bell
+would stick forever. (`agent_id` arrives two ways: as **arg 3** on the
+`input` path — `notify.sh` forwards it — and via **stdin `.agent_id`** on the
+`working`/`SubagentStop` path that reads the raw hook JSON.)
+
+Crash cleanup: a session that dies without firing `idle`/`end` leaks its pending
+dir. `sweep-bell-state.sh` hard-expires any pending dir untouched for 12h
+(mirrors the state-file cap; tidy-up only, no menubar refresh). Sandbox via
+`CCG_PENDING_DIR`.
+
 ### Refresh gating
 
 `tab-title.sh` compares the desired state file against the on-disk state
@@ -321,6 +364,10 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
 - **`CCG_SESSION_STATE_DIR`** — override the per-session logical-state
   directory used for event-log dedup (default `~/.claude/.ccg/sessions`).
   The validator uses this to sandbox.
+- **`CCG_PENDING_DIR`** — override the pending-input set directory (default
+  `~/.claude/.ccg/pending`). One subdir per session, one file per actor with
+  an unanswered permission request; see "Pending-input set" above. The
+  validator and `sweep-bell-state.sh` both honor it.
 - **`CCG_CLAUDE_PID`** — short-circuit the watching-detection walk in
   `tab-title.sh`. When set, `_find_claude_pid` returns this value
   immediately instead of walking up from `$PPID` looking for a `claude`

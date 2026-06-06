@@ -64,6 +64,10 @@ __trace "notification_type=$(echo "$input" | jq -r '.notification_type // empty'
 # Extract fields
 title=$(echo "$input" | jq -r '.title // "Claude Code"' 2>/dev/null)
 session_id=$(echo "$input" | jq -r '.session_id // "unknown"' 2>/dev/null)
+# Subagent-issued permission prompts carry an agent_id; the main agent's don't.
+# Forwarded to tab-title.sh so the pending-input set is keyed per-actor (a
+# parallel subagent's PostToolUse must not clear a different actor's bell).
+agent_id=$(echo "$input" | jq -r '.agent_id // empty' 2>/dev/null)
 cwd=$(echo "$input" | jq -r '.cwd // "unknown"' 2>/dev/null)
 message=$(echo "$input" | jq -r --arg def "$default_message" '.message // $def' 2>/dev/null)
 
@@ -146,8 +150,8 @@ __dbg "match_key=[$match_key] (session_summary=[$session_summary] short_id=$shor
 
 # Update tab title if requested
 if [ -n "$tab_status" ]; then
-  __trace "calling tab-title.sh $tab_status"
-  "$(dirname "$0")/tab-title.sh" "$tab_status" "$session_id" > /dev/null
+  __trace "calling tab-title.sh $tab_status (agent_id=${agent_id:-<none>})"
+  "$(dirname "$0")/tab-title.sh" "$tab_status" "$session_id" "$agent_id" > /dev/null
   __trace "tab-title.sh returned rc=$?"
 fi
 

@@ -43,10 +43,25 @@ __trace "bell-config mode=$BELL_MODE"
 
 status="$1"
 session_id="$2"
+agent_id="${3-}"
+# Capture stdin once when we need to read fields from it (session_id arg
+# omitted — the direct-hook path). Both session_id and the subagent agent_id
+# come from the same hook JSON. When session_id is passed as an arg (the
+# notify.sh path and arg-based validator calls), stdin is NOT consumed and
+# agent_id arrives as arg 3 instead.
 if [ -z "$session_id" ]; then
-  session_id=$(jq -r '.session_id // "unknown"' 2>/dev/null)
-  __trace "session_id from stdin=$session_id"
+  _stdin_json=$(cat)
+  session_id=$(printf '%s' "$_stdin_json" | jq -r '.session_id // "unknown"' 2>/dev/null)
+  [ -z "$agent_id" ] && agent_id=$(printf '%s' "$_stdin_json" | jq -r '.agent_id // empty' 2>/dev/null)
+  unset _stdin_json
+  __trace "session_id from stdin=$session_id agent_id=${agent_id:-<none>}"
 fi
+# Actor key for the pending-input set. The main agent has no agent_id in its
+# payload, so it maps to the __main__ sentinel; subagent agent_ids are hex and
+# can never collide with it. Sanitize to a safe filename charset defensively.
+actor="${agent_id:-__main__}"
+actor=$(printf '%s' "$actor" | tr -cd '0-9a-zA-Z_-')
+[ -z "$actor" ] && actor="__main__"
 short_id=$(echo "$session_id" | cut -c1-8)
 __trace "resolved status=$status session_id=$session_id short_id=$short_id pwd=$PWD"
 
@@ -119,6 +134,47 @@ if [ "$status" = "idle" ] && [ -n "$claude_pid" ]; then
     __trace "idle upgraded to watching (claude_pid=$claude_pid)"
   fi
 fi
+
+# Pending-input set: keep the bell up while ANY actor (main agent or a
+# subagent) still has an unanswered permission request, even as a *different*
+# actor's tool calls keep firing PostToolUse(working). Without this, parallel
+# subagents clobber each other's bells: subagent A raises a permission prompt
+# (input) and subagent B's next PostToolUse (working) immediately clears it,
+# so the bell flaps every few seconds and can never be answered.
+#
+# Keyed per-actor (agent_id, or __main__ for the main agent) so the clear is
+# match-by-id, not "clear any one bell" — a busy sibling must not clear a
+# different actor's pending bell. Each actor only ever touches its OWN file in
+# the set directory, so concurrent subagent processes never race on shared
+# state and no lock is needed.
+#   input            -> add this actor
+#   working          -> remove this actor; if others remain, hold as input.
+#                       SubagentStop is wired to `working`, so it doubles as
+#                       the reaper for actors that never fire PostToolUse
+#                       (denied permission -> no tool run -> no PostToolUse).
+#   idle | end       -> clear the whole set (turn genuinely ended; the main
+#                       Stop can't fire while a subagent is still pending).
+PENDING_BASE="${CCG_PENDING_DIR:-$HOME/.claude/.ccg/pending}"
+pending_dir="$PENDING_BASE/$session_id"
+_pending_nonempty() { [ -n "$(ls -A "$pending_dir" 2>/dev/null)" ]; }
+case "$status" in
+  input)
+    mkdir -p "$pending_dir" 2>/dev/null
+    : > "$pending_dir/$actor" 2>/dev/null
+    __trace "pending add actor=$actor"
+    ;;
+  working)
+    [ -d "$pending_dir" ] && rm -f "$pending_dir/$actor" 2>/dev/null
+    if _pending_nonempty; then
+      effective_status="input"
+      __trace "working held as input (pending actors remain: $(ls -A "$pending_dir" 2>/dev/null | tr '\n' ',' ))"
+    fi
+    ;;
+  idle|end)
+    rm -rf "$pending_dir" 2>/dev/null
+    __trace "pending cleared (status=$status)"
+    ;;
+esac
 
 if [ "$status" != "query" ]; then
   case "$effective_status" in
