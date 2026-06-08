@@ -194,6 +194,23 @@ would stick forever. (`agent_id` arrives two ways: as **arg 3** on the
 `input` path — `notify.sh` forwards it — and via **stdin `.agent_id`** on the
 `working`/`SubagentStop` path that reads the raw hook JSON.)
 
+The flip side of wiring `SubagentStop → working`: a subagent's terminal event
+can land a second or two **after** the main agent's `Stop` has already settled
+the session to `idle`, with no pending bell to clear. Unguarded, that lone
+`working` overwrites `idle` and **sticks forever** — the main `Stop` won't fire
+again and no subagents remain to correct it (observed live: `idle` at T, a
+subagent `working` at T+2s, then a frozen ⏳ for 28 min). The `working` branch
+guards against this: when a `working` arrives with an **empty pending set** AND
+the actor is a **subagent** (`actor != __main__`) AND the per-session logical
+state is already settled (`idle`/`watching`), the effective status is mirrored
+back to that settled state instead of resurrecting `working`. The guard is keyed
+on the subagent actor specifically so the main agent's legitimate start-of-turn
+`working` (always `__main__`, fired right after the `SessionStart` `idle`) is
+never suppressed; during an active turn the logical state is `working`, so a
+real subagent `working` also passes through. This is why the logical-state file
+(`~/.claude/.ccg/sessions/<sid>`) is read in the pending-set block, not just for
+event-log dedup.
+
 Crash cleanup: a session that dies without firing `idle`/`end` leaks its pending
 dir. `sweep-bell-state.sh` hard-expires any pending dir untouched for 12h
 (mirrors the state-file cap; tidy-up only, no menubar refresh). Sandbox via
@@ -402,7 +419,11 @@ ordered between `Working` and `Idle`), `BELL_TRACE` toggle (off = 0
 bytes, on = populated), dashboard verdict logic (slices `verdictFor` from
 `dashboard.html` by its `// <verdictFor>` markers and runs it under Node
 across every branch + precedence boundary; asserts `renderVerdict` has a
-`case` for each kind), and end-to-end `input`→state→plugin latency.
+`case` for each kind), stray-late-`SubagentStop` guard (a subagent
+`working` arriving after the turn settled to `idle` must not resurrect
+`working`, while the main agent's start-of-turn `working` and a real
+mid-turn subagent `working` both still pass through), and end-to-end
+`input`→state→plugin latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches
 real session state.

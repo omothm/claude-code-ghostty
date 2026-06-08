@@ -816,6 +816,55 @@ rm -rf "$CCG_PENDING_DIR" "$BELL_STATE_DIR/$PSID"
 : > "$BELL_CONFIG"
 
 # ---------------------------------------------------------------------------
+section "stray late SubagentStop (working after turn settled)"
+
+# Regression guard for the stuck-working bug: SubagentStop is wired to
+# `working`, but a subagent's terminal event can land a second or two AFTER the
+# main agent's Stop already settled the session to idle, with no pending bell to
+# clear. That lone subagent `working` used to overwrite idle and stick forever
+# (the main Stop won't fire again). The guard suppresses a subagent `working`
+# (actor=<hex>) when the pending set is empty and the logical state is already
+# settled, while still letting the main agent's start-of-turn working through.
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+SLSID="strayss-$$"
+rm -rf "$CCG_PENDING_DIR/$SLSID" "$BELL_STATE_DIR/$SLSID" "$CCG_SESSION_STATE_DIR/$SLSID"
+
+# Turn ends: main agent Stop → idle. Logical state is now idle.
+printf '{"session_id":"%s"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" idle "$SLSID" >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)" = "idle" ] \
+  && ok "stray-ss: session settled to idle" || ng "stray-ss: did not settle to idle (got '$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)')"
+
+# A subagent's SubagentStop arrives 2s late (working, hex agent_id, empty set).
+# Must NOT resurrect working — state file stays idle.
+printf '{"session_id":"%s","agent_id":"f00d"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)" = "idle" ] \
+  && ok "stray-ss: late subagent working does NOT resurrect working (the bug)" \
+  || ng "stray-ss: late subagent working stuck the session — regression! (got '$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)')"
+
+# And it must not have appended a spurious working transition to the event log.
+[ "$(grep -c "\"session_id\":\"$SLSID\".*\"state\":\"working\"" "$CCG_EVENT_LOG" 2>/dev/null)" = "0" ] \
+  && ok "stray-ss: no spurious working event logged" \
+  || ng "stray-ss: spurious working event logged"
+
+# The main agent's legitimate start-of-turn working (actor=__main__, fired right
+# after the SessionStart idle) MUST still pass through — the guard is keyed on
+# subagent actors only, so a real new turn is never suppressed.
+printf '{"session_id":"%s"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" working "$SLSID" >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)" = "working" ] \
+  && ok "stray-ss: main agent working from idle still works (not over-suppressed)" \
+  || ng "stray-ss: main agent working wrongly suppressed (got '$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)')"
+
+# During an active turn (logical=working), a real subagent working is genuine
+# work and must pass through unchanged.
+printf '{"session_id":"%s","agent_id":"beef"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)" = "working" ] \
+  && ok "stray-ss: subagent working during active turn passes through" \
+  || ng "stray-ss: subagent working wrongly suppressed mid-turn (got '$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)')"
+
+rm -rf "$CCG_PENDING_DIR/$SLSID" "$BELL_STATE_DIR/$SLSID" "$CCG_SESSION_STATE_DIR/$SLSID"
+: > "$BELL_CONFIG"
+
+# ---------------------------------------------------------------------------
 section "Mode=off"
 
 printf '{"mode":"off"}\n' > "$BELL_CONFIG"

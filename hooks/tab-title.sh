@@ -157,6 +157,11 @@ fi
 PENDING_BASE="${CCG_PENDING_DIR:-$HOME/.claude/.ccg/pending}"
 pending_dir="$PENDING_BASE/$session_id"
 _pending_nonempty() { [ -n "$(ls -A "$pending_dir" 2>/dev/null)" ]; }
+# Per-session logical-state file (also used for event-log dedup further down).
+# Hoisted here so the `working` branch can tell an active turn from a settled
+# one — see the stray-late-SubagentStop guard below.
+SESSION_STATE_DIR="${CCG_SESSION_STATE_DIR:-$HOME/.claude/.ccg/sessions}"
+session_state_file="$SESSION_STATE_DIR/$session_id"
 case "$status" in
   input)
     mkdir -p "$pending_dir" 2>/dev/null
@@ -168,6 +173,33 @@ case "$status" in
     if _pending_nonempty; then
       effective_status="input"
       __trace "working held as input (pending actors remain: $(ls -A "$pending_dir" 2>/dev/null | tr '\n' ',' ))"
+    elif [ "$actor" != "__main__" ]; then
+      # Stray-late-SubagentStop guard. SubagentStop is wired to `working` so it
+      # can reap a denied subagent's pending bell (no PostToolUse ever fires for
+      # a denied permission). But a subagent's terminal event can also land a
+      # second or two AFTER the main agent's Stop already settled the session to
+      # idle — with no pending bell to clear. Left unguarded, that lone
+      # `working` overwrites idle and sticks forever: the main Stop won't fire
+      # again and no further subagents remain to correct it (observed live:
+      # idle at T, then a subagent `working` at T+2s, frozen ⏳ for 28 min).
+      #
+      # The distinguisher is the actor. The main agent's legitimate
+      # start-of-turn `working` (UserPromptSubmit, fired right after the
+      # SessionStart `idle`) is always actor=__main__, so it must pass through.
+      # Only a *subagent* working (actor=<hex>) arriving while the session's
+      # logical state is already settled (idle/watching) is a stray — during an
+      # active turn the main agent is `working`, so a real subagent working sees
+      # logical=working and is not suppressed. Mirror the settled state so the
+      # title/state-file stay correct; event-log dedup drops the duplicate.
+      _logical=""
+      [ -f "$session_state_file" ] && _logical=$(head -n1 "$session_state_file" 2>/dev/null)
+      case "$_logical" in
+        idle|watching)
+          effective_status="$_logical"
+          __trace "stray subagent working suppressed (actor=$actor, logical=$_logical)"
+          ;;
+      esac
+      unset _logical
     fi
     ;;
   idle|end)
@@ -292,8 +324,7 @@ unset -f _write_state _remove_state
 case "$effective_status" in
   idle|watching|working|input|end)
     EVENT_LOG="${CCG_EVENT_LOG:-$HOME/.claude/.ccg/events.jsonl}"
-    SESSION_STATE_DIR="${CCG_SESSION_STATE_DIR:-$HOME/.claude/.ccg/sessions}"
-    session_state_file="$SESSION_STATE_DIR/$session_id"
+    # SESSION_STATE_DIR / session_state_file hoisted above (near the pending set).
     prev_state=""
     [ -f "$session_state_file" ] && prev_state=$(head -n1 "$session_state_file" 2>/dev/null)
     if [ "$effective_status" != "$prev_state" ]; then
