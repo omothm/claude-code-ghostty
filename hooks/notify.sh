@@ -135,7 +135,9 @@ if [ "$mode" = "error" ]; then
   fi
 fi
 
-dir_name=$(basename "$cwd")
+# Pin to the project root (fixed across in-session cd's), like tab-title.sh.
+# Falls back to the payload cwd when CLAUDE_PROJECT_DIR isn't in the hook env.
+dir_name=$(basename "${CLAUDE_PROJECT_DIR:-$cwd}")
 short_id=$(echo "$session_id" | cut -c1-8)
 tab_output=$("$(dirname "$0")/tab-title.sh" query "$session_id")
 session_summary=$(echo "$tab_output" | sed -n '2p')

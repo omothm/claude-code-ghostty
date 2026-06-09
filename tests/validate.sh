@@ -1038,6 +1038,22 @@ echo "$tn" | grep -qF "open -t '$ERR_LOG'" \
   && ok "notify-debug.log records invocation (no BELL_TRACE needed)" \
   || ng "notify-debug.log not written or missing match_key line"
 
+# (a'') subtitle dir basenames CLAUDE_PROJECT_DIR (project root), not the live
+#       payload .cwd. Mirrors the tab-title.sh fix: a session that cd'd into a
+#       subdir must still show its project name. match_key is built from the
+#       summary/short_id, never dir_name, so tab focus is unaffected.
+: > "$TN_ARGS_FILE"
+PD_NOTIFY_ROOT="$TMPROOT/notify-proj-root"
+echo "{\"session_id\":\"pdNotify\",\"cwd\":\"/tmp/some/deep-subdir\"}" \
+  | CLAUDE_PROJECT_DIR="$PD_NOTIFY_ROOT" "$HOOKS_DIR/notify.sh" '🔔' 'Claude needs input' '' '' > /dev/null 2>&1
+tn_pd=$(cat "$TN_ARGS_FILE" 2>/dev/null)
+echo "$tn_pd" | grep -qF "notify-proj-root" \
+  && ok "notification subtitle pins to CLAUDE_PROJECT_DIR basename" \
+  || ng "subtitle missing project basename (got: $tn_pd)"
+echo "$tn_pd" | grep -qF "deep-subdir" \
+  && ng "subtitle leaked live cwd basename (got: $tn_pd)" \
+  || ok "notification subtitle does not use live cwd basename"
+
 # (b) no transcript → fall back to default message, write no log, no open -t.
 : > "$TN_ARGS_FILE"
 echo "{\"session_id\":\"noTrans\",\"cwd\":\"/tmp/proj\"}" \
