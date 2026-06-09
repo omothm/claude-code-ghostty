@@ -253,11 +253,24 @@ gets every transition. Sandbox via `CCG_EVENT_LOG` and
 A session can end without firing `end` — process killed, Ghostty tab
 closed mid-prompt, macOS reboot while the SessionEnd hook is mid-flight.
 Its state file would otherwise linger as a phantom dropdown entry.
-`sweep-bell-state.sh` handles this with a single hard-age pass: any state
+`sweep-bell-state.sh` handles this with a hard-age pass: any state
 file older than 12 h is deleted unconditionally. The graceful path is the
 SessionEnd hook calling `tab-title.sh end`, which removes the file the
 moment a session exits cleanly; the sweep only matters for crashes and
 similar irregular exits.
+
+Faster than the 12 h cap, a **PID-liveness pass** prunes a state file the
+moment its owning claude PID (line 3) fails `kill -0`. A file with **no PID**
+can't be `kill -0`'d — under the current hooks this is either a pre-PID legacy
+file or a rare `_find_claude_pid` failure (the claude ancestor had already
+exited when the hook fired, e.g. a fleet session torn down mid-write). Since
+every live session writes a PID, a no-PID file untouched past
+`NO_PID_STALE_MIN` (default 60 min, override `CCG_NO_PID_STALE_MIN`) is stale
+and gets reaped — so a stuck "working" tile clears from the menubar in an hour,
+not 12 h. A *fresh* no-PID file is kept (a live session may rewrite it with a
+PID on its next transition). The logical-state reconciliation pass uses the
+same `NO_PID_STALE_MIN` for its no-PID fallback, so the menubar and dashboard
+drop these phantoms in lockstep.
 
 An earlier version of the sweep also ran an "AX-verified" pass that
 queried Ghostty's tab tree via AppleScript and pruned any state file
@@ -313,6 +326,32 @@ disappears. Emitting at `now` would retroactively inflate the dead session's
 working-time. This pass runs even in `notifs` mode (where no bell-state file
 exists for working/idle), which is why it keys off the logical-state file, not
 the bell-state file. Sandbox via `CCG_SESSION_STATE_DIR` and `CCG_EVENT_LOG`.
+
+#### `end` is terminal until resume — dashboard straggler guard
+
+Even with the reconciliation above, the dashboard's "working" card kept
+drifting above the menubar. Cause: `events.jsonl` is append-only, and a
+`working`/`input`/`watching` event sometimes lands **after** a session's
+`end` — a `SubagentStop`/`PostToolUse` straggler firing during teardown, or
+the sweep's own synthetic `end` whose **integer-second** ts lost a same-second
+tie to a *fractional* straggler (e.g. synthetic `end` at `670.000` vs a stray
+`working` at `670.110`). The dashboard's old "latest event by ts" rule then
+read the straggler as the live state and counted a dead session as `working`
+(and painted a 30-min phantom open span in the timeline).
+
+The fix lives in `dashboard.html`'s `stripStragglers()` (sliced by
+`// <stripStragglers>` markers for the validator): walk each session's events
+in ts order, mark `ended` on `end`, **clear it on `idle`**, and drop any
+non-`idle` event seen while ended. `end` is therefore terminal — but a fresh
+`idle` (a `SessionStart`) reopens the session, so `claude --continue` /
+`--resume`, which **reuse the session id**, keep working. This one rule also
+absorbs the synthetic-`end` tie collision, so the sweep's exact ts no longer
+has to win the race. It's applied in all **three** per-session loops
+(`compute` + both daily-trend functions) so a straggler can neither inflate a
+right-now card nor paint a phantom span; the validator asserts all three call
+sites exist. A blanket "exclude any session that ever emitted `end`" would be
+simpler but **wrong** — it would drop resumed sessions, which are legitimately
+live.
 
 ### Plugin display swap: ` | ` → ` — `
 
@@ -430,6 +469,11 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
   `~/.claude/.ccg/pending`). One subdir per session, one file per actor with
   an unanswered permission request; see "Pending-input set" above. The
   validator and `sweep-bell-state.sh` both honor it.
+- **`CCG_NO_PID_STALE_MIN`** — staleness cap in minutes (default `60`) for
+  state files that carry no claude PID, used by `sweep-bell-state.sh` for both
+  the bell-state PID-liveness pass and the logical-state reconciliation no-PID
+  fallback. A no-PID file untouched longer than this is reaped (menubar) /
+  synthetically ended (dashboard). See "Stale-state cleanup".
 - **`CCG_CLAUDE_PID`** — short-circuit the watching-detection walk in
   `tab-title.sh`. When set, `_find_claude_pid` returns this value
   immediately instead of walking up from `$PPID` looking for a `claude`
@@ -456,11 +500,12 @@ gate paths, plugin output (SF Symbol + count, param1 preservation,
 based on PID file, stale-PID handling, position after sessions),
 `dashboard-server.sh status` modes, stale-file sweep (hard-age prune
 at 12 h, fresh files protected, PID-liveness prune for orphaned sessions,
-legacy no-PID files skipped, refresh-after-prune), logical-state
+fresh no-PID files kept but stale ones reaped past `NO_PID_STALE_MIN`,
+refresh-after-prune), logical-state
 reconciliation (a dead-PID session gets a synthetic `end` appended to
 `events.jsonl` and its logical-state file removed; a live-PID session is
 untouched; the synthetic `end` ts is the trailing-span cap `mtime + 30min`,
-not `now`; legacy no-PID files reaped only past the 12 h cap; `tab-title.sh`
+not `now`; stale no-PID files reaped past `NO_PID_STALE_MIN`; `tab-title.sh`
 writes a 2-line state+pid logical-state file and dedup still keys off line 1),
 watching state
 (3-line state-file shape with claude PID on line 3 for all write states,
@@ -470,9 +515,13 @@ ordered between `Working` and `Idle`), `BELL_TRACE` toggle (off = 0
 bytes, on = populated), dashboard verdict logic (slices `verdictFor` from
 `dashboard.html` by its `// <verdictFor>` markers and runs it under Node
 across every branch + precedence boundary; asserts `renderVerdict` has a
-`case` for each kind), stray-late-`SubagentStop` guard (a subagent
-`working` arriving after the turn settled to `idle` must not resurrect
-`working`, while the main agent's start-of-turn `working` and a real
+`case` for each kind), dashboard straggler handling (slices
+`stripStragglers` by its `// <stripStragglers>` markers and runs it under
+Node: `end` is terminal so a post-`end` straggler or a tie-colliding synthetic
+`end` reads as ended, while a fresh `idle` reopens a resumed session; asserts
+all three per-session loops route through it), stray-late-`SubagentStop` guard
+(a subagent `working` arriving after the turn settled to `idle` must not
+resurrect `working`, while the main agent's start-of-turn `working` and a real
 mid-turn subagent `working` both still pass through), and end-to-end
 `input`→state→plugin latency.
 

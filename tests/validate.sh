@@ -542,12 +542,23 @@ trace_reset
 if sf_exists "sPL2"; then ok "pid-liveness: live session (live PID) preserved"; else ng "pid-liveness: live session wrongly pruned"; fi
 rm -f "$BELL_STATE_DIR/sPL2"
 
-# PID-liveness: file with no PID (legacy 2-line format) is not touched.
+# PID-liveness: a FRESH file with no PID is kept (a live session may rewrite it
+# with a PID on its next transition; don't evict prematurely).
 printf '🔔 Claude Code | no-pid-legacy (sPL3)\ninput\n' > "$BELL_STATE_DIR/sPL3"
 trace_reset
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
-if sf_exists "sPL3"; then ok "pid-liveness: no-PID (legacy format) not pruned"; else ng "pid-liveness: no-PID file wrongly pruned"; fi
+if sf_exists "sPL3"; then ok "pid-liveness: fresh no-PID file kept"; else ng "pid-liveness: fresh no-PID file wrongly pruned"; fi
 rm -f "$BELL_STATE_DIR/sPL3"
+
+# PID-liveness: a STALE no-PID file (untouched past NO_PID_STALE_MIN) is reaped,
+# so a stuck phantom (e.g. _find_claude_pid failed at write time) clears from
+# the menubar without waiting the 12h hard-age cap.
+printf '⏳ Claude Code | stale-no-pid (sPL4)\nworking\n' > "$BELL_STATE_DIR/sPL4"
+age_file "70 minutes ago" "$BELL_STATE_DIR/sPL4"
+trace_reset
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+if ! sf_exists "sPL4"; then ok "pid-liveness: stale (>NO_PID_STALE_MIN) no-PID file reaped"; else ng "pid-liveness: stale no-PID file not reaped"; fi
+grep -q "no-pid-stale-expire" "$BELL_TRACE_LOG" && ok "sweep logs no-pid-stale-expire" || ng "no no-pid-stale-expire in trace"
 
 # Pending-set cleanup: a leaked pending dir (crashed session, no end hook) older
 # than 12h is hard-expired; a fresh one is preserved.
@@ -598,15 +609,16 @@ else ok "reconcile: live-PID session left untouched (no end)"; fi
 [ -f "$CCG_SESSION_STATE_DIR/recon-live" ] && ok "reconcile: live-PID logical-state file preserved" || ng "reconcile: live-PID logical-state file wrongly removed"
 rm -f "$CCG_SESSION_STATE_DIR/recon-live"
 
-# Legacy 1-line file (no PID), fresh → kept; aged >12h → reaped.
+# No-PID logical-state file: fresh → kept; stale (>NO_PID_STALE_MIN) → reaped
+# with end, in lockstep with the bell-state no-PID cap.
 : > "$CCG_EVENT_LOG"
 printf 'idle\n' > "$CCG_SESSION_STATE_DIR/recon-legacy-fresh"
 printf 'idle\n' > "$CCG_SESSION_STATE_DIR/recon-legacy-old"
-age_file "13 hours ago" "$CCG_SESSION_STATE_DIR/recon-legacy-old"
+age_file "70 minutes ago" "$CCG_SESSION_STATE_DIR/recon-legacy-old"
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
-[ -f "$CCG_SESSION_STATE_DIR/recon-legacy-fresh" ] && ok "reconcile: legacy no-PID fresh file kept" || ng "reconcile: legacy no-PID fresh file wrongly reaped"
+[ -f "$CCG_SESSION_STATE_DIR/recon-legacy-fresh" ] && ok "reconcile: fresh no-PID file kept" || ng "reconcile: fresh no-PID file wrongly reaped"
 if [ ! -f "$CCG_SESSION_STATE_DIR/recon-legacy-old" ] && jq -e 'select(.session_id=="recon-legacy-old" and .state=="end")' "$CCG_EVENT_LOG" >/dev/null 2>&1; then
-  ok "reconcile: legacy no-PID file aged >12h reaped with end"
+  ok "reconcile: stale no-PID file reaped with end"
 else ng "reconcile: legacy no-PID aged file not reaped/end-emitted"; fi
 rm -f "$CCG_SESSION_STATE_DIR/recon-legacy-fresh"
 
@@ -1229,6 +1241,70 @@ NODE
   fi
 else
   skip "dashboard verdict logic (node or dashboard.html absent)"
+fi
+
+# ---------------------------------------------------------------------------
+section "dashboard straggler handling (end is terminal until resume)"
+
+# `end` must be terminal: a working/input/watching event arriving after a
+# session's `end` (a SubagentStop straggler firing during teardown, or a
+# synthetic reconcile `end` that lost a same-second tie to a fractional
+# straggler) must NOT resurrect the session and inflate the "working" card or
+# paint a phantom open span. A fresh `idle` (SessionStart) DOES reopen it, so
+# `claude --continue`/`--resume` (which reuse the session id) keep working.
+# stripStragglers is pure and lives between markers in dashboard.html.
+if command -v node >/dev/null 2>&1 && [ -f "$DASHBOARD_PATH" ]; then
+  STRIP_FN=$(awk '/\/\/ <stripStragglers>/{f=1;next} /\/\/ <\/stripStragglers>/{f=0} f' "$DASHBOARD_PATH")
+  if [ -z "$STRIP_FN" ]; then
+    ng "could not extract stripStragglers from $DASHBOARD_PATH (markers missing?)"
+  else
+    STRIP_JS="$TMPROOT/strip.js"
+    {
+      printf '%s\n' "$STRIP_FN"
+      cat <<'NODE'
+const ev = (ts, state) => ({ ts, session_id: 's', state });
+const last = (evs) => { const o = stripStragglers(evs); return o.length ? o[o.length - 1].state : '<empty>'; };
+const states = (evs) => stripStragglers(evs).map(e => e.state).join(',');
+const cases = [
+  // [label, events, expected-last-after-strip]
+  // straggler working after a real end, plus a synthetic end whose integer ts
+  // lost the tie to the fractional straggler — last must read `end`, not working
+  ['straggler+synthetic-end', [ev(1,'idle'),ev(2,'end'),ev(3,'end'),ev(3.1,'working')], 'end'],
+  // pure graceful end, no straggler
+  ['graceful-end', [ev(1,'idle'),ev(2,'working'),ev(3,'end')], 'end'],
+  // crash reconciled where synthetic end ts < last working (same-second tie)
+  ['synthetic-end-collide', [ev(5.0,'end'),ev(5.1,'working')], 'end'],
+  // resume: end then a fresh idle (SessionStart) reopens; later work counts
+  ['resume', [ev(1,'idle'),ev(2,'working'),ev(3,'end'),ev(10,'idle'),ev(11,'working')], 'working'],
+  // genuinely live: no end at all
+  ['live', [ev(1,'idle'),ev(2,'working')], 'working'],
+];
+let bad = 0;
+for (const [label, evs, want] of cases) {
+  const got = last(evs);
+  if (got !== want) { bad++; console.log(`FAIL ${label}: want last=${want}, got ${got} (kept: ${states(evs)})`); }
+}
+// The straggler working itself must be dropped (not merely out-voted on ts).
+if (states([ev(1,'idle'),ev(2,'end'),ev(3,'working')]) !== 'idle,end') {
+  bad++; console.log('FAIL straggler not dropped from stream');
+}
+process.exit(bad);
+NODE
+    } > "$STRIP_JS"
+    if node_out=$(node "$STRIP_JS" 2>&1); then
+      ok "stripStragglers: end terminal until resume; stragglers dropped"
+    else
+      ng "stripStragglers mismatch: $node_out"
+    fi
+    # All three per-session consumers must run events through stripStragglers,
+    # or a straggler leaks into the timeline/daily spans even if the cards are
+    # clean. There are exactly three per-session loops; assert all are guarded.
+    strip_uses=$(grep -c "stripStragglers(rawEvs)" "$DASHBOARD_PATH")
+    [ "$strip_uses" = "3" ] && ok "all 3 per-session loops strip stragglers" \
+      || ng "expected 3 stripStragglers(rawEvs) call sites, found $strip_uses"
+  fi
+else
+  skip "dashboard straggler handling (node or dashboard.html absent)"
 fi
 
 # ---------------------------------------------------------------------------

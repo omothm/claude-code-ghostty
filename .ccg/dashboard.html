@@ -324,6 +324,31 @@ function parseEvents(text) {
   return out;
 }
 
+// `end` is terminal: once a session ends, any later working/input/watching
+// event is a straggler (a SubagentStop/PostToolUse firing during teardown,
+// or a synthetic reconcile `end` whose integer-second ts lost a tie to a
+// fractional straggler in the same second) and must NOT resurrect the session.
+// A fresh `idle` (SessionStart) DOES reopen it, because session ids are reused
+// across `claude --continue`/`--resume`. So: walk in ts order, mark ended on
+// `end`, clear on `idle`, and drop non-idle events seen while ended. Used by
+// every per-session consumer (right-now counts AND the timeline/daily spans)
+// so a straggler can neither inflate the "working" card nor paint a phantom
+// open span. The markers are load-bearing: tests/validate.sh slices this out
+// to run it under Node. Keep them on their own lines.
+// <stripStragglers>
+function stripStragglers(evs) {
+  const out = [];
+  let ended = false;
+  for (const e of evs) {
+    if (e.state === 'idle') ended = false;
+    else if (e.state === 'end') ended = true;
+    else if (ended) continue; // straggler after end, before any resume — drop
+    out.push(e);
+  }
+  return out;
+}
+// </stripStragglers>
+
 // Compute the [start, end] timestamp span (in seconds) for the i-th event of
 // a session, capping open trailing spans for stale sessions.
 function spanFor(evs, i, nowSec) {
@@ -372,7 +397,9 @@ function compute(events, nowSec) {
     idle:     Array.from({ length: bins }, () => new Set()),
   };
 
-  for (const [sid, evs] of sessions) {
+  for (const [sid, rawEvs] of sessions) {
+    if (rawEvs.length === 0) continue;
+    const evs = stripStragglers(rawEvs);
     if (evs.length === 0) continue;
     if (evs[0].ts >= cutoff) started += 1;
     latest.set(evs[evs.length - 1].session_id, evs[evs.length - 1]);
@@ -516,8 +543,9 @@ function computeDailyStallShare(events, nowSec) {
     arr.push(e);
   }
 
-  for (const [sid, evs] of sessions) {
-    if (evs.length === 0) continue;
+  for (const [sid, rawEvs] of sessions) {
+    if (rawEvs.length === 0) continue;
+    const evs = stripStragglers(rawEvs);
     const perBin = new Map();
 
     for (let i = 0; i < evs.length; i++) {
@@ -593,8 +621,9 @@ function computeDailyConcurrentShare(events, nowSec) {
     arr.push(e);
   }
 
-  for (const [sid, evs] of sessions) {
-    if (evs.length === 0) continue;
+  for (const [sid, rawEvs] of sessions) {
+    if (rawEvs.length === 0) continue;
+    const evs = stripStragglers(rawEvs);
     const perBin = new Map();
 
     for (let i = 0; i < evs.length; i++) {

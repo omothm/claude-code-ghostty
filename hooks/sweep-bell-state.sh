@@ -40,6 +40,18 @@ HOOKS_DIR="$(dirname "$0")"
 SESSION_STATE_DIR="${CCG_SESSION_STATE_DIR:-$HOME/.claude/.ccg/sessions}"
 EVENT_LOG="${CCG_EVENT_LOG:-$HOME/.claude/.ccg/events.jsonl}"
 
+# Staleness cap (minutes) for state files that carry NO claude PID. Under the
+# current hooks every live session writes its ancestor claude PID (bell-state
+# line 3, logical-state line 2), so a file WITHOUT one is either a pre-PID
+# legacy file or a rare _find_claude_pid failure (e.g. the claude ancestor had
+# already exited when the hook fired). We can't kill -0 it, so we can't reap it
+# the instant the process dies the way we do for PID-bearing files — but a live
+# session re-writes its file (with a PID) on its next state change, so a no-PID
+# file untouched this long is stale. Far shorter than the 12h hard-age cap so
+# these phantoms (e.g. a stuck "working" tile) clear from the menubar promptly.
+# Overridable for the validator.
+NO_PID_STALE_MIN="${CCG_NO_PID_STALE_MIN:-60}"
+
 # Exit only if there's nothing to sweep in EITHER layer. The logical-state
 # reconciliation pass below runs even in notifs mode, where no bell-state file
 # is written for working/idle (so STATE_DIR may be empty) but logical-state
@@ -67,7 +79,16 @@ done < <(find "$STATE_DIR" -type f -mmin +720 2>/dev/null)
 while IFS= read -r f; do
   [ -z "$f" ] && continue
   cpid=$(sed -n '3p' "$f" 2>/dev/null | tr -d ' ')
-  [ -n "$cpid" ] || continue                       # no PID stored — legacy or partial write; skip
+  if [ -z "$cpid" ]; then
+    # No PID to kill -0. Reap only if stale (see NO_PID_STALE_MIN); a freshly
+    # written no-PID file might belong to a session that will rewrite it with a
+    # PID on its next transition, so don't evict it immediately.
+    if [ -n "$(find "$f" -mmin +"$NO_PID_STALE_MIN" 2>/dev/null)" ]; then
+      rm -f "$f" && pruned=$((pruned + 1))
+      __trace "no-pid-stale-expire: $f"
+    fi
+    continue
+  fi
   kill -0 "$cpid" 2>/dev/null && continue           # process still alive; leave it
   rm -f "$f" && pruned=$((pruned + 1))
   __trace "pid-expire: $f (pid=$cpid dead)"
@@ -105,9 +126,10 @@ if [ -d "$SESSION_STATE_DIR" ]; then
     if [ -n "$spid" ]; then
       kill -0 "$spid" 2>/dev/null || dead=1            # PID stored: alive→keep, dead→reap
     else
-      # Legacy 1-line file (no PID): can't prove death, so fall back to the 12h
-      # hard-age cap. Anything untouched that long is a phantom.
-      [ -n "$(find "$f" -mmin +720 2>/dev/null)" ] && dead=1
+      # No PID (legacy 1-line file or _find_claude_pid failure): can't prove
+      # death, so fall back to the no-PID staleness cap — same threshold the
+      # bell-state pass uses, so menubar and dashboard reap these in lockstep.
+      [ -n "$(find "$f" -mmin +"$NO_PID_STALE_MIN" 2>/dev/null)" ] && dead=1
     fi
     [ "$dead" = "1" ] || continue
 
