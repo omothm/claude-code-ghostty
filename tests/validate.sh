@@ -309,6 +309,25 @@ echo "$last" | jq -e '.session_id and .state and .title' >/dev/null 2>&1 \
 state_field=$(echo "$last" | jq -r '.state')
 [ "$state_field" = "input" ] && ok "last event state == input" || ng "last event state wrong: $state_field"
 
+# 6b. cwd + title pin to CLAUDE_PROJECT_DIR (project root), not the live $PWD.
+# Guards against drift when Claude cd's mid-session — the event log and tab
+# title must reflect the project the session belongs to, not wherever it sits.
+PDID="evt-projdir-$$"
+PDROOT="$TMPROOT/proj-root-marker"
+echo "{\"session_id\":\"$PDID\"}" \
+  | CLAUDE_PROJECT_DIR="$PDROOT" "$HOOKS_DIR/tab-title.sh" input > /dev/null 2>&1
+pd_last=$(jq -rc --arg sid "$PDID" 'select(.session_id == $sid)' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
+pd_cwd=$(echo "$pd_last" | jq -r '.cwd')
+[ "$pd_cwd" = "$PDROOT" ] \
+  && ok "event cwd pins to CLAUDE_PROJECT_DIR (not live \$PWD)" \
+  || ng "event cwd wrong: got '$pd_cwd' want '$PDROOT'"
+echo "$pd_last" | jq -r '.title' | grep -q 'proj-root-marker' \
+  && ok "event title basenames CLAUDE_PROJECT_DIR" \
+  || ng "event title missing project basename: $(echo "$pd_last" | jq -r '.title')"
+# Tidy the bell-state file this input left behind so it doesn't inflate later
+# plugin-count assertions.
+echo "{\"session_id\":\"$PDID\"}" | "$HOOKS_DIR/tab-title.sh" end > /dev/null 2>&1
+
 # 7. end after a real prior state — logs.
 echo "{\"session_id\":\"$EID\"}" | "$HOOKS_DIR/tab-title.sh" end > /dev/null 2>&1
 n=$(count_events_for "$EID")

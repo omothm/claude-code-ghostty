@@ -78,7 +78,8 @@ done
 if [ -n "$summary" ]; then
   base_title="Claude Code | $summary"
 else
-  dir_name=$(basename "$PWD")
+  # Use the original project root (fixed across cd's), not the live cwd.
+  dir_name=$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")
   base_title="Claude Code | $dir_name ($short_id)"
 fi
 
@@ -335,7 +336,7 @@ case "$effective_status" in
         mkdir -p "$(dirname "$EVENT_LOG")" "$SESSION_STATE_DIR"
         ts=$(gdate +%s.%3N 2>/dev/null || date +%s)
         jq -nc --arg ts "$ts" --arg sid "$session_id" --arg state "$effective_status" \
-              --arg title "$base_title" --arg cwd "$PWD" \
+              --arg title "$base_title" --arg cwd "${CLAUDE_PROJECT_DIR:-$PWD}" \
           '{ts: ($ts|tonumber), session_id: $sid, state: $state, title: $title, cwd: $cwd}' \
           >> "$EVENT_LOG" 2>/dev/null
         __trace "event-log append state=$effective_status prev=${prev_state:-<none>}"
