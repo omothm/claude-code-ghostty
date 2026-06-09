@@ -343,7 +343,16 @@ case "$effective_status" in
         if [ "$effective_status" = "end" ]; then
           rm -f "$session_state_file"
         else
-          printf '%s\n' "$effective_status" > "$session_state_file"
+          # Line 1: logical state (read via head -n1 by dedup + the
+          # stray-subagent guard). Line 2: the ancestor claude PID, so
+          # sweep-bell-state.sh can PID-check every logged session and emit a
+          # synthetic `end` to events.jsonl when the process is gone — even in
+          # notifs mode, where no bell-state file exists for working/idle to
+          # key off. The dashboard reads events.jsonl over HTTP and can't probe
+          # a PID itself, so this server-side backstop is the only thing that
+          # keeps its "right now" count honest about sessions that died without
+          # firing the SessionEnd hook (crash, kill, closed tab, reboot).
+          printf '%s\n%s\n' "$effective_status" "$claude_pid" > "$session_state_file"
         fi
       fi
     else

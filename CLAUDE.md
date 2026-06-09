@@ -233,11 +233,15 @@ The gate:
 `events.jsonl` must record real transitions only — `PostToolUse` fires after
 every tool call, so a naive append would flood the log. `tab-title.sh`
 keeps a per-session "logical state" file at `~/.claude/.ccg/sessions/<sid>`
-(content: just the state name) and only appends to `events.jsonl` when the
-new state differs from that file. On `end`, the per-session file is removed
-so a future `SessionStart` for the same `session_id` would re-emit `idle`.
-A pure `end` with no prior state is dropped to avoid zombie entries from
-stray hook invocations.
+and only appends to `events.jsonl` when the new state differs from that file.
+The file is two lines: **line 1 the state name, line 2 the ancestor claude
+PID** (the same PID stored on line 3 of bell-state files). Line 2 lets
+`sweep-bell-state.sh` reconcile dead sessions back into the event log — see
+"Stale-state cleanup" below. All readers (`head -n1` dedup here, the
+stray-subagent guard) take only line 1, so the added PID line is transparent
+to them. On `end`, the per-session file is removed so a future `SessionStart`
+for the same `session_id` would re-emit `idle`. A pure `end` with no prior
+state is dropped to avoid zombie entries from stray hook invocations.
 
 This layer is intentionally independent of bell mode: in `notifs` mode the
 bell-state file isn't written for `idle`/`working`, but the event log still
@@ -268,6 +272,47 @@ real sessions are never wrongly evicted.
 The sweep is dispatched in the background by the plugin after it emits
 output, so it never blocks menubar rendering. When it prunes anything, it
 nudges SwiftBar so the dropdown reflects reality on the next run.
+
+#### Logical-state reconciliation (dashboard ↔ menubar convergence)
+
+The menubar and the dashboard once disagreed badly on "right now" (e.g.
+menubar showing ~5 live sessions, dashboard ~39). The cause is an
+**asymmetry in liveness signals**:
+
+- The **menubar** reads bell-state *files*, which the sweep above actively
+  *deletes* the moment the owning claude PID dies (`kill -0` on line 3). Dead
+  sessions vanish within one sweep cycle.
+- The **dashboard** reads `events.jsonl`, an **append-only log with no
+  reaper**. It only learns a session ended when an `end` line is appended,
+  and that only happens if the `SessionEnd` hook fires `tab-title.sh end`. A
+  crash/kill/closed-tab/reboot skips that hook, so the session's last logged
+  state lingers as `working`/`idle` for the full 12 h dashboard window. The
+  dashboard is browser JS fetching one file over HTTP — it **cannot** probe a
+  PID or list a directory, and a timestamp alone can't distinguish a
+  live-but-quiet session (event-log dedup means 40 min of work logs one
+  `working` line) from a dead one. So liveness must be reconciled *into the
+  log*, server-side.
+
+Raising the dashboard's right-now window (a past "fix") only traded the
+opposite bug (live-quiet sessions dropping off) for this one. The real fix is
+a sweep pass that emits a **synthetic `end`** for any logged-but-dead session,
+using the same PID-death signal the bell-state pass uses — so both layers
+converge by construction. For each `~/.claude/.ccg/sessions/<sid>` file whose
+line-1 state ≠ `end`:
+
+- **line-2 PID alive** → keep. **PID dead** → append `end` + remove the file.
+- **no PID (legacy 1-line file)** → can't prove death, so fall back to the
+  12 h hard-age cap.
+
+The synthetic `end`'s `ts` is **`min(now, mtime + 30 min)`**, not `now`. The
+logical-state file's mtime equals the last logged transition (dedup only
+rewrites it on real changes), and `mtime + 30 min` matches the dashboard's
+existing trailing-span cap (`TRAILING_CAP_SEC` in `spanFor`) — so historical
+totals and the timeline chart are unchanged; only the right-now phantom
+disappears. Emitting at `now` would retroactively inflate the dead session's
+working-time. This pass runs even in `notifs` mode (where no bell-state file
+exists for working/idle), which is why it keys off the logical-state file, not
+the bell-state file. Sandbox via `CCG_SESSION_STATE_DIR` and `CCG_EVENT_LOG`.
 
 ### Plugin display swap: ` | ` → ` — `
 
@@ -354,7 +399,7 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
 | `hooks/notify.sh` | Sends `terminal-notifier`; skips if user is already on that tab; routes to `tab-title.sh` for title updates | `Notification`, `Stop` |
 | `hooks/focus-ghostty-tab.sh` | AppleScript to focus a Ghostty tab by title-contains match; works across windows and single-tab windows | Notification `-execute`, SwiftBar dropdown |
 | `hooks/refresh-menubar.sh` | `open -g swiftbar://refreshallplugins`; silent no-op if SwiftBar isn't installed | `tab-title.sh` on state change; `sweep-bell-state.sh` after pruning |
-| `hooks/sweep-bell-state.sh` | Prunes state files older than 12 h | Background job dispatched by the SwiftBar plugin after each run |
+| `hooks/sweep-bell-state.sh` | Prunes bell-state files (dead PID, or >12 h); reconciles dead-but-unended sessions into `events.jsonl` via synthetic `end` events so the dashboard matches the menubar | Background job dispatched by the SwiftBar plugin after each run |
 | `.claude/hooks/fetch-changelog.sh` | Fetches `https://code.claude.com/docs/en/changelog`, strips HTML via `textutil`, caches to `~/.claude/.ccg/changelog.md` (12 h TTL) | `SessionStart` (project-only, via `.claude/settings.json`) |
 | `hooks/dashboard-server.sh` | Manages the metrics-dashboard HTTP server (`start`/`stop`/`status`/`toggle`); writes `~/.claude/.ccg/server.pid` and opens browser on start | SwiftBar dropdown entry click |
 | `swiftbar/ghostty-bells.30s.sh` | Reads state dir, emits dropdown (sessions + dashboard entry), dispatches sweep in background | SwiftBar 30 s poll + push-refresh URL |
@@ -411,7 +456,13 @@ gate paths, plugin output (SF Symbol + count, param1 preservation,
 based on PID file, stale-PID handling, position after sessions),
 `dashboard-server.sh status` modes, stale-file sweep (hard-age prune
 at 12 h, fresh files protected, PID-liveness prune for orphaned sessions,
-legacy no-PID files skipped, refresh-after-prune), watching state
+legacy no-PID files skipped, refresh-after-prune), logical-state
+reconciliation (a dead-PID session gets a synthetic `end` appended to
+`events.jsonl` and its logical-state file removed; a live-PID session is
+untouched; the synthetic `end` ts is the trailing-span cap `mtime + 30min`,
+not `now`; legacy no-PID files reaped only past the 12 h cap; `tab-title.sh`
+writes a 2-line state+pid logical-state file and dedup still keys off line 1),
+watching state
 (3-line state-file shape with claude PID on line 3 for all write states,
 event log records `watching`, notifs mode suppresses the state file,
 plugin downgrades stale watching files to idle, `Watching` section

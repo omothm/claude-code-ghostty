@@ -561,6 +561,70 @@ age_file "13 hours ago" "$CCG_PENDING_DIR/stale-sess" 2>/dev/null
 rm -rf "$CCG_PENDING_DIR"
 unset BELL_TRACE
 
+# Logical-state reconciliation: the sweep emits a synthetic `end` to
+# events.jsonl for a session whose owning claude PID is dead but that never
+# fired SessionEnd, so the dashboard's right-now count converges with the
+# menubar (which reaps bell-state files on the same signal). The synthetic
+# `end` ts is capped at mtime + 30 min to match the dashboard's trailing-span
+# cap, NOT `now` (which would inflate the dead session's working-time).
+mkdir -p "$CCG_SESSION_STATE_DIR"
+: > "$CCG_EVENT_LOG"
+
+# Dead PID → emit `end`, remove logical-state file.
+# Age 40 min so mtime + 30min cap lands below `now` (the uncapped path);
+# a fresher file would clamp to now and not exercise the cap arithmetic.
+printf 'working\n999999\n' > "$CCG_SESSION_STATE_DIR/recon-dead"
+recon_mtime=$(gdate -d "40 minutes ago" +%s)
+age_file "40 minutes ago" "$CCG_SESSION_STATE_DIR/recon-dead"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+if jq -e 'select(.session_id=="recon-dead" and .state=="end")' "$CCG_EVENT_LOG" >/dev/null 2>&1; then
+  ok "reconcile: dead-PID session gets synthetic end in events.jsonl"
+else ng "reconcile: no synthetic end emitted for dead-PID session"; fi
+[ ! -f "$CCG_SESSION_STATE_DIR/recon-dead" ] && ok "reconcile: dead-PID logical-state file removed" || ng "reconcile: dead-PID logical-state file not removed"
+# ts must be mtime + 1800 (the trailing-span cap), not `now`.
+recon_ts=$(jq -r 'select(.session_id=="recon-dead" and .state=="end") | .ts' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
+recon_expected=$((recon_mtime + 1800))
+if [ -n "$recon_ts" ] && [ "${recon_ts%.*}" = "$recon_expected" ]; then
+  ok "reconcile: synthetic end ts == mtime + 30min cap (not now)"
+else ng "reconcile: synthetic end ts wrong (got ${recon_ts:-<none>}, want $recon_expected)"; fi
+
+# Live PID → keep, no `end`.
+: > "$CCG_EVENT_LOG"
+printf 'working\n%s\n' "$$" > "$CCG_SESSION_STATE_DIR/recon-live"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+if jq -e 'select(.session_id=="recon-live")' "$CCG_EVENT_LOG" >/dev/null 2>&1; then
+  ng "reconcile: live-PID session wrongly got an end"
+else ok "reconcile: live-PID session left untouched (no end)"; fi
+[ -f "$CCG_SESSION_STATE_DIR/recon-live" ] && ok "reconcile: live-PID logical-state file preserved" || ng "reconcile: live-PID logical-state file wrongly removed"
+rm -f "$CCG_SESSION_STATE_DIR/recon-live"
+
+# Legacy 1-line file (no PID), fresh → kept; aged >12h → reaped.
+: > "$CCG_EVENT_LOG"
+printf 'idle\n' > "$CCG_SESSION_STATE_DIR/recon-legacy-fresh"
+printf 'idle\n' > "$CCG_SESSION_STATE_DIR/recon-legacy-old"
+age_file "13 hours ago" "$CCG_SESSION_STATE_DIR/recon-legacy-old"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ -f "$CCG_SESSION_STATE_DIR/recon-legacy-fresh" ] && ok "reconcile: legacy no-PID fresh file kept" || ng "reconcile: legacy no-PID fresh file wrongly reaped"
+if [ ! -f "$CCG_SESSION_STATE_DIR/recon-legacy-old" ] && jq -e 'select(.session_id=="recon-legacy-old" and .state=="end")' "$CCG_EVENT_LOG" >/dev/null 2>&1; then
+  ok "reconcile: legacy no-PID file aged >12h reaped with end"
+else ng "reconcile: legacy no-PID aged file not reaped/end-emitted"; fi
+rm -f "$CCG_SESSION_STATE_DIR/recon-legacy-fresh"
+
+# tab-title.sh writes a 2-line logical-state file (state + pid) and dedup still
+# works off line 1.
+: > "$CCG_EVENT_LOG"; rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"
+CCG_CLAUDE_PID=4242 "$HOOKS_DIR/tab-title.sh" working "recon-fmt" >/dev/null 2>&1
+_lsf="$CCG_SESSION_STATE_DIR/recon-fmt"
+if [ "$(sed -n '1p' "$_lsf" 2>/dev/null)" = "working" ] && [ "$(sed -n '2p' "$_lsf" 2>/dev/null)" = "4242" ]; then
+  ok "tab-title: logical-state file is 2-line (state + pid)"
+else ng "tab-title: logical-state file not 2-line state+pid (got: $(cat "$_lsf" 2>/dev/null | tr '\n' '/'))"; fi
+# Second identical working must dedup (no new event appended).
+_before=$(wc -l < "$CCG_EVENT_LOG")
+CCG_CLAUDE_PID=4242 "$HOOKS_DIR/tab-title.sh" working "recon-fmt" >/dev/null 2>&1
+_after=$(wc -l < "$CCG_EVENT_LOG")
+[ "$_before" = "$_after" ] && ok "tab-title: dedup still works off line 1 (2-line file)" || ng "tab-title: dedup broke with 2-line logical-state file"
+rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
+
 # Restore to the canonical sandbox state-dir for the remaining sections.
 export BELL_STATE_DIR="$TMPROOT/state"
 mkdir -p "$BELL_STATE_DIR"

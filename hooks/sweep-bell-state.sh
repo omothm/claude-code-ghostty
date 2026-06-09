@@ -37,8 +37,14 @@ __trace() {
 
 STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 HOOKS_DIR="$(dirname "$0")"
+SESSION_STATE_DIR="${CCG_SESSION_STATE_DIR:-$HOME/.claude/.ccg/sessions}"
+EVENT_LOG="${CCG_EVENT_LOG:-$HOME/.claude/.ccg/events.jsonl}"
 
-[ -d "$STATE_DIR" ] || exit 0
+# Exit only if there's nothing to sweep in EITHER layer. The logical-state
+# reconciliation pass below runs even in notifs mode, where no bell-state file
+# is written for working/idle (so STATE_DIR may be empty) but logical-state
+# files still exist.
+[ -d "$STATE_DIR" ] || [ -d "$SESSION_STATE_DIR" ] || exit 0
 
 __trace "entry"
 pruned=0
@@ -66,6 +72,64 @@ while IFS= read -r f; do
   rm -f "$f" && pruned=$((pruned + 1))
   __trace "pid-expire: $f (pid=$cpid dead)"
 done < <(find "$STATE_DIR" -type f 2>/dev/null)
+
+# Logical-state reconciliation pass: emit a synthetic `end` to events.jsonl for
+# any session whose owning claude process is gone but that never fired the
+# SessionEnd hook. Without this the dashboard's "right now" count diverges from
+# the menubar: the menubar reads bell-state FILES (reaped above on PID death),
+# but the dashboard reads the append-only events.jsonl, which only learns a
+# session ended when an `end` line is appended. A crash/kill/closed-tab/reboot
+# skips the SessionEnd hook, so the session's last logged state lingers as
+# working/idle for the full 12h dashboard window. The dashboard is browser JS
+# over HTTP and cannot probe a PID itself, so this is the only place liveness
+# can be reconciled back into the log.
+#
+# Source of truth is the per-session logical-state file (~/.claude/.ccg/
+# sessions/<sid>): line 1 = state, line 2 = ancestor claude PID (written by
+# tab-title.sh). Liveness is the SAME signal the bell-state pass uses, so both
+# layers converge by construction. The synthetic `end` ts is capped at
+# mtime + 30 min (the file's mtime == the last logged transition, since dedup
+# only rewrites it on real changes) to MATCH the dashboard's existing
+# trailing-span cap (TRAILING_CAP_SEC in spanFor) — emitting at `now` would
+# retroactively inflate the dead session's working-time, so it must not be used.
+_now=$(date +%s)
+if [ -d "$SESSION_STATE_DIR" ]; then
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    state=$(sed -n '1p' "$f" 2>/dev/null | tr -d ' ')
+    spid=$(sed -n '2p' "$f" 2>/dev/null | tr -d ' ')
+    [ -n "$state" ] || continue                       # empty/partial; skip
+    [ "$state" = "end" ] && continue                  # already ended (defensive)
+
+    dead=0
+    if [ -n "$spid" ]; then
+      kill -0 "$spid" 2>/dev/null || dead=1            # PID stored: alive→keep, dead→reap
+    else
+      # Legacy 1-line file (no PID): can't prove death, so fall back to the 12h
+      # hard-age cap. Anything untouched that long is a phantom.
+      [ -n "$(find "$f" -mmin +720 2>/dev/null)" ] && dead=1
+    fi
+    [ "$dead" = "1" ] || continue
+
+    # Synthetic `end` at last-transition + cap (not now). mtime == last logged ts.
+    mtime=$(stat -f %m "$f" 2>/dev/null || echo "$_now")
+    ts=$((mtime + 1800))
+    [ "$ts" -gt "$_now" ] && ts="$_now"
+
+    # Title/cwd carry no span for an `end` event and aren't displayed for ended
+    # sessions; a placeholder is sufficient. Use the bell-state title if one
+    # somehow survives, else a marker.
+    sid=$(basename "$f")
+    title="(reaped session)"
+    [ -f "$STATE_DIR/$sid" ] && title=$(sed -n '1p' "$STATE_DIR/$sid" 2>/dev/null)
+    mkdir -p "$(dirname "$EVENT_LOG")"
+    jq -nc --arg ts "$ts" --arg sid "$sid" --arg title "$title" \
+      '{ts: ($ts|tonumber), session_id: $sid, state: "end", title: $title, cwd: ""}' \
+      >> "$EVENT_LOG" 2>/dev/null
+    rm -f "$f" && pruned=$((pruned + 1))
+    __trace "logical-reconcile: emitted end for $sid (pid=${spid:-<none>} ts=$ts)"
+  done < <(find "$SESSION_STATE_DIR" -type f 2>/dev/null)
+fi
 
 __trace "exit pruned=$pruned"
 
