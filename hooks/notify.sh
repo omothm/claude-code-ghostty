@@ -69,7 +69,31 @@ session_id=$(echo "$input" | jq -r '.session_id // "unknown"' 2>/dev/null)
 # parallel subagent's PostToolUse must not clear a different actor's bell).
 agent_id=$(echo "$input" | jq -r '.agent_id // empty' 2>/dev/null)
 cwd=$(echo "$input" | jq -r '.cwd // "unknown"' 2>/dev/null)
-message=$(echo "$input" | jq -r --arg def "$default_message" '.message // $def' 2>/dev/null)
+message=$(echo "$input" | jq -r --arg def "$default_message" '
+  .message
+  // .tool_input.description
+  // (if .tool_name and .tool_input then
+       .tool_name + ": " + (
+         (.tool_input.file_path | if . then split("/") | last else null end)
+         // (.tool_input.url // null)
+         // (.tool_input.command | if . then .[0:80] else null end)
+         // ""
+       )
+     else null end)
+  // (if   .stop_reason == "max_tokens"    then "Stopped: token limit reached"
+      elif .stop_reason == "stop_sequence" then "Stopped: stop sequence"
+      else null end)
+  // ({ "rate_limit":             "Rate limit reached — try again shortly",
+         "overloaded":            "API overloaded — try again shortly",
+         "authentication_failed": "Authentication failed",
+         "oauth_org_not_allowed": "Org not allowed",
+         "billing_error":         "Billing error",
+         "invalid_request":       "Invalid request",
+         "model_not_found":       "Model not found",
+         "server_error":          "Server error",
+         "max_output_tokens":     "Max output tokens reached",
+         "unknown":               "Unknown API error" }[.error_type // ""])
+  // $def' 2>/dev/null)
 
 # In error mode, pull the latest API error out of the session transcript and
 # write it to a readable log we can open on click. The transcript is the only
@@ -148,7 +172,7 @@ else
   subtitle="$short_id ($dir_name)"
   match_key="$short_id"
 fi
-__dbg "match_key=[$match_key] (session_summary=[$session_summary] short_id=$short_id dir=$dir_name)"
+__dbg "match_key=[$match_key] (session_summary=[$session_summary] short_id=$short_id dir=$dir_name) message=[$message] payload=$(echo "$input" | jq -c . 2>/dev/null || echo "$input")"
 
 # Update tab title if requested
 if [ -n "$tab_status" ]; then
