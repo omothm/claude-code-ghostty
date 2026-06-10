@@ -73,12 +73,13 @@ message=$(echo "$input" | jq -r --arg def "$default_message" '
   .message
   // .tool_input.description
   // (if .tool_name and .tool_input then
-       .tool_name + ": " + (
+       (
          (.tool_input.file_path | if . then split("/") | last else null end)
          // (.tool_input.url // null)
          // (.tool_input.command | if . then .[0:80] else null end)
-         // ""
-       )
+         // (.tool_input.questions[0].question | if . then .[0:80] else null end)
+       ) as $detail
+       | if $detail then (.tool_name + ": " + $detail) else null end
      else null end)
   // (if   .stop_reason == "max_tokens"    then "Stopped: token limit reached"
       elif .stop_reason == "stop_sequence" then "Stopped: stop sequence"
