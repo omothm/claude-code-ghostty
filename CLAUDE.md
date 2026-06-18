@@ -21,14 +21,19 @@ After every change, verify the following in order:
 1. **Validator** — run `./tests/validate.sh`. It must pass. If the change
    introduces new behavior, extend the validator to cover it before considering
    the change complete.
-2. **Tab targeting** — will notifications still focus the correct tab?
+2. **Tab title verification** — to confirm a title change took effect in a
+   live session, use one of: `tail ~/.claude/.ccg/termseq.log` (every
+   `tab-title.sh` run appends a timestamped line with the exact title and
+   session id), or osascript to read Ghostty's current tab titles. Do not
+   rely on the user manually confirming.
+3. **Tab targeting** — will notifications still focus the correct tab?
    `focus-ghostty-tab.sh` uses contains-match against AX tab titles; confirm
    the title stored in state files and passed via `terminal-notifier` still
    uniquely identifies the session.
-3. **Notification text** — does any user-visible string need updating?
-4. **README.md** — does the human-facing documentation still reflect the
+4. **Notification text** — does any user-visible string need updating?
+5. **README.md** — does the human-facing documentation still reflect the
    current install flow? (Architecture details don't belong there.)
-5. **Dashboard** — open `.ccg/dashboard.html` and inspect every place that
+6. **Dashboard** — open `.ccg/dashboard.html` and inspect every place that
    enumerates session states (the `STATES` constant, per-state arrays in
    `compute()`, the "Right now" cards, the "Last 24 hours · totals"
    cards, the chart datasets, the `render()` block). If the change adds
@@ -43,7 +48,7 @@ After every change, verify the following in order:
    The point is to surface render bugs (missing canvases, undefined
    refs, mis-sized charts) before the user sees them, not just to
    confirm the file parses.
-6. **Hook parity** — `settings.json` (project) and `~/.claude/settings.json`
+7. **Hook parity** — `settings.json` (project) and `~/.claude/settings.json`
    (global) must define the same core hook events (`SessionStart`,
    `Notification`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `StopFailure`,
    `SessionEnd`) with identical matchers and commands. The global file may have
@@ -54,9 +59,9 @@ After every change, verify the following in order:
    not in `~/.claude/settings.json`). Their scripts live in `.claude/hooks/`,
    not in `hooks/`. Any change to a shared hook must be applied to **both** the
    root `settings.json` and `~/.claude/settings.json`.
-7. **Local deploy** — ask the user whether the change should be copied to
+8. **Local deploy** — ask the user whether the change should be copied to
    `~/.claude/hooks/` / `~/swiftbar/` / `~/.claude/.ccg/`.
-8. **Commit and push** — every change ends with a commit and a push to
+9. **Commit and push** — every change ends with a commit and a push to
    *all* configured remotes (this overrides the default "only commit
    when explicitly asked" rule for this repo). Remotes to push to are
    whatever `git remote` lists; today that's `origin` and `trilogy`.
