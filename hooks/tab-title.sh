@@ -65,16 +65,10 @@ actor=$(printf '%s' "$actor" | tr -cd '0-9a-zA-Z_-')
 short_id=$(echo "$session_id" | cut -c1-8)
 __trace "resolved status=$status session_id=$session_id short_id=$short_id pwd=$PWD"
 
-# Look up session custom title from the session's jsonl file
-summary=""
-for session_file in ~/.claude/projects/*/"$session_id".jsonl; do
-  [ -f "$session_file" ] || continue
-  summary=$(grep '"type":"custom-title"' "$session_file" \
-    | jq -r --arg sid "$session_id" \
-      'select(.sessionId == $sid) | .customTitle // empty' 2>/dev/null \
-    | tail -1)
-  [ -n "$summary" ] && break
-done
+# Look up session custom title from the daemon sessions directory.
+summary=$(jq -rs --arg sid "$session_id" \
+  '.[] | select(.sessionId == $sid) | .name // empty' \
+  ~/.claude/sessions/*.json 2>/dev/null | head -1)
 if [ -n "$summary" ]; then
   base_title="Claude Code | $summary"
 else
