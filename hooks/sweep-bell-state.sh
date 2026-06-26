@@ -171,6 +171,28 @@ if [ -d "$PENDING_DIR" ]; then
   done < <(find "$PENDING_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +720 2>/dev/null)
 fi
 
+# Notification expiry pass: clear any ccg-* notification older than the
+# configured threshold (default 24h). terminal-notifier -list ALL returns
+# tab-separated lines (skipping the header row):
+#   GroupID \t Title \t Subtitle \t Message \t Delivered At
+# "Delivered At" is in "YYYY-MM-DD HH:MM:SS +ZZZZ" format (UTC). We parse
+# it with BSD date and call -remove for any group past the threshold.
+# Only manages our own ccg- groups; other apps' notifications are untouched.
+# Overridable for testing; set to 0 to disable.
+NOTIF_EXPIRY_HOURS="${CCG_NOTIF_EXPIRY_HOURS:-24}"
+if [ "${NOTIF_EXPIRY_HOURS}" -gt 0 ] 2>/dev/null; then
+  _notif_cutoff=$((_now - NOTIF_EXPIRY_HOURS * 3600))
+  while IFS=$'\t' read -r grp _t _s _m delivered_at; do
+    [ -z "$grp" ] && continue
+    [ "$grp" = "GroupID" ] && continue          # skip header line
+    case "$grp" in ccg-*) ;; *) continue ;; esac
+    epoch=$(date -j -f "%Y-%m-%d %H:%M:%S %z" "$delivered_at" "+%s" 2>/dev/null) || continue
+    [ "$epoch" -gt "$_notif_cutoff" ] && continue
+    terminal-notifier -remove "$grp" 2>/dev/null
+    __trace "notif-expire: group=$grp delivered=$delivered_at epoch=$epoch cutoff=$_notif_cutoff"
+  done < <(terminal-notifier -list ALL 2>/dev/null | tail -n +2)
+fi
+
 # If anything was removed, nudge SwiftBar so the dropdown reflects reality
 # on the next plugin run.
 if [ "$pruned" -gt 0 ]; then
