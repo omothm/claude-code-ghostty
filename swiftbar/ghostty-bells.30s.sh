@@ -40,6 +40,14 @@ if [ -f "$BELL_CONFIG" ]; then
 fi
 __trace "mode=$BELL_MODE"
 
+# Fire stale-state cleanup unconditionally on every poll so notification
+# expiry and bell-state pruning run even when there are no active sessions
+# (the plugin would otherwise exit early before reaching the dispatch at the
+# bottom of each mode path, leaving old notifications lingering indefinitely).
+"$HOOKS_DIR/sweep-bell-state.sh" </dev/null >/dev/null 2>&1 &
+disown 2>/dev/null || true
+__trace "sweep-dispatched (background)"
+
 # Mode off: never emit any output.
 if [ "$BELL_MODE" = "off" ]; then
   __trace "result=hidden (mode=off)"
@@ -159,11 +167,6 @@ if [ "$BELL_MODE" != "always-on" ]; then
 
   _emit_dashboard_entry
 
-  # Fire stale-state cleanup in the background so menubar rendering isn't
-  # delayed by the ~300 ms AX enumeration.
-  "$HOOKS_DIR/sweep-bell-state.sh" </dev/null >/dev/null 2>&1 &
-  disown 2>/dev/null || true
-  __trace "sweep-dispatched (background)"
   __trace "exit"
   exit 0
 fi
@@ -273,8 +276,4 @@ fi
 
 _emit_dashboard_entry
 
-# Fire stale-state cleanup in background.
-"$HOOKS_DIR/sweep-bell-state.sh" </dev/null >/dev/null 2>&1 &
-disown 2>/dev/null || true
-__trace "sweep-dispatched (background)"
 __trace "exit"
