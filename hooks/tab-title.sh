@@ -168,32 +168,49 @@ case "$status" in
     if _pending_nonempty; then
       effective_status="input"
       __trace "working held as input (pending actors remain: $(ls -A "$pending_dir" 2>/dev/null | tr '\n' ',' ))"
-    elif [ "$actor" != "__main__" ]; then
-      # Stray-late-SubagentStop guard. SubagentStop is wired to `working` so it
-      # can reap a denied subagent's pending bell (no PostToolUse ever fires for
-      # a denied permission). But a subagent's terminal event can also land a
-      # second or two AFTER the main agent's Stop already settled the session to
-      # idle — with no pending bell to clear. Left unguarded, that lone
-      # `working` overwrites idle and sticks forever: the main Stop won't fire
-      # again and no further subagents remain to correct it (observed live:
-      # idle at T, then a subagent `working` at T+2s, frozen ⏳ for 28 min).
+    else
+      # Stray-working guard. Covers two cases:
       #
-      # The distinguisher is the actor. The main agent's legitimate
-      # start-of-turn `working` (UserPromptSubmit, fired right after the
-      # SessionStart `idle`) is always actor=__main__, so it must pass through.
-      # Only a *subagent* working (actor=<hex>) arriving while the session's
-      # logical state is already settled (idle/watching) is a stray — during an
-      # active turn the main agent is `working`, so a real subagent working sees
-      # logical=working and is not suppressed. Mirror the settled state so the
-      # title/state-file stay correct; event-log dedup drops the duplicate.
+      # (A) Stray-late-SubagentStop: a subagent's terminal event (SubagentStop
+      #     wired to `working`) can land a second or two AFTER the main agent's
+      #     Stop already settled the session to idle, with no pending bell to
+      #     clear. Observed live: idle at T, subagent `working` at T+2s, frozen
+      #     ⏳ for 28 min.
+      #
+      # (B) Stray-main-after-end: a Stop/StopFailure hook fires AFTER SessionEnd
+      #     already removed the logical-state file. The actor is __main__ (not a
+      #     subagent), so a subagent-only guard misses it. Observed live: end at
+      #     T, __main__ `working` at T+0.66s, no-PID bell-state, frozen ⏳ until
+      #     the stale cap.
+      #
+      # Detection: read the logical-state file.
+      #   Case (A): actor is subagent hex, file contains idle/watching → suppress.
+      #   Case (B): actor is __main__, file is absent (removed by `end` handler)
+      #             → suppress.
+      #   Legitimate start-of-turn: actor is __main__, file contains idle (written
+      #     by the preceding SessionStart idle) → pass through. This is the key
+      #     distinguisher: a real new turn always has a logical-state file saying
+      #     idle; the stray fires when the file has already been removed by end.
       _logical=""
       [ -f "$session_state_file" ] && _logical=$(head -n1 "$session_state_file" 2>/dev/null)
-      case "$_logical" in
-        idle|watching)
-          effective_status="$_logical"
-          __trace "stray subagent working suppressed (actor=$actor, logical=$_logical)"
-          ;;
-      esac
+      if [ "$actor" = "__main__" ]; then
+        # Case (B): a stray Stop/StopFailure fired after SessionEnd already
+        # removed the logical-state file. Identified by the file being absent:
+        # in real sessions, SessionStart always fires `idle` (which creates the
+        # file) before any `working`, so absent means post-end. Suppress by
+        # dropping back to idle; event-log dedup discards the duplicate.
+        if [ -z "$_logical" ]; then
+          effective_status="idle"
+          __trace "stray __main__ working suppressed post-end (logical=<absent>)"
+        fi
+      else
+        case "$_logical" in
+          idle|watching)
+            effective_status="$_logical"
+            __trace "stray subagent working suppressed (actor=$actor, logical=$_logical)"
+            ;;
+        esac
+      fi
       unset _logical
     fi
     ;;

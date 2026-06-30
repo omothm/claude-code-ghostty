@@ -199,22 +199,33 @@ would stick forever. (`agent_id` arrives two ways: as **arg 3** on the
 `input` path — `notify.sh` forwards it — and via **stdin `.agent_id`** on the
 `working`/`SubagentStop` path that reads the raw hook JSON.)
 
-The flip side of wiring `SubagentStop → working`: a subagent's terminal event
-can land a second or two **after** the main agent's `Stop` has already settled
-the session to `idle`, with no pending bell to clear. Unguarded, that lone
-`working` overwrites `idle` and **sticks forever** — the main `Stop` won't fire
-again and no subagents remain to correct it (observed live: `idle` at T, a
-subagent `working` at T+2s, then a frozen ⏳ for 28 min). The `working` branch
-guards against this: when a `working` arrives with an **empty pending set** AND
-the actor is a **subagent** (`actor != __main__`) AND the per-session logical
-state is already settled (`idle`/`watching`), the effective status is mirrored
-back to that settled state instead of resurrecting `working`. The guard is keyed
-on the subagent actor specifically so the main agent's legitimate start-of-turn
-`working` (always `__main__`, fired right after the `SessionStart` `idle`) is
-never suppressed; during an active turn the logical state is `working`, so a
-real subagent `working` also passes through. This is why the logical-state file
-(`~/.claude/.ccg/sessions/<sid>`) is read in the pending-set block, not just for
-event-log dedup.
+The flip side of wiring `SubagentStop → working`: a stray `working` can arrive
+after the session has already settled. Two observed variants:
+
+- **Stray-late-SubagentStop**: a subagent's terminal event lands a second or two
+  after the main agent's `Stop` settled to `idle`, with no pending bell to clear
+  (observed: `idle` at T, subagent `working` at T+2s, frozen ⏳ for 28 min).
+- **Stray-main-after-end**: a `Stop`/`StopFailure` hook fires after `SessionEnd`
+  already removed the logical-state file. The actor is `__main__`, so the old
+  subagent-only guard missed it (observed: `end` at T, `__main__` `working` at
+  T+0.66s, no-PID bell-state file, frozen ⏳ until the 60-min stale cap).
+
+The `working` branch guards against both:
+
+- **Subagent stray (A)**: when a subagent (`actor=<hex>`) arrives with empty
+  pending set and logical state already settled (`idle`/`watching`), mirror it
+  back to that settled state. Mid-turn subagent working (logical=`working`) and
+  the main agent's own working both pass through.
+- **Main-after-end stray (B)**: when `__main__` arrives with empty pending set
+  and the logical-state file is **absent** (deleted by the prior `end` handler),
+  suppress to `idle`. The distinguisher is the absent file: in real sessions
+  `SessionStart` always fires `idle` (which creates the file) before any
+  `working`, so absent means post-end. The main agent's legitimate start-of-turn
+  `working` always arrives while the file exists (containing `idle`), so it
+  still passes through.
+
+This is why the logical-state file (`~/.claude/.ccg/sessions/<sid>`) is read in
+the pending-set block, not just for event-log dedup.
 
 Crash cleanup: a session that dies without firing `idle`/`end` leaks its pending
 dir. `sweep-bell-state.sh` hard-expires any pending dir untouched for 12h
@@ -270,8 +281,8 @@ can't be `kill -0`'d — under the current hooks this is either a pre-PID legacy
 file or a rare `_find_claude_pid` failure (the claude ancestor had already
 exited when the hook fired, e.g. a fleet session torn down mid-write). Since
 every live session writes a PID, a no-PID file untouched past
-`NO_PID_STALE_MIN` (default 60 min, override `CCG_NO_PID_STALE_MIN`) is stale
-and gets reaped — so a stuck "working" tile clears from the menubar in an hour,
+`NO_PID_STALE_MIN` (default 30 min, override `CCG_NO_PID_STALE_MIN`) is stale
+and gets reaped — so a stuck "working" tile clears from the menubar in 30 min,
 not 12 h. A *fresh* no-PID file is kept (a live session may rewrite it with a
 PID on its next transition). The logical-state reconciliation pass uses the
 same `NO_PID_STALE_MIN` for its no-PID fallback, so the menubar and dashboard
@@ -474,7 +485,7 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
   `~/.claude/.ccg/pending`). One subdir per session, one file per actor with
   an unanswered permission request; see "Pending-input set" above. The
   validator and `sweep-bell-state.sh` both honor it.
-- **`CCG_NO_PID_STALE_MIN`** — staleness cap in minutes (default `60`) for
+- **`CCG_NO_PID_STALE_MIN`** — staleness cap in minutes (default `30`) for
   state files that carry no claude PID, used by `sweep-bell-state.sh` for both
   the bell-state PID-liveness pass and the logical-state reconciliation no-PID
   fallback. A no-PID file untouched longer than this is reaped (menubar) /
@@ -527,10 +538,11 @@ across every branch + precedence boundary; asserts `renderVerdict` has a
 `stripStragglers` by its `// <stripStragglers>` markers and runs it under
 Node: `end` is terminal so a post-`end` straggler or a tie-colliding synthetic
 `end` reads as ended, while a fresh `idle` reopens a resumed session; asserts
-all three per-session loops route through it), stray-late-`SubagentStop` guard
-(a subagent `working` arriving after the turn settled to `idle` must not
-resurrect `working`, while the main agent's start-of-turn `working` and a real
-mid-turn subagent `working` both still pass through), and end-to-end
+all three per-session loops route through it), stray-working guard
+(a stray `working` — subagent arriving after `idle`, or `__main__` arriving
+after `end` deleted the logical-state file — must not resurrect `working`;
+the main agent's start-of-turn `working` and a real mid-turn subagent `working`
+both still pass through), and end-to-end
 `input`→state→plugin latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches

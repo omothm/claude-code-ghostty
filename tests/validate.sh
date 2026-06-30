@@ -623,8 +623,10 @@ else ng "reconcile: legacy no-PID aged file not reaped/end-emitted"; fi
 rm -f "$CCG_SESSION_STATE_DIR/recon-legacy-fresh"
 
 # tab-title.sh writes a 2-line logical-state file (state + pid) and dedup still
-# works off line 1.
+# works off line 1. Precede with idle so the logical-state file exists — a real
+# session always fires SessionStart(idle) before the first working.
 : > "$CCG_EVENT_LOG"; rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"
+CCG_CLAUDE_PID=4242 "$HOOKS_DIR/tab-title.sh" idle "recon-fmt" >/dev/null 2>&1
 CCG_CLAUDE_PID=4242 "$HOOKS_DIR/tab-title.sh" working "recon-fmt" >/dev/null 2>&1
 _lsf="$CCG_SESSION_STATE_DIR/recon-fmt"
 if [ "$(sed -n '1p' "$_lsf" 2>/dev/null)" = "working" ] && [ "$(sed -n '2p' "$_lsf" 2>/dev/null)" = "4242" ]; then
@@ -917,19 +919,27 @@ rm -rf "$CCG_PENDING_DIR" "$BELL_STATE_DIR/$PSID"
 : > "$BELL_CONFIG"
 
 # ---------------------------------------------------------------------------
-section "stray late SubagentStop (working after turn settled)"
+section "stray working after turn settled (subagent and main-after-end)"
 
-# Regression guard for the stuck-working bug: SubagentStop is wired to
-# `working`, but a subagent's terminal event can land a second or two AFTER the
-# main agent's Stop already settled the session to idle, with no pending bell to
-# clear. That lone subagent `working` used to overwrite idle and stick forever
-# (the main Stop won't fire again). The guard suppresses a subagent `working`
-# (actor=<hex>) when the pending set is empty and the logical state is already
-# settled, while still letting the main agent's start-of-turn working through.
+# Regression guard for the stuck-working bug. Two variants:
+#
+# (A) Stray-late-SubagentStop: SubagentStop is wired to `working`, but a
+#     subagent's terminal event can land a second or two AFTER the main agent's
+#     Stop settled the session to idle, with no pending bell to clear. That lone
+#     subagent `working` used to overwrite idle and stick forever.
+#
+# (B) Stray-main-after-end: a Stop/StopFailure hook fires AFTER SessionEnd
+#     already removed the logical-state file. The actor is __main__, so the old
+#     subagent-only guard missed it (observed: end at T, __main__ working at
+#     T+0.66s, no-PID bell-state file, frozen ⏳ until the stale cap).
+#
+# The guard now covers all actors: if pending is empty and logical state is
+# settled (idle/watching) or absent (file removed by end), suppress the working.
 printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
 SLSID="strayss-$$"
 rm -rf "$CCG_PENDING_DIR/$SLSID" "$BELL_STATE_DIR/$SLSID" "$CCG_SESSION_STATE_DIR/$SLSID"
 
+# --- Variant A: subagent working after idle ---
 # Turn ends: main agent Stop → idle. Logical state is now idle.
 printf '{"session_id":"%s"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" idle "$SLSID" >/dev/null 2>&1
 [ "$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)" = "idle" ] \
@@ -939,7 +949,7 @@ printf '{"session_id":"%s"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" idle "$SLSID
 # Must NOT resurrect working — state file stays idle.
 printf '{"session_id":"%s","agent_id":"f00d"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
 [ "$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)" = "idle" ] \
-  && ok "stray-ss: late subagent working does NOT resurrect working (the bug)" \
+  && ok "stray-ss: late subagent working does NOT resurrect working (variant A)" \
   || ng "stray-ss: late subagent working stuck the session — regression! (got '$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)')"
 
 # And it must not have appended a spurious working transition to the event log.
@@ -947,12 +957,29 @@ printf '{"session_id":"%s","agent_id":"f00d"}\n' "$SLSID" | "$HOOKS_DIR/tab-titl
   && ok "stray-ss: no spurious working event logged" \
   || ng "stray-ss: spurious working event logged"
 
+# --- Variant B: __main__ working after end (logical-state file deleted) ---
+# SessionEnd fires → end removes the logical-state file.
+printf '{"session_id":"%s"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" end "$SLSID" >/dev/null 2>&1
+[ ! -f "$CCG_SESSION_STATE_DIR/$SLSID" ] \
+  && ok "stray-ss: end removed logical-state file" \
+  || ng "stray-ss: end did not remove logical-state file"
+
+# A Stop/StopFailure hook fires 0.66s later as __main__ (no agent_id in payload).
+# Must NOT resurrect working even though actor=__main__. The distinguisher is the
+# absent logical-state file: in real sessions SessionStart idle always precedes
+# working, so absent means post-end. At this point end already deleted the file.
+printf '{"session_id":"%s"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)" != "working" ] \
+  && ok "stray-ss: __main__ working after end does NOT resurrect working (variant B)" \
+  || ng "stray-ss: __main__ working after end stuck the session — regression! (got '$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)')"
+
 # The main agent's legitimate start-of-turn working (actor=__main__, fired right
-# after the SessionStart idle) MUST still pass through — the guard is keyed on
-# subagent actors only, so a real new turn is never suppressed.
+# after the SessionStart idle) MUST still pass through. Simulate: idle writes
+# the logical-state file, then __main__ working arrives — must land as working.
+printf '{"session_id":"%s"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" idle "$SLSID" >/dev/null 2>&1
 printf '{"session_id":"%s"}\n' "$SLSID" | "$HOOKS_DIR/tab-title.sh" working "$SLSID" >/dev/null 2>&1
 [ "$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)" = "working" ] \
-  && ok "stray-ss: main agent working from idle still works (not over-suppressed)" \
+  && ok "stray-ss: main agent working from idle still passes through (not over-suppressed)" \
   || ng "stray-ss: main agent working wrongly suppressed (got '$(sed -n '2p' "$BELL_STATE_DIR/$SLSID" 2>/dev/null)')"
 
 # During an active turn (logical=working), a real subagent working is genuine
@@ -1005,7 +1032,8 @@ if sf_exists "${SID_AO}i"; then ok "always-on: idle writes state file"; else ng 
 line2=$(sed -n '2p' "$BELL_STATE_DIR/${SID_AO}i" 2>/dev/null)
 [ "$line2" = "idle" ] && ok "always-on: idle state file line 2 = 'idle'" || ng "always-on: idle state file line 2 wrong (got: $line2)"
 
-# working writes state file in always-on mode
+# working writes state file in always-on mode (precede with idle as in real sessions)
+echo "{\"session_id\":\"${SID_AO}w\"}" | "$HOOKS_DIR/tab-title.sh" idle    > /dev/null 2>&1
 echo "{\"session_id\":\"${SID_AO}w\"}" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
 if sf_exists "${SID_AO}w"; then ok "always-on: working writes state file"; else ng "always-on: working did not write state file"; fi
 line2=$(sed -n '2p' "$BELL_STATE_DIR/${SID_AO}w" 2>/dev/null)

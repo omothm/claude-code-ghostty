@@ -50,7 +50,7 @@ EVENT_LOG="${CCG_EVENT_LOG:-$HOME/.claude/.ccg/events.jsonl}"
 # file untouched this long is stale. Far shorter than the 12h hard-age cap so
 # these phantoms (e.g. a stuck "working" tile) clear from the menubar promptly.
 # Overridable for the validator.
-NO_PID_STALE_MIN="${CCG_NO_PID_STALE_MIN:-60}"
+NO_PID_STALE_MIN="${CCG_NO_PID_STALE_MIN:-30}"
 
 # Exit only if there's nothing to sweep in EITHER layer. The logical-state
 # reconciliation pass below runs even in notifs mode, where no bell-state file
