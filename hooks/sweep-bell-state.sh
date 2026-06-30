@@ -181,7 +181,7 @@ fi
 # entry and capture the date from whichever line it lands on.
 # Only manages our own ccg- groups; other apps' notifications are untouched.
 # Overridable for testing; set to 0 to disable.
-NOTIF_EXPIRY_HOURS="${CCG_NOTIF_EXPIRY_HOURS:-24}"
+NOTIF_EXPIRY_HOURS="${CCG_NOTIF_EXPIRY_HOURS:-12}"
 if [ "${NOTIF_EXPIRY_HOURS}" -gt 0 ] 2>/dev/null; then
   _notif_cutoff=$((_now - NOTIF_EXPIRY_HOURS * 3600))
   while IFS=$'\t' read -r grp delivered_at; do

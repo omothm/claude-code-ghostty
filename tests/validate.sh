@@ -749,7 +749,13 @@ if [ "$ps_seen" -gt 0 ]; then
     printf '⏳ Claude Code | working-sess (wK1)\nworking\n'          > "$BELL_STATE_DIR/wK1"
     printf 'Claude Code | idle-sess (iD1)\nidle\n'                    > "$BELL_STATE_DIR/iD1"
 
-    out=$(BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+    # GHOSTTY_HOOKS_DIR="$TMPROOT" suppresses the background sweep the plugin
+    # fires on every run. The sweep would race and delete the stale file (dead
+    # PID 999999) before the plugin's first counting pass, making the test
+    # non-deterministic. We want to exercise the plugin's own _file_status
+    # downgrade logic here, not the sweep — the sweep is tested separately.
+    out=$(BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" \
+          GHOSTTY_HOOKS_DIR="$TMPROOT" bash "$PLUGIN_PATH" 2>&1)
 
     # Header includes the :binoculars: count == 1 (only the live watching file).
     # The segment is shown only when count > 0 (otherwise it would clutter

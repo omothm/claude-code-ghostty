@@ -487,7 +487,7 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
   is running under, and overrides it per-test in the watching section.
   Not used in production hook invocations.
 - **`CCG_NOTIF_EXPIRY_HOURS`** — how many hours before a `ccg-*` macOS
-  notification is auto-removed by `sweep-bell-state.sh` (default `24`). Set to
+  notification is auto-removed by `sweep-bell-state.sh` (default `12`). Set to
   `0` to disable expiry entirely.
 - **`CCG_DIR`** — override the dashboard-server's working directory
   (default `~/.claude/.ccg`). Determines where the PID file and server
