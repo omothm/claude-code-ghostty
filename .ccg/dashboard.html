@@ -12,6 +12,7 @@
   --muted: rgba(0,0,0,0.55);
   --accent-work: #2e8b57;
   --accent-wait: #d4651a;
+  --accent-agents: #6a5acd;
   --accent-watch: #4a8bb8;
   --accent-idle: #888;
   --error-bg: #fff0ec;
@@ -25,6 +26,7 @@
     --muted: rgba(255,255,255,0.55);
     --accent-work: #4caf6a;
     --accent-wait: #f08540;
+    --accent-agents: #9d8cff;
     --accent-watch: #6ba8d4;
     --accent-idle: #888;
     --error-bg: #3a1810;
@@ -69,6 +71,7 @@ h2 {
   100% { box-shadow: 0 0 0 0 rgba(46,139,87,0); }
 }
 .row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.row.row5 { grid-template-columns: repeat(5, 1fr); }
 .row.row3 { grid-template-columns: repeat(3, 1fr); }
 .row.row2 { grid-template-columns: repeat(2, 1fr); }
 .row + .row { margin-top: 12px; }
@@ -91,6 +94,7 @@ h2 {
 .card .sub { font-size: 11px; color: var(--muted); margin-top: 6px; }
 .card.work .value { color: var(--accent-work); }
 .card.wait .value { color: var(--accent-wait); }
+.card.agents .value { color: var(--accent-agents); }
 .card.watch .value { color: var(--accent-watch); }
 .card.idle .value { color: var(--accent-idle); }
 .card.hero { padding: 22px 24px; }
@@ -183,9 +187,10 @@ h2 {
 <div id="error" class="error" style="display:none;"></div>
 
 <h2>Right now</h2>
-<div class="row">
+<div class="row row5">
   <div class="card wait"><div class="label">Awaiting input</div><div class="value" id="now-input">0</div><div class="sub">🔔 blocked on you · act now</div></div>
   <div class="card work"><div class="label">Working</div><div class="value" id="now-working">0</div><div class="sub">⏳ active sessions</div></div>
+  <div class="card agents"><div class="label">Agents running</div><div class="value" id="now-agents">0</div><div class="sub">⚙️ idle but delegating</div></div>
   <div class="card watch"><div class="label">Watching</div><div class="value" id="now-watching">0</div><div class="sub">👀 idle but supervising</div></div>
   <div class="card idle"><div class="label">Idle</div><div class="value" id="now-idle">0</div><div class="sub">💤 between prompts</div></div>
 </div>
@@ -208,7 +213,7 @@ h2 {
 
 <h2>Fleet stalled on you · last 30 days</h2>
 <div class="chart-wrap"><canvas id="trend"></canvas></div>
-<p class="caption">Daily share of your <em>on-the-hook</em> time (≥1 session awaiting you) that was a <em>full stall</em> — a 🔔 blocking with no agent working. Watching counts as idle: a background monitor isn't progress. Thin days (under an hour on the hook) are left blank rather than scored on noise. Today's bar is partial. Lower is better; flat-or-falling is the trend you want.</p>
+<p class="caption">Daily share of your <em>on-the-hook</em> time (≥1 session awaiting you) that was a <em>full stall</em> — a 🔔 blocking with no agent working and no background agent running. Watching counts as idle: a background monitor isn't progress, but a background Agent/Task/Workflow is, so it counts as engaged. Thin days (under an hour on the hook) are left blank rather than scored on noise. Today's bar is partial. Lower is better; flat-or-falling is the trend you want.</p>
 
 <h2>Concurrent share · last 30 days</h2>
 <div class="chart-wrap"><canvas id="concurrent-trend"></canvas></div>
@@ -218,7 +223,8 @@ h2 {
 <div class="chart-wrap"><canvas id="timeline"></canvas></div>
 
 <h2>Background · last 24h</h2>
-<div class="row row3">
+<div class="row">
+  <div class="card agents small"><div class="label">Time agents running</div><div class="value" id="t-agents">—</div><div class="sub">delegating to background agents</div></div>
   <div class="card watch small"><div class="label">Time watching</div><div class="value" id="t-watching">—</div><div class="sub">supervising background work</div></div>
   <div class="card idle small"><div class="label">Time idle</div><div class="value" id="t-idle">—</div><div class="sub">parked between prompts</div></div>
   <div class="card small"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
@@ -232,7 +238,7 @@ const WINDOW_SEC = 24 * 3600;
 const BIN_SEC = 5 * 60;            // 5-min bins → 288 points across 24h
 const TRAILING_CAP_SEC = 30 * 60;  // cap open-ended trailing spans at 30 min
 const NOW_RECENT_SEC = 12 * 3600;  // a session counts as "right now" if its last event is ≤ 12 h old (matches sweep interval)
-const STATES = ['working', 'input', 'watching', 'idle'];
+const STATES = ['working', 'input', 'agents', 'watching', 'idle'];
 const TREND_DAYS = 30;             // daily-trend chart window
 const P90_MIN_SAMPLE = 8;          // min bells in the window before p90 is stable enough to show
 const STALL_MIN_SAMPLE = 12;       // min bell-pending 5-min bins (=1h on the hook) before stall-share is stable enough to show — below this it's just noise
@@ -378,7 +384,7 @@ function compute(events, nowSec) {
     arr.push(e);
   }
 
-  const totals = { working: 0, input: 0, watching: 0, idle: 0 };
+  const totals = { working: 0, input: 0, agents: 0, watching: 0, idle: 0 };
   const latencies = [];
   let started = 0;
   const latest = new Map();
@@ -386,13 +392,14 @@ function compute(events, nowSec) {
   // 5-min bin counters across the 24h window. Each bin tracks the SET of
   // session_ids whose DOMINANT state was X during that bin — a session
   // contributes to exactly one band per bin, by majority time. This
-  // makes the four states mutually exclusive per (session, bin) so the
+  // makes the five states mutually exclusive per (session, bin) so the
   // stacked total equals the number of distinct active sessions and can
   // never exceed it.
   const bins = Math.floor(WINDOW_SEC / BIN_SEC);
   const tlSets = {
     working:  Array.from({ length: bins }, () => new Set()),
     input:    Array.from({ length: bins }, () => new Set()),
+    agents:   Array.from({ length: bins }, () => new Set()),
     watching: Array.from({ length: bins }, () => new Set()),
     idle:     Array.from({ length: bins }, () => new Set()),
   };
@@ -430,14 +437,14 @@ function compute(events, nowSec) {
         const slice    = Math.min(en, binEnd) - Math.max(s, binStart);
         if (slice <= 0) continue;
         let entry = perBin.get(b);
-        if (!entry) { entry = { working: 0, input: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
+        if (!entry) { entry = { working: 0, input: 0, agents: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
         entry[e.state] += slice;
       }
     }
 
     // Assign this session to its dominant state per bin. Ties resolve by
-    // STATES order (working > input > watching > idle) — first state seen
-    // with the max time keeps it.
+    // STATES order (working > input > agents > watching > idle) — first
+    // state seen with the max time keeps it.
     for (const [b, times] of perBin) {
       let bestState = null;
       let bestTime  = -1;
@@ -459,7 +466,7 @@ function compute(events, nowSec) {
   }
 
   // Right-now counters: latest non-end event per session, within recent window.
-  const nowCounts = { working: 0, input: 0, watching: 0, idle: 0 };
+  const nowCounts = { working: 0, input: 0, agents: 0, watching: 0, idle: 0 };
   const nowCutoff = nowSec - NOW_RECENT_SEC;
   for (const e of latest.values()) {
     if (e.state === 'end') continue;
@@ -470,6 +477,7 @@ function compute(events, nowSec) {
   // Materialise the int-array timelines from the per-bin session-id sets.
   const tlWorking  = tlSets.working.map(s => s.size);
   const tlInput    = tlSets.input.map(s => s.size);
+  const tlAgents   = tlSets.agents.map(s => s.size);
   const tlWatching = tlSets.watching.map(s => s.size);
   const tlIdle     = tlSets.idle.map(s => s.size);
 
@@ -485,20 +493,23 @@ function compute(events, nowSec) {
 
   // Fleet-stall share: of your ON-THE-HOOK time (bins with ≥1 session awaiting
   // input), the fraction STALLED ON YOU — a bell pending with zero sessions
-  // working. Watching counts as idle here: a parked session whose only activity
-  // is a background monitor isn't advancing the fleet's reasoning, so it neither
-  // buffers a pending bell nor counts as work. This reads as "of the time I was
-  // on the hook, how much did I waste with no agent making progress" — the
-  // actionable lever. It's composition-invariant (trimming easy bells doesn't
-  // move it) and concurrency-correct (wall-clock bins, not summed-per-session),
-  // so it doesn't rise when you automate trivial bells or run more agents. The
+  // working AND zero sessions running a background agent. Watching counts as
+  // idle here: a parked session whose only activity is a background monitor
+  // isn't advancing the fleet's reasoning, so it neither buffers a pending
+  // bell nor counts as work. A background Agent/Task/Workflow is the opposite
+  // case — real work progressing outside the main loop — so it counts as
+  // engaged, same as working. This reads as "of the time I was on the hook,
+  // how much did I waste with no agent making progress" — the actionable
+  // lever. It's composition-invariant (trimming easy bells doesn't move it)
+  // and concurrency-correct (wall-clock bins, not summed-per-session), so it
+  // doesn't rise when you automate trivial bells or run more agents. The
   // bell-pending denominator gives it a readable dynamic range, but it's noisy
   // on thin days, so the card/chart gate on STALL_MIN_SAMPLE bell-pending bins.
   let bellPendingBins = 0, stalledBins = 0;
   for (let b = 0; b < bins; b++) {
-    const w = tlWorking[b], inp = tlInput[b];
+    const w = tlWorking[b], inp = tlInput[b], ag = tlAgents[b];
     if (inp > 0) bellPendingBins += 1;
-    if (inp > 0 && w === 0) stalledBins += 1;
+    if (inp > 0 && w === 0 && ag === 0) stalledBins += 1;
   }
   const stallShare = bellPendingBins >= STALL_MIN_SAMPLE ? stalledBins / bellPendingBins : null;
 
@@ -509,16 +520,16 @@ function compute(events, nowSec) {
   if (latencies.length >= P90_MIN_SAMPLE) p90Lat = percentile(latencies, 0.9);
   const bells = latencies.length;
 
-  return { totals, nowCounts, started, peak, medianLat, p90Lat, bells, concurrentShare, stallShare, tlWorking, tlInput, tlWatching, tlIdle, bins, totalEvents: events.length };
+  return { totals, nowCounts, started, peak, medianLat, p90Lat, bells, concurrentShare, stallShare, tlWorking, tlInput, tlAgents, tlWatching, tlIdle, bins, totalEvents: events.length };
 }
 
 // Daily fleet-stall share over the last TREND_DAYS days. For each day, share =
 // fraction of BELL-PENDING bins (≥1 session awaiting input) that were STALLED
-// ON YOU (a bell pending, zero working). Watching counts as idle. Days with
-// fewer than STALL_MIN_SAMPLE bell-pending bins are gated to null (no bar) so a
-// near-idle day can't paint a misleading spike. Today's bar is partial. Lower
-// is better. Reuses the dominant-state-per-(session,bin) rule from compute() so
-// the chart matches the 24h "Fleet stalled on you" card.
+// ON YOU (a bell pending, zero working, zero agents running). Watching counts
+// as idle. Days with fewer than STALL_MIN_SAMPLE bell-pending bins are gated
+// to null (no bar) so a near-idle day can't paint a misleading spike. Today's
+// bar is partial. Lower is better. Reuses the dominant-state-per-(session,bin)
+// rule from compute() so the chart matches the 24h "Fleet stalled on you" card.
 function computeDailyStallShare(events, nowSec) {
   const today = new Date(nowSec * 1000);
   today.setHours(0, 0, 0, 0);
@@ -528,12 +539,13 @@ function computeDailyStallShare(events, nowSec) {
 
   const binsPerDay = Math.floor(86400 / BIN_SEC);
   const totalBins = binsPerDay * TREND_DAYS;
-  // Only working/input are read by the stall metric; watching and idle are
-  // treated as non-engagement, so a session whose dominant state is either is
-  // simply not recorded (the `tl[bestState]` guard below skips it).
+  // Only working/input/agents are read by the stall metric; watching and idle
+  // are treated as non-engagement, so a session whose dominant state is
+  // either is simply not recorded (the `tl[bestState]` guard below skips it).
   const tl = {
     working:  Array.from({ length: totalBins }, () => new Set()),
     input:    Array.from({ length: totalBins }, () => new Set()),
+    agents:   Array.from({ length: totalBins }, () => new Set()),
   };
 
   const sessions = new Map();
@@ -564,7 +576,7 @@ function computeDailyStallShare(events, nowSec) {
         const slice    = Math.min(en, binEnd) - Math.max(s, binStart);
         if (slice <= 0) continue;
         let entry = perBin.get(b);
-        if (!entry) { entry = { working: 0, input: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
+        if (!entry) { entry = { working: 0, input: 0, agents: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
         entry[e.state] += slice;
       }
     }
@@ -586,9 +598,9 @@ function computeDailyStallShare(events, nowSec) {
     labels[d] = new Date((oldestStart + d * 86400) * 1000);
     let bellPending = 0, stalled = 0;
     for (let b = d * binsPerDay; b < (d + 1) * binsPerDay; b++) {
-      const w = tl.working[b].size, inp = tl.input[b].size;
+      const w = tl.working[b].size, inp = tl.input[b].size, ag = tl.agents[b].size;
       if (inp > 0) bellPending += 1;
-      if (inp > 0 && w === 0) stalled += 1;
+      if (inp > 0 && w === 0 && ag === 0) stalled += 1;
     }
     counts[d] = bellPending;
     // Gate thin days to null (no bar) so a 2-bell day can't paint a scary 86%.
@@ -642,7 +654,7 @@ function computeDailyConcurrentShare(events, nowSec) {
         const slice    = Math.min(en, binEnd) - Math.max(s, binStart);
         if (slice <= 0) continue;
         let entry = perBin.get(b);
-        if (!entry) { entry = { working: 0, input: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
+        if (!entry) { entry = { working: 0, input: 0, agents: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
         entry[e.state] += slice;
       }
     }
@@ -855,19 +867,21 @@ function renderConcurrentTrend(trend) {
 function buildChart(labels, data) {
   const ctx = document.getElementById('timeline').getContext('2d');
   const css = getComputedStyle(document.documentElement);
-  const work  = css.getPropertyValue('--accent-work').trim();
-  const wait  = css.getPropertyValue('--accent-wait').trim();
-  const watch = css.getPropertyValue('--accent-watch').trim();
-  const idle  = css.getPropertyValue('--accent-idle').trim();
+  const work   = css.getPropertyValue('--accent-work').trim();
+  const wait   = css.getPropertyValue('--accent-wait').trim();
+  const agents = css.getPropertyValue('--accent-agents').trim();
+  const watch  = css.getPropertyValue('--accent-watch').trim();
+  const idle   = css.getPropertyValue('--accent-idle').trim();
   return new Chart(ctx, {
     type: 'line',
     data: {
       labels,
       datasets: [
-        { label: 'Working',        data: data.tlWorking,  borderColor: work,  backgroundColor: work  + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Awaiting input', data: data.tlInput,    borderColor: wait,  backgroundColor: wait  + '66', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Watching',       data: data.tlWatching, borderColor: watch, backgroundColor: watch + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Idle',           data: data.tlIdle,     borderColor: idle,  backgroundColor: idle  + '33', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Working',        data: data.tlWorking,  borderColor: work,   backgroundColor: work   + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Awaiting input', data: data.tlInput,    borderColor: wait,   backgroundColor: wait   + '66', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Agents running', data: data.tlAgents,   borderColor: agents, backgroundColor: agents + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Watching',       data: data.tlWatching, borderColor: watch,  backgroundColor: watch  + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Idle',           data: data.tlIdle,     borderColor: idle,   backgroundColor: idle   + '33', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
       ]
     },
     options: {
@@ -973,18 +987,21 @@ function render(data, nowSec) {
     chart.data.labels = labels;
     chart.data.datasets[0].data = data.tlWorking;
     chart.data.datasets[1].data = data.tlInput;
-    chart.data.datasets[2].data = data.tlWatching;
-    chart.data.datasets[3].data = data.tlIdle;
+    chart.data.datasets[2].data = data.tlAgents;
+    chart.data.datasets[3].data = data.tlWatching;
+    chart.data.datasets[4].data = data.tlIdle;
     chart.update('none');
   }
 
   document.getElementById('now-working').textContent  = data.nowCounts.working;
   document.getElementById('now-input').textContent    = data.nowCounts.input;
+  document.getElementById('now-agents').textContent   = data.nowCounts.agents;
   document.getElementById('now-watching').textContent = data.nowCounts.watching;
   document.getElementById('now-idle').textContent     = data.nowCounts.idle;
 
   document.getElementById('t-working').textContent  = fmtDuration(data.totals.working);
   document.getElementById('t-input').textContent    = fmtDuration(data.totals.input);
+  document.getElementById('t-agents').textContent   = fmtDuration(data.totals.agents);
   document.getElementById('t-watching').textContent = fmtDuration(data.totals.watching);
   document.getElementById('t-idle').textContent     = fmtDuration(data.totals.idle);
 

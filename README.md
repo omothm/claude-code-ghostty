@@ -41,6 +41,7 @@ To update: `git pull && ./install.sh`. The script is idempotent — it only touc
 |---|---|
 | `⏳ Claude Code \| …` | Working |
 | `🔔 Claude Code \| …` | Waiting for your input |
+| `⚙️ Claude Code \| …` | Idle, but a background Agent/Task/Workflow is still running |
 | `👀 Claude Code \| …` | Idle, but a background task is still running |
 | `Claude Code \| <dir>` | Idle |
 

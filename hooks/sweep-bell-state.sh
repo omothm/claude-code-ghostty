@@ -153,6 +153,163 @@ if [ -d "$SESSION_STATE_DIR" ]; then
   done < <(find "$SESSION_STATE_DIR" -type f 2>/dev/null)
 fi
 
+# Idle-refinement correction pass: for bell-state files whose owning claude
+# process is still alive, re-derive the live agents/watching/idle state and
+# correct the file + tab title if it has drifted. This closes the gap where a
+# session settles to `agents` after a background Agent/Task/Workflow finishes
+# and then goes fully quiet (no further hooks fire), leaving the ⚙️ stuck
+# indefinitely. The same pass also catches the reverse: a session sitting at
+# plain `idle` that missed an agents-upgrade because the SubagentStop race
+# (stray-working guard) over-cleared it.
+#
+# We only touch sessions the main claude process is still alive for: dead-PID
+# files were pruned by the PID-liveness pass above, so everything left with a
+# PID is a live session. Input and working states are driven by hook events and
+# are not second-guessed here — they're legitimately transient and the hook
+# is authoritative.
+#
+# Correction steps for an idle/watching/agents file:
+#   1. _count_live_agents — re-check subagent transcript freshness.
+#   2. _count_live_monitors — re-check claude marker-child liveness.
+#   3. Derive effective state (agents > watching > idle).
+#   4. If it differs from the stored line-2 state, rewrite the bell-state file
+#      and push the new ANSI title to the session's TTY.
+#
+# BELL_MODE/CCG_PROJECTS_DIR/CCG_AGENTS_FRESH_SEC are inherited from the
+# environment (set at top of script or via callers); we read BELL_CONFIG here
+# to stay in sync with the current mode.
+
+_sweep_count_live_agents() {
+  local sid="$1" fresh="${CCG_AGENTS_FRESH_SEC:-60}" n=0 f age
+  local now projects_dir
+  now=$(date +%s)
+  projects_dir="${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"
+  for f in "$projects_dir"/*/"$sid"/subagents/*.jsonl; do
+    [ -f "$f" ] || continue
+    age=$(( now - $(stat -f %m "$f" 2>/dev/null || echo 0) ))
+    [ "$age" -le "$fresh" ] && n=$((n + 1))
+  done
+  echo "$n"
+}
+
+_sweep_count_live_monitors() {
+  local cpid="$1"
+  [ -n "$cpid" ] || { echo 0; return; }
+  ps -axo ppid=,command= 2>/dev/null \
+    | awk -v p="$cpid" '$1 == p && /\/tmp\/claude-[0-9a-f]+-cwd/ { n++ } END { print n+0 }'
+}
+
+# Load current bell mode so we write (or skip) state files consistently.
+# Default "notifs" mirrors tab-title.sh's own default (an empty/missing/
+# unparseable config file must resolve the same way in both places).
+_sweep_bell_mode="notifs"
+BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/.ccg/config.json}"
+if [ -f "$BELL_CONFIG" ]; then
+  _m=""
+  IFS= read -r _m < <(jq -r '.mode // "notifs"' "$BELL_CONFIG" 2>/dev/null)
+  [ -n "$_m" ] && _sweep_bell_mode="$_m"
+  unset _m
+fi
+
+if [ -d "$STATE_DIR" ] && [ "$_sweep_bell_mode" = "always-on" ]; then
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    stored_st=$(sed -n '2p' "$f" 2>/dev/null | tr -d ' ')
+    # Only re-check states that are idle-family (idle/watching/agents).
+    # input and working are hook-authoritative; don't touch them.
+    case "$stored_st" in
+      idle|watching|agents) ;;
+      *) continue ;;
+    esac
+    cpid=$(sed -n '3p' "$f" 2>/dev/null | tr -d ' ')
+    [ -z "$cpid" ] && continue                          # already pruned above or no PID; skip
+    kill -0 "$cpid" 2>/dev/null || continue             # PID dead; let PID-liveness pass handle it
+
+    sid=$(basename "$f")
+    # Re-derive effective state.
+    if [ "$(_sweep_count_live_agents "$sid")" -gt 0 ]; then
+      new_st="agents"
+    elif [ "$(_sweep_count_live_monitors "$cpid")" -gt 0 ]; then
+      new_st="watching"
+    else
+      new_st="idle"
+    fi
+
+    [ "$new_st" = "$stored_st" ] && continue            # already correct; nothing to do
+
+    # Rewrite the bell-state file.
+    stored_title=$(sed -n '1p' "$f" 2>/dev/null)
+    # Strip any existing icon prefix to get the base title.
+    case "$stored_title" in
+      "⚙️ "*) base="${stored_title#"⚙️ "}" ;;
+      "👀 "*) base="${stored_title#"👀 "}" ;;
+      "⏳ "*) base="${stored_title#"⏳ "}" ;;
+      "🔔 "*) base="${stored_title#"🔔 "}" ;;
+      *)      base="$stored_title" ;;
+    esac
+    case "$new_st" in
+      agents)   new_title="⚙️ $base" ;;
+      watching) new_title="👀 $base" ;;
+      *)        new_title="$base" ;;
+    esac
+    printf '%s\n%s\n%s\n' "$new_title" "$new_st" "$cpid" > "$f"
+    pruned=$((pruned + 1))
+    __trace "idle-refinement-correct: sid=$sid $stored_st->$new_st (pid=$cpid)"
+
+    # Push the corrected ANSI title to the session's TTY.
+    tty_dev=$(ps -p "$cpid" -o tty= 2>/dev/null | tr -d ' ')
+    if [ -n "$tty_dev" ] && [ "$tty_dev" != "?" ] && [ "$tty_dev" != "??" ]; then
+      printf '\033]2;%s\007' "$new_title" > "/dev/$tty_dev" 2>/dev/null
+      __trace "idle-refinement-tty: wrote title to /dev/$tty_dev"
+    fi
+  done < <(find "$STATE_DIR" -type f 2>/dev/null)
+fi
+# Logical-state correction pass: the dashboard reads events.jsonl, which is
+# independent of BELL_MODE (notifs mode still logs agents/watching transitions
+# even though it writes no bell-state file for them — see the bell-state
+# pass's mode gate above). Without this, a session's `agents`/`watching`
+# event.jsonl entry would drift stale the same way the bell-state file would,
+# skewing the dashboard's "right now" counts and fleet-stall metric even after
+# the tab title/menubar have self-corrected. Mirrors the bell-state pass:
+# only touches live-PID idle-family sessions, appends a new events.jsonl line
+# when the re-derived state differs from the logged one, and rewrites the
+# 2-line logical-state file so subsequent dedup keys off the corrected value.
+if [ -d "$SESSION_STATE_DIR" ]; then
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    stored_st=$(sed -n '1p' "$f" 2>/dev/null | tr -d ' ')
+    case "$stored_st" in
+      idle|watching|agents) ;;
+      *) continue ;;
+    esac
+    spid=$(sed -n '2p' "$f" 2>/dev/null | tr -d ' ')
+    [ -z "$spid" ] && continue
+    kill -0 "$spid" 2>/dev/null || continue             # dead; the end-reconcile pass above handles it
+
+    sid=$(basename "$f")
+    if [ "$(_sweep_count_live_agents "$sid")" -gt 0 ]; then
+      new_st="agents"
+    elif [ "$(_sweep_count_live_monitors "$spid")" -gt 0 ]; then
+      new_st="watching"
+    else
+      new_st="idle"
+    fi
+
+    [ "$new_st" = "$stored_st" ] && continue
+
+    title="(reconciled)"
+    [ -f "$STATE_DIR/$sid" ] && title=$(sed -n '1p' "$STATE_DIR/$sid" 2>/dev/null)
+    jq -nc --arg ts "$_now" --arg sid "$sid" --arg state "$new_st" --arg title "$title" \
+      '{ts: ($ts|tonumber), session_id: $sid, state: $state, title: $title, cwd: ""}' \
+      >> "$EVENT_LOG" 2>/dev/null
+    printf '%s\n%s\n' "$new_st" "$spid" > "$f"
+    pruned=$((pruned + 1))
+    __trace "logical-refinement-correct: sid=$sid $stored_st->$new_st (pid=$spid)"
+  done < <(find "$SESSION_STATE_DIR" -type f 2>/dev/null)
+fi
+
+unset -f _sweep_count_live_agents _sweep_count_live_monitors
+
 __trace "exit pruned=$pruned"
 
 # Pending-input set cleanup. tab-title.sh keeps a per-session dir of unanswered

@@ -639,6 +639,95 @@ _after=$(wc -l < "$CCG_EVENT_LOG")
 [ "$_before" = "$_after" ] && ok "tab-title: dedup still works off line 1 (2-line file)" || ng "tab-title: dedup broke with 2-line logical-state file"
 rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
 
+# Idle-refinement correction pass: a bell-state file stuck at `agents` (or
+# `watching`) with NO further hook ever firing must self-correct via the
+# background sweep, not just at hook time. This is the fix for the reported
+# live bug: a background agent finished, the session went fully quiet (no
+# more hooks), and the ⚙️ tab title + menubar entry stayed stuck indefinitely
+# because nothing but a hook ever re-derived idle-refinement state.
+# The pass is gated on always-on mode (see test 4 below); this section's
+# BELL_CONFIG is otherwise empty (notifs default), so switch explicitly.
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+export CCG_PROJECTS_DIR="$TMPROOT/sweep-projects"
+mkdir -p "$CCG_PROJECTS_DIR"
+
+# 1. agents -> idle: bell-state file says agents, live PID, but the subagent
+#    transcript is stale (no live agent). Sweep must rewrite the file to idle
+#    and strip the ⚙️ prefix from the title.
+IRSID="ir-agents-stale-$$"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$IRSID/subagents"
+: > "$CCG_PROJECTS_DIR/fake-project/$IRSID/subagents/agent-oldhex$$.jsonl"
+age_file "5 minutes ago" "$CCG_PROJECTS_DIR/fake-project/$IRSID/subagents/agent-oldhex$$.jsonl"
+printf '⚙️ Claude Code | ir-agents-stale (%s)\nagents\n%s\n' "$IRSID" "$$" > "$BELL_STATE_DIR/$IRSID"
+CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$IRSID" 2>/dev/null)
+line1=$(sed -n '1p' "$BELL_STATE_DIR/$IRSID" 2>/dev/null)
+[ "$line2" = "idle" ] && ok "sweep idle-refinement: stuck agents (stale transcript, live PID) corrected to idle" \
+  || ng "sweep idle-refinement: agents not corrected (got '$line2')"
+case "$line1" in "⚙️ "*) ng "sweep idle-refinement: title still has ⚙️ prefix after correction to idle" ;; *) ok "sweep idle-refinement: ⚙️ prefix stripped from title" ;; esac
+rm -f "$BELL_STATE_DIR/$IRSID"
+
+# 2. idle -> agents: bell-state file says idle, live PID, but a fresh subagent
+#    transcript exists (a real live background agent the hook missed, e.g.
+#    the stray-working guard's own-transcript exclusion cleared it while a
+#    DIFFERENT sibling was still running and no subsequent hook re-checked).
+IRSID2="ir-idle-live-$$"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$IRSID2/subagents"
+: > "$CCG_PROJECTS_DIR/fake-project/$IRSID2/subagents/agent-freshhex$$.jsonl"
+printf 'Claude Code | ir-idle-live (%s)\nidle\n%s\n' "$IRSID2" "$$" > "$BELL_STATE_DIR/$IRSID2"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$IRSID2" 2>/dev/null)
+line1=$(sed -n '1p' "$BELL_STATE_DIR/$IRSID2" 2>/dev/null)
+[ "$line2" = "agents" ] && ok "sweep idle-refinement: stuck idle (live transcript) corrected to agents" \
+  || ng "sweep idle-refinement: idle not corrected to agents (got '$line2')"
+case "$line1" in "⚙️ "*) ok "sweep idle-refinement: ⚙️ prefix added to corrected title" ;; *) ng "sweep idle-refinement: title missing ⚙️ prefix after correction (got '$line1')" ;; esac
+rm -f "$BELL_STATE_DIR/$IRSID2"
+
+# 3. Dead PID is left alone by the idle-refinement pass (the PID-liveness pass
+#    above already reaps it; this pass must not resurrect a dead session).
+IRSID3="ir-dead-pid-$$"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$IRSID3/subagents"
+: > "$CCG_PROJECTS_DIR/fake-project/$IRSID3/subagents/agent-deadhex$$.jsonl"
+printf '⚙️ Claude Code | ir-dead-pid (%s)\nagents\n999999\n' "$IRSID3" > "$BELL_STATE_DIR/$IRSID3"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+if ! sf_exists "$IRSID3"; then ok "sweep idle-refinement: dead-PID agents file pruned (not corrected) by PID-liveness pass"
+else ng "sweep idle-refinement: dead-PID file unexpectedly survived"; fi
+
+# 4. Not in always-on mode: the idle-refinement pass is gated on always-on,
+#    since notifs mode doesn't write agents/watching bell-state files at all
+#    (nothing to correct).
+: > "$BELL_CONFIG"  # notifs default
+IRSID4="ir-notifs-$$"
+printf '⚙️ Claude Code | ir-notifs (%s)\nagents\n%s\n' "$IRSID4" "$$" > "$BELL_STATE_DIR/$IRSID4"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$IRSID4" 2>/dev/null)
+[ "$line2" = "agents" ] && ok "sweep idle-refinement: gated on always-on mode (untouched in notifs)" \
+  || ng "sweep idle-refinement: incorrectly ran outside always-on mode (got '$line2')"
+rm -f "$BELL_STATE_DIR/$IRSID4"
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+
+# 5. Logical-state file (events.jsonl path) gets the same correction: a
+#    session logged as `agents` with a live PID but stale transcript emits a
+#    new `idle` event and rewrites the logical-state file, so the dashboard's
+#    right-now count converges with the corrected bell-state/tab-title.
+: > "$CCG_EVENT_LOG"
+IRSID5="ir-logical-$$"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$IRSID5/subagents"
+: > "$CCG_PROJECTS_DIR/fake-project/$IRSID5/subagents/agent-logicalhex$$.jsonl"
+age_file "5 minutes ago" "$CCG_PROJECTS_DIR/fake-project/$IRSID5/subagents/agent-logicalhex$$.jsonl"
+printf 'agents\n%s\n' "$$" > "$CCG_SESSION_STATE_DIR/$IRSID5"
+CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+if jq -e --arg sid "$IRSID5" 'select(.session_id==$sid and .state=="idle")' "$CCG_EVENT_LOG" >/dev/null 2>&1; then
+  ok "sweep idle-refinement: logical-state agents->idle emits corrected events.jsonl entry"
+else ng "sweep idle-refinement: no corrected event emitted for logical-state file"; fi
+[ "$(sed -n '1p' "$CCG_SESSION_STATE_DIR/$IRSID5" 2>/dev/null)" = "idle" ] \
+  && ok "sweep idle-refinement: logical-state file rewritten to idle" \
+  || ng "sweep idle-refinement: logical-state file not rewritten"
+rm -f "$CCG_SESSION_STATE_DIR/$IRSID5"
+
+rm -rf "$CCG_PROJECTS_DIR"; unset CCG_PROJECTS_DIR
+rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
+
 # Restore to the canonical sandbox state-dir for the remaining sections.
 export BELL_STATE_DIR="$TMPROOT/state"
 mkdir -p "$BELL_STATE_DIR"
@@ -839,6 +928,249 @@ wait $FAKE_MON_PID 2>/dev/null
 # upgrade their idle tests to watching by walking up to the real claude
 # process the validator is running under.
 export CCG_CLAUDE_PID=999999
+
+# Restore to notifs default for the remaining sections.
+: > "$BELL_CONFIG"
+
+# ---------------------------------------------------------------------------
+section "agents-running state (idle + live background Agent/Task/Workflow)"
+
+# A background Agent/Task/Workflow invocation runs IN-PROCESS inside the main
+# claude binary — it spawns no child OS process, so there is no PID to walk to
+# the way `watching` walks to a Monitor/run_in_background marker. The only
+# externally-visible liveness signal is the on-disk subagent transcript at
+# ~/.claude/projects/<project>/<session_id>/subagents/agent-<hex>.jsonl, whose
+# mtime advances while the subagent works and freezes once it finishes.
+# CCG_PROJECTS_DIR sandboxes this to a temp dir so the validator never reads
+# the real ~/.claude/projects tree.
+export CCG_PROJECTS_DIR="$TMPROOT/projects"
+: > "$CCG_EVENT_LOG"
+rm -rf "$CCG_SESSION_STATE_DIR"
+mkdir -p "$CCG_SESSION_STATE_DIR"
+
+_touch_subagent_transcript() {
+  local sid="$1" agehint="$2"
+  local dir="$CCG_PROJECTS_DIR/fake-project/$sid/subagents"
+  mkdir -p "$dir"
+  : > "$dir/agent-fakehex$$.jsonl"
+  [ -n "$agehint" ] && age_file "$agehint" "$dir/agent-fakehex$$.jsonl"
+}
+
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+
+# 1. idle + fresh subagent transcript → upgrades to agents.
+ASID="agA-$$"
+_touch_subagent_transcript "$ASID" ""
+printf '{"session_id":"%s"}\n' "$ASID" | "$HOOKS_DIR/tab-title.sh" idle "$ASID" > /dev/null 2>&1
+if sf_exists "$ASID"; then ok "agents: state file written"; else ng "agents: no state file"; fi
+line1=$(sed -n '1p' "$BELL_STATE_DIR/$ASID" 2>/dev/null)
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$ASID" 2>/dev/null)
+case "$line1" in "⚙️ "*) ok "agents: state file line 1 has ⚙️ prefix" ;; *) ng "agents: line 1 missing ⚙️: $line1" ;; esac
+[ "$line2" = "agents" ] && ok "agents: state file line 2 = 'agents'" || ng "agents: line 2 wrong (got '$line2')"
+
+# 2. Event log records the agents transition.
+last_state=$(jq -r --arg sid "$ASID" 'select(.session_id == $sid) | .state' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
+[ "$last_state" = "agents" ] && ok "agents: event log state == 'agents'" || ng "agents: event log state wrong (got '$last_state')"
+
+# 3. Repeat idle with the same fresh transcript does not duplicate the event.
+events_before=$(jq -rc --arg sid "$ASID" 'select(.session_id == $sid)' "$CCG_EVENT_LOG" 2>/dev/null | wc -l | tr -d ' ')
+printf '{"session_id":"%s"}\n' "$ASID" | "$HOOKS_DIR/tab-title.sh" idle "$ASID" > /dev/null 2>&1
+events_after=$(jq -rc --arg sid "$ASID" 'select(.session_id == $sid)' "$CCG_EVENT_LOG" 2>/dev/null | wc -l | tr -d ' ')
+[ "$events_before" = "$events_after" ] && ok "agents: repeat idle with same fresh transcript does not duplicate event" \
+  || ng "agents: repeat idle re-logged (before=$events_before after=$events_after)"
+rm -f "$BELL_STATE_DIR/$ASID"
+
+# 4. Stale transcript (mtime older than CCG_AGENTS_FRESH_SEC) → plain idle,
+#    not agents. Use a tiny freshness window so we don't need to sleep.
+SSID="agS-$$"
+_touch_subagent_transcript "$SSID" "2 minutes ago"
+CCG_AGENTS_FRESH_SEC=5 bash -c "printf '{\"session_id\":\"%s\"}\n' '$SSID' | '$HOOKS_DIR/tab-title.sh' idle '$SSID'" > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$SSID" 2>/dev/null)
+[ "$line2" = "idle" ] && ok "agents: stale transcript does not upgrade (line 2 = 'idle')" \
+  || ng "agents: stale transcript wrongly upgraded (got '$line2')"
+rm -f "$BELL_STATE_DIR/$SSID"
+
+# 5. Precedence: both a fresh subagent transcript AND a live monitor marker
+#    present → agents wins over watching. The fake monitor is spawned as a
+#    child of THIS validator process, so CCG_CLAUDE_PID must be $$ (not the
+#    monitor's own PID) for _count_live_monitors to find it as a child —
+#    same pattern the watching section above uses.
+(exec -a "_fake-mon2 /tmp/claude-caffe-cwd live" sleep 30) &
+FAKE_MON2_PID=$!
+FAKE_MONITOR_PIDS="$FAKE_MONITOR_PIDS $FAKE_MON2_PID"
+sleep 0.2
+PSID2="agP-$$"
+_touch_subagent_transcript "$PSID2" ""
+CCG_CLAUDE_PID="$$" bash -c "printf '{\"session_id\":\"%s\"}\n' '$PSID2' | '$HOOKS_DIR/tab-title.sh' idle '$PSID2'" > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$PSID2" 2>/dev/null)
+[ "$line2" = "agents" ] && ok "agents: precedence over watching when both present" \
+  || ng "agents: precedence wrong when both agents+watching present (got '$line2')"
+rm -f "$BELL_STATE_DIR/$PSID2"
+kill "$FAKE_MON2_PID" 2>/dev/null
+wait "$FAKE_MON2_PID" 2>/dev/null
+
+# 5b. Regression: a background agent finishing is ITSELF what fires
+#     SubagentStop -> working for that actor. If the stray-working guard
+#     mirrored the stale logical-state file back unconditionally, `agents`
+#     would stick forever once the transcript goes stale, since no other
+#     hook re-checks it. The guard must re-derive live state instead.
+DASID="agD-$$"
+_touch_subagent_transcript "$DASID" ""
+printf '{"session_id":"%s"}\n' "$DASID" | "$HOOKS_DIR/tab-title.sh" idle "$DASID" > /dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$DASID" 2>/dev/null)" = "agents" ] \
+  && ok "stray-agents: session settled to agents" \
+  || ng "stray-agents: did not settle to agents (got '$(sed -n '2p' "$BELL_STATE_DIR/$DASID" 2>/dev/null)')"
+# Age the transcript past freshness — simulates the background agent finishing.
+_dir="$CCG_PROJECTS_DIR/fake-project/$DASID/subagents"
+age_file "2 minutes ago" "$_dir"/*.jsonl
+# The finishing subagent's SubagentStop fires (working, hex agent_id, empty pending set).
+CCG_AGENTS_FRESH_SEC=5 bash -c "printf '{\"session_id\":\"%s\",\"agent_id\":\"deadbeef\"}\n' '$DASID' | '$HOOKS_DIR/tab-title.sh' working" > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$DASID" 2>/dev/null)
+[ "$line2" = "idle" ] && ok "stray-agents: finishing agent's SubagentStop downgrades agents to idle (not stuck)" \
+  || ng "stray-agents: agents state stuck after transcript went stale (got '$line2')"
+rm -f "$BELL_STATE_DIR/$DASID"
+
+# 5c. Regression: the finishing agent's OWN transcript is still fresh (mtime a
+#     second or two old) at the exact instant its SubagentStop fires — nobody
+#     artificially ages it first, unlike 5b. Without excluding the finishing
+#     actor's own transcript from the re-derive count, _resolve_idle_refinement
+#     would see that (very fresh) file and re-confirm `agents`, so the state
+#     would never clear until the transcript aged out on some later, unrelated
+#     hook (the bug reported live: "agents-running status lingers until
+#     another prompt is sent"). agent_id must match the transcript's
+#     "agent-<id>.jsonl" basename for the exclusion to apply.
+ESID="agE-$$"
+EACTOR="fakehex$$"
+_touch_subagent_transcript "$ESID" ""
+printf '{"session_id":"%s"}\n' "$ESID" | "$HOOKS_DIR/tab-title.sh" idle "$ESID" > /dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$ESID" 2>/dev/null)" = "agents" ] \
+  && ok "stray-agents-fresh: session settled to agents" \
+  || ng "stray-agents-fresh: did not settle to agents (got '$(sed -n '2p' "$BELL_STATE_DIR/$ESID" 2>/dev/null)')"
+# No aging here — the transcript's mtime is still fresh, exactly as it would
+# be in production when SubagentStop fires within a second or two of the
+# subagent's last write.
+printf '{"session_id":"%s","agent_id":"%s"}\n' "$ESID" "$EACTOR" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$ESID" 2>/dev/null)
+[ "$line2" = "idle" ] && ok "stray-agents-fresh: finishing agent's own fresh transcript is excluded, downgrades to idle" \
+  || ng "stray-agents-fresh: agents state stuck on own fresh transcript (got '$line2')"
+rm -f "$BELL_STATE_DIR/$ESID"
+
+# 5d. Same as 5c but a SECOND subagent is still genuinely live (a different,
+#     fresh transcript). The finishing actor's SubagentStop must exclude only
+#     ITS OWN transcript, not every transcript — the session should stay in
+#     `agents` because the sibling is still working.
+FSID="agF-$$"
+FACTOR="fakehex$$"
+_touch_subagent_transcript "$FSID" ""
+printf '{"session_id":"%s"}\n' "$FSID" | "$HOOKS_DIR/tab-title.sh" idle "$FSID" > /dev/null 2>&1
+# Add a second, sibling transcript for a different actor, also fresh.
+_sib_dir="$CCG_PROJECTS_DIR/fake-project/$FSID/subagents"
+: > "$_sib_dir/agent-siblinghex$$.jsonl"
+printf '{"session_id":"%s","agent_id":"%s"}\n' "$FSID" "$FACTOR" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$FSID" 2>/dev/null)
+[ "$line2" = "agents" ] && ok "stray-agents-fresh: sibling still live keeps state at agents (only own transcript excluded)" \
+  || ng "stray-agents-fresh: wrongly downgraded despite live sibling (got '$line2')"
+rm -f "$BELL_STATE_DIR/$FSID"
+
+# 6. notifs mode: agents does NOT write a state file (agents is a refinement
+#    of idle, and idle is invisible in notifs mode).
+: > "$BELL_CONFIG"
+NASID="agN-$$"
+_touch_subagent_transcript "$NASID" ""
+printf '{"session_id":"%s"}\n' "$NASID" | "$HOOKS_DIR/tab-title.sh" idle "$NASID" > /dev/null 2>&1
+if ! sf_exists "$NASID"; then ok "notifs mode: agents writes no state file (idle-equivalent)"
+else ng "notifs mode: agents wrote a state file"; fi
+last_state=$(jq -r --arg sid "$NASID" 'select(.session_id == $sid) | .state' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
+[ "$last_state" = "agents" ] && ok "notifs mode: event log still records agents" || ng "notifs mode: event state wrong (got '$last_state')"
+
+# 7. Plugin output (always-on): agents session shows up under its own
+#    section, positioned between Working and Watching, with the
+#    :gearshape.fill: emoji in the header count and sfimage=gearshape.fill on
+#    the entry. A stale agents file (fresh transcript aged out) is downgraded
+#    to idle so the dropdown reflects current reality.
+if [ "$plugin" = "1" ]; then
+  printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+  rm -f "$BELL_STATE_DIR"/*
+
+  # A genuinely live watching entry needs a real monitor PID (the plugin's
+  # _file_status re-verifies watching files against a live PID + marker
+  # child, same as the "watching state" section above), not just a dead-PID
+  # placeholder — otherwise it downgrades to idle and skews the :zzz: count.
+  (exec -a "_fake-mon3 /tmp/claude-decaf-cwd live" sleep 30) &
+  FAKE_MON3_PID=$!
+  FAKE_MONITOR_PIDS="$FAKE_MONITOR_PIDS $FAKE_MON3_PID"
+  sleep 0.2
+
+  LASID="lAg1"
+  _touch_subagent_transcript "$LASID" ""
+  SASID="sAg1"
+  _touch_subagent_transcript "$SASID" "2 minutes ago"
+
+  printf '⚙️ Claude Code | live-agents (lAg1)\nagents\n999999\n'   > "$BELL_STATE_DIR/$LASID"
+  printf '⚙️ Claude Code | stale-agents (sAg1)\nagents\n999999\n' > "$BELL_STATE_DIR/$SASID"
+  printf '⏳ Claude Code | working-sess (wK2)\nworking\n'          > "$BELL_STATE_DIR/wK2"
+  printf '👀 Claude Code | watch-sess (wA2)\nwatching\n%s\n' "$$"  > "$BELL_STATE_DIR/wA2"
+  printf 'Claude Code | idle-sess (iD2)\nidle\n'                    > "$BELL_STATE_DIR/iD2"
+
+  out=$(CCG_AGENTS_FRESH_SEC=60 BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" \
+        CCG_PROJECTS_DIR="$CCG_PROJECTS_DIR" GHOSTTY_HOOKS_DIR="$TMPROOT" bash "$PLUGIN_PATH" 2>&1)
+
+  echo "$out" | head -n1 | grep -q ':gearshape.fill: 1' \
+    && ok "plugin: always-on header includes ':gearshape.fill: 1'" \
+    || ng "plugin: header missing ':gearshape.fill: 1': $(echo "$out" | head -n1)"
+
+  # :zzz: count == 2 (idle-sess + downgraded stale-agents).
+  echo "$out" | head -n1 | grep -q ':zzz: 2' \
+    && ok "plugin: stale agents counts toward :zzz:" \
+    || ng "plugin: :zzz: count wrong: $(echo "$out" | head -n1)"
+
+  echo "$out" | grep -q '^Agents running | size=11' \
+    && ok "plugin: 'Agents running' section header emitted" \
+    || ng "plugin: 'Agents running' section header missing"
+  echo "$out" | grep -q 'live-agents.*sfimage=gearshape.fill' \
+    && ok "plugin: live agents entry uses sfimage=gearshape.fill" \
+    || ng "plugin: live agents entry missing sfimage=gearshape.fill"
+  echo "$out" | grep -q 'stale-agents.*sfimage=zzz' \
+    && ok "plugin: stale agents downgrades to sfimage=zzz" \
+    || ng "plugin: stale agents not downgraded: $out"
+
+  # Section order: Working → Agents running → Watching → Idle.
+  working_line=$(echo "$out" | grep -n '^Working | size=11' | head -n1 | cut -d: -f1)
+  agents_line=$(echo "$out" | grep -n '^Agents running | size=11' | head -n1 | cut -d: -f1)
+  watching_line=$(echo "$out" | grep -n '^Watching | size=11' | head -n1 | cut -d: -f1)
+  idle_line=$(echo "$out" | grep -n '^Idle | size=11' | head -n1 | cut -d: -f1)
+  if [ -n "$working_line" ] && [ -n "$agents_line" ] && [ -n "$watching_line" ] && [ -n "$idle_line" ] \
+     && [ "$working_line" -lt "$agents_line" ] \
+     && [ "$agents_line" -lt "$watching_line" ] \
+     && [ "$watching_line" -lt "$idle_line" ]; then
+    ok "plugin: section order is Working → Agents running → Watching → Idle"
+  else
+    ng "plugin: section order wrong (working=$working_line agents=$agents_line watching=$watching_line idle=$idle_line)"
+  fi
+
+  # Agents count zero → the :gearshape.fill: segment must be entirely absent.
+  rm -f "$BELL_STATE_DIR/$LASID" "$BELL_STATE_DIR/$SASID"
+  out2=$(CCG_AGENTS_FRESH_SEC=60 BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" \
+         CCG_PROJECTS_DIR="$CCG_PROJECTS_DIR" GHOSTTY_HOOKS_DIR="$TMPROOT" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out2" | head -n1 | grep -qv ':gearshape.fill:' \
+    && ok "plugin: ':gearshape.fill:' segment hidden when agents count is 0" \
+    || ng "plugin: ':gearshape.fill:' segment shown despite zero count: $(echo "$out2" | head -n1)"
+  echo "$out2" | grep -qv '^Agents running | size=11' \
+    && ok "plugin: 'Agents running' section suppressed when count is 0" \
+    || ng "plugin: 'Agents running' section present despite zero count"
+
+  rm -f "$BELL_STATE_DIR/wK2" "$BELL_STATE_DIR/wA2" "$BELL_STATE_DIR/iD2"
+  kill "$FAKE_MON3_PID" 2>/dev/null
+  wait "$FAKE_MON3_PID" 2>/dev/null
+else
+  skip "plugin: agents display tests"
+fi
+
+rm -rf "$CCG_PROJECTS_DIR"
+unset CCG_PROJECTS_DIR
+: > "$CCG_EVENT_LOG"
+rm -rf "$CCG_SESSION_STATE_DIR"
+mkdir -p "$CCG_SESSION_STATE_DIR"
 
 # Restore to notifs default for the remaining sections.
 : > "$BELL_CONFIG"

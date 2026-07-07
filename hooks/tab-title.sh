@@ -110,9 +110,67 @@ _count_live_monitors() {
     | awk -v p="$cpid" '$1 == p && /\/tmp\/claude-[0-9a-f]+-cwd/ { n++ } END { print n+0 }'
 }
 
-# Resolve an "effective status" that upgrades idle → watching when the
-# claude ancestor still has live monitor descendants. Only idle is upgraded;
-# input/working/end pass through unchanged.
+# Count background Agent/Task/Workflow invocations still running for this
+# session. Unlike Monitor/run_in_background Bash, a background subagent runs
+# IN-PROCESS inside the main claude binary — it spawns no child OS process, so
+# there's no PID to walk to (confirmed empirically: ps shows no extra `claude`
+# process for an active background Agent call). The only externally-visible
+# signal is on disk: Claude Code writes a per-subagent transcript at
+# ~/.claude/projects/<project>/<session_id>/subagents/agent-<hex>.jsonl, whose
+# mtime advances continuously while the subagent is working and freezes the
+# moment it finishes. "Fresh mtime" is therefore the liveness check, playing
+# the same role the PID kill -0 check plays for `watching`.
+#
+# Optional $2 excludes one agent's own transcript (basename "agent-<id>",
+# without .jsonl) from the count. Needed by the stray-working guard: a
+# subagent's SubagentStop is authoritative proof THAT agent just ended, but
+# its transcript's mtime is only a second or two old at that instant — well
+# inside the freshness window — so without excluding it, re-deriving liveness
+# right after its own SubagentStop would count it as still live and the
+# `agents` state would never clear until the file ages past CCG_AGENTS_FRESH_SEC
+# on some later, unrelated hook.
+_count_live_agents() {
+  local sid="$1" exclude="${2:-}" fresh="${CCG_AGENTS_FRESH_SEC:-60}" n=0 f age base
+  local now projects_dir
+  now=$(date +%s)
+  projects_dir="${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"
+  for f in "$projects_dir"/*/"$sid"/subagents/*.jsonl; do
+    [ -f "$f" ] || continue
+    if [ -n "$exclude" ]; then
+      base=$(basename "$f" .jsonl)
+      [ "$base" = "agent-$exclude" ] && continue
+    fi
+    age=$((now - $(stat -f %m "$f" 2>/dev/null || echo 0)))
+    [ "$age" -le "$fresh" ] && n=$((n + 1))
+  done
+  echo "$n"
+}
+
+# Resolve idle's refinement from LIVE signals: agents (background Agent/Task/
+# Workflow still running) > watching (live Monitor/run_in_background marker)
+# > plain idle. A background Agent/Task/Workflow is real progress, whereas
+# watching is just a live monitor observing something else; if both are true,
+# agents wins. Used both for the initial idle upgrade below AND by the
+# stray-working guard further down, which must re-derive this live rather
+# than trust the logical-state file — otherwise a background agent that
+# finishes seconds after the session settles to `agents` has no hook to
+# downgrade it, and the state sticks until an unrelated hook fires.
+#
+# Optional $3 is passed straight through to _count_live_agents as the
+# transcript to exclude (see its comment) — set by the stray-working guard
+# to the finishing subagent's own actor id, never by the initial idle-upgrade
+# call site (which has no "this one just ended" signal to exclude).
+_resolve_idle_refinement() {
+  local sid="$1" cpid="$2" exclude="${3:-}"
+  if [ "$(_count_live_agents "$sid" "$exclude")" -gt 0 ]; then
+    printf 'agents'
+  elif [ -n "$cpid" ] && [ "$(_count_live_monitors "$cpid")" -gt 0 ]; then
+    printf 'watching'
+  else
+    printf 'idle'
+  fi
+}
+
 effective_status="$status"
 claude_pid=""
 # Resolve the ancestor claude PID for all write states (input/working/idle).
@@ -123,11 +181,9 @@ case "$status" in
     claude_pid=$(_find_claude_pid 2>/dev/null || true)
     ;;
 esac
-if [ "$status" = "idle" ] && [ -n "$claude_pid" ]; then
-  if [ "$(_count_live_monitors "$claude_pid")" -gt 0 ]; then
-    effective_status="watching"
-    __trace "idle upgraded to watching (claude_pid=$claude_pid)"
-  fi
+if [ "$status" = "idle" ]; then
+  effective_status=$(_resolve_idle_refinement "$session_id" "$claude_pid")
+  [ "$effective_status" != "idle" ] && __trace "idle upgraded to $effective_status (session_id=$session_id)"
 fi
 
 # Pending-input set: keep the bell up while ANY actor (main agent or a
@@ -184,7 +240,7 @@ case "$status" in
       #     the stale cap.
       #
       # Detection: read the logical-state file.
-      #   Case (A): actor is subagent hex, file contains idle/watching → suppress.
+      #   Case (A): actor is subagent hex, file contains idle/watching/agents → suppress.
       #   Case (B): actor is __main__, file is absent (removed by `end` handler)
       #             → suppress.
       #   Legitimate start-of-turn: actor is __main__, file contains idle (written
@@ -205,9 +261,25 @@ case "$status" in
         fi
       else
         case "$_logical" in
-          idle|watching)
-            effective_status="$_logical"
-            __trace "stray subagent working suppressed (actor=$actor, logical=$_logical)"
+          idle|watching|agents)
+            # Re-derive live rather than trust $_logical verbatim: THIS
+            # SubagentStop may be the very agent whose transcript just froze
+            # (a background agent finishing is itself what fires this hook).
+            # Mirroring the stale $_logical back unconditionally would leave
+            # `agents` stuck forever, since nothing else re-checks it once the
+            # session has settled. _find_claude_pid needs re-resolving here —
+            # claude_pid above is only set for input/working/idle status.
+            #
+            # Exclude THIS actor's own transcript from the re-derived count:
+            # its mtime is only a second or two old at this instant (well
+            # inside CCG_AGENTS_FRESH_SEC), so without excluding it the
+            # re-derive would count the very agent that just finished as
+            # still live and `agents` would never clear until the file aged
+            # out on some later, unrelated hook.
+            _stray_cpid=$(_find_claude_pid 2>/dev/null || true)
+            effective_status=$(_resolve_idle_refinement "$session_id" "$_stray_cpid" "$actor")
+            unset _stray_cpid
+            __trace "stray subagent working re-resolved (actor=$actor, was=$_logical, now=$effective_status)"
             ;;
         esac
       fi
@@ -225,6 +297,7 @@ if [ "$status" != "query" ]; then
     working)  title="⏳ $base_title" ;;
     input)    title="🔔 $base_title" ;;
     watching) title="👀 $base_title" ;;
+    agents)   title="⚙️ $base_title" ;;
     *)        title="$base_title" ;;
   esac
   # /dev/tty isn't available to hook subprocesses in newer Claude Code builds
@@ -255,11 +328,14 @@ fi
 #
 # State file format:
 #   Line 1: full tab title with icon prefix (matches the ANSI title set above)
-#   Line 2: status string (input | working | idle | watching)
+#   Line 2: status string (input | working | idle | watching | agents)
 #   Line 3: the claude ancestor PID (stored for all write states).
 #           sweep-bell-state.sh uses it to prune orphaned files when the
 #           process has exited. The plugin also uses it for watching files
-#           to detect when the monitored process has exited.
+#           to detect when the monitored process has exited. For agents
+#           files the PID is only used for the sweep's PID-liveness pass —
+#           the plugin re-derives freshness from the subagent transcript
+#           mtime instead (see _count_live_agents), not this PID.
 STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 state_file="$STATE_DIR/$session_id"
 state_changed=0
@@ -303,6 +379,7 @@ case "$BELL_MODE" in
       input)    _write_state "🔔 $base_title" "input"   "$claude_pid" ;;
       working)  _write_state "⏳ $base_title" "working" "$claude_pid" ;;
       watching) _write_state "👀 $base_title" "watching" "$claude_pid" ;;
+      agents)   _write_state "⚙️ $base_title" "agents"  "$claude_pid" ;;
       idle)     _write_state "$base_title"    "idle"    "$claude_pid" ;;
       end)      _remove_state ;;
       *)        __trace "state-file unchanged (status=$effective_status)" ;;
@@ -310,12 +387,13 @@ case "$BELL_MODE" in
     ;;
   *)
     # notifs mode (default): only "needs attention" writes a state file.
-    # watching is a refinement of idle and is not surfaced in notifs mode.
+    # watching and agents are refinements of idle and are not surfaced in
+    # notifs mode.
     case "$effective_status" in
       input)
         _write_state "🔔 $base_title" "input" "$claude_pid"
         ;;
-      idle|watching|working|end)
+      idle|watching|agents|working|end)
         _remove_state
         ;;
       *)
@@ -334,7 +412,7 @@ unset -f _write_state _remove_state
 # detect transitions without scanning the log on every hook invocation
 # (PostToolUse can fire many times per second).
 case "$effective_status" in
-  idle|watching|working|input|end)
+  idle|watching|agents|working|input|end)
     EVENT_LOG="${CCG_EVENT_LOG:-$HOME/.claude/.ccg/events.jsonl}"
     # SESSION_STATE_DIR / session_state_file hoisted above (near the pending set).
     prev_state=""

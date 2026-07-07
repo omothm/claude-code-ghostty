@@ -5,8 +5,9 @@
 # Three modes (set via ~/.claude/.ccg/config.json):
 #   notifs (default) — visible only when sessions are awaiting input; shows count
 #   off              — always hidden even if the feature is installed
-#   always-on        — always visible; :bell:N :hourglass:N :zzz:N counts;
-#                      switches to emoji 🔔 for the bell count when N>0
+#   always-on        — always visible; :bell:N :hourglass:N :gearshape.fill:N
+#                      :binoculars:N :zzz:N counts; switches to emoji 🔔 for
+#                      the bell count when N>0
 #
 # Install: copy to SwiftBar's plugins directory and make executable.
 # The filename suffix (.30s.sh) sets the background refresh interval — a
@@ -81,6 +82,24 @@ _emit_dashboard_entry() {
   fi
 }
 
+# Count subagent transcripts for session $1 with a jsonl mtime within the
+# last CCG_AGENTS_FRESH_SEC seconds. Mirrors _count_live_agents in
+# tab-title.sh — background Agent/Task/Workflow runs live in-process with no
+# child PID to check, so freshness of the on-disk transcript is the only
+# externally-visible liveness signal.
+_count_live_agents() {
+  local sid="$1" fresh="${CCG_AGENTS_FRESH_SEC:-60}" n=0 f age
+  local now projects_dir
+  now=$(date +%s)
+  projects_dir="${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"
+  for f in "$projects_dir"/*/"$sid"/subagents/*.jsonl; do
+    [ -f "$f" ] || continue
+    age=$(( now - $(stat -f %m "$f" 2>/dev/null || echo 0) ))
+    [ "$age" -le "$fresh" ] && n=$((n + 1))
+  done
+  echo "$n"
+}
+
 # Returns status for a state file, or empty string if the file is not a
 # recognised session state file (e.g. stray files in the state directory).
 #
@@ -90,6 +109,12 @@ _emit_dashboard_entry() {
 # memory so the dropdown reflects reality without waiting for the next hook
 # firing (which may be far in the future — there's no hook for "monitor
 # exited while session is still idle").
+#
+# For status=agents, the state file's basename IS the session_id (tab-title.sh
+# keys state files by $session_id), so we re-run _count_live_agents at render
+# time and downgrade to idle the moment the background subagent's transcript
+# goes stale — same rationale as the watching re-check above, just filesystem-
+# instead of PID-based since there's no subagent PID to check.
 _file_status() {
   local f="$1"
   local st
@@ -107,6 +132,16 @@ _file_status() {
       fi
       return
       ;;
+    agents)
+      local sid
+      sid=$(basename "$f")
+      if [ "$(_count_live_agents "$sid")" -gt 0 ]; then
+        printf 'agents'
+      else
+        printf 'idle'
+      fi
+      return
+      ;;
     input|working|idle) printf '%s' "$st"; return ;;
   esac
   # Backwards compat: infer from line-1 prefix for single-line state files.
@@ -116,6 +151,7 @@ _file_status() {
     "🔔 "*)            printf 'input'   ;;
     "⏳ "*)            printf 'working' ;;
     "👀 "*)            printf 'watching' ;;
+    "⚙️ "*)             printf 'agents'  ;;
     "Claude Code | "*) printf 'idle'    ;;
     # Not a recognised state file — return empty so callers can skip it.
   esac
@@ -175,7 +211,7 @@ fi
 # always-on mode: show all sessions with counts; attention color on bell
 # -------------------------------------------------------------------------
 
-n_input=0; n_working=0; n_watching=0; n_idle=0
+n_input=0; n_working=0; n_agents=0; n_watching=0; n_idle=0
 any_files=0
 
 # First pass: count by status.
@@ -186,17 +222,18 @@ while IFS= read -r f; do
   case "$st" in
     input)    n_input=$((n_input+1))     ;;
     working)  n_working=$((n_working+1)) ;;
+    agents)   n_agents=$((n_agents+1))   ;;
     watching) n_watching=$((n_watching+1)) ;;
     *)        n_idle=$((n_idle+1))       ;;
   esac
 done < <(_read_state_files)
 
-if [ "$any_files" = "0" ] || [ $((n_input + n_working + n_watching + n_idle)) -eq 0 ]; then
+if [ "$any_files" = "0" ] || [ $((n_input + n_working + n_agents + n_watching + n_idle)) -eq 0 ]; then
   __trace "result=hidden (always-on zero sessions)"
   exit 0
 fi
 
-__trace "result=visible always-on input=$n_input working=$n_working watching=$n_watching idle=$n_idle"
+__trace "result=visible always-on input=$n_input working=$n_working agents=$n_agents watching=$n_watching idle=$n_idle"
 
 # Header segments:
 #   - 🔔 (emoji): only when input > 0 — input is yellow attention; "0" would
@@ -204,28 +241,34 @@ __trace "result=visible always-on input=$n_input working=$n_working watching=$n_
 #     Symbols, which is the point.
 #   - :hourglass: + :zzz: (SF Symbols): always shown, "working" and "idle"
 #     are the steady-state baselines.
+#   - :gearshape.fill: (SF Symbol): only when agents > 0 — a session with a
+#     background Agent/Task/Workflow still running is real progress, but rare
+#     enough that ":gearshape.fill: 0" would just be noise.
 #   - :binoculars:  (SF Symbol): only when watching > 0. Watching is rare enough
 #     that ":binoculars: 0" would just clutter the menubar most of the time. The
 #     section below the separator only renders when count > 0 too.
 header=""
 [ "$n_input" -gt 0 ] && header="🔔 ${n_input} "
 header="${header}:hourglass: ${n_working} "
+[ "$n_agents" -gt 0 ] && header="${header}:gearshape.fill: ${n_agents} "
 [ "$n_watching" -gt 0 ] && header="${header}:binoculars: ${n_watching} "
 header="${header}:zzz: ${n_idle}"
 echo "${header} | font=.AppleSystemUIFontBold"
 echo "---"
 
 # Second pass: collect entries by status group, then emit with section headers.
-input_entries=""; working_entries=""; watching_entries=""; idle_entries=""
+input_entries=""; working_entries=""; agents_entries=""; watching_entries=""; idle_entries=""
 while IFS= read -r f; do
   st=$(_file_status "$f")
   [ -z "$st" ] && continue
   title=$(head -n1 "$f" 2>/dev/null)
   [ -z "$title" ] && continue
-  # When _file_status downgraded a stale watching file, drop the 👀 prefix
-  # from the displayed title so the dropdown matches the section it lands in.
+  # When _file_status downgraded a stale watching/agents file, drop the icon
+  # prefix from the displayed title so the dropdown matches the section it
+  # lands in.
   if [ "$st" = "idle" ]; then
     title="${title#"👀 "}"
+    title="${title#"⚙️ "}"
   fi
   # Strip "Claude Code | " prefix and icon prefix.
   case "$title" in
@@ -240,6 +283,9 @@ while IFS= read -r f; do
         "$display" "$FOCUS" "$title")"$'\n' ;;
     working)
       working_entries="${working_entries}$(printf '%s | sfimage=hourglass shell="%s" param1="%s" terminal=false' \
+        "$display" "$FOCUS" "$title")"$'\n' ;;
+    agents)
+      agents_entries="${agents_entries}$(printf '%s | sfimage=gearshape.fill shell="%s" param1="%s" terminal=false' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     watching)
       watching_entries="${watching_entries}$(printf '%s | sfimage=binoculars shell="%s" param1="%s" terminal=false' \
@@ -260,6 +306,12 @@ if [ -n "$working_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
   echo "Working | size=11 color=gray"
   printf '%s' "$working_entries"
+  need_sep=1
+fi
+if [ -n "$agents_entries" ]; then
+  [ "$need_sep" = "1" ] && echo "---"
+  echo "Agents running | size=11 color=gray"
+  printf '%s' "$agents_entries"
   need_sep=1
 fi
 if [ -n "$watching_entries" ]; then

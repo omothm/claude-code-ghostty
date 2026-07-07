@@ -82,12 +82,15 @@ Four layers cooperate:
 
 1. **Tab title (ANSI)** — `tab-title.sh` writes `⏳ Claude Code | …`,
    `🔔 Claude Code | …`, `👀 Claude Code | …` (idle session with a live
-   Claude-owned monitor — see "Watching state" below), or the base title
-   (no prefix) via `\033]2;<title>\007`. Primary user-visible signal.
-   The menubar plugin uses the `binoculars` SF Symbol for the same state
-   (SF Symbols render better than emojis at menubar height); the tab
-   title keeps the 👀 emoji because terminal ANSI titles render emojis
-   reliably across UIs but can't reference SF Symbols.
+   Claude-owned monitor — see "Watching state" below), `⚙️ Claude Code | …`
+   (idle session with a live background Agent/Task/Workflow — see
+   "Agents-running state" below), or the base title (no prefix) via
+   `\033]2;<title>\007`. Primary user-visible signal. The menubar plugin
+   uses the `binoculars` and `gearshape.fill` SF Symbols for the watching
+   and agents-running states respectively (SF Symbols render better than
+   emojis at menubar height); the tab title keeps the emoji prefixes
+   because terminal ANSI titles render emojis reliably across UIs but
+   can't reference SF Symbols.
 2. **State files** — `tab-title.sh` also maintains one file per bell-state
    session at `~/.claude/bell-state/<session_id>`. The SwiftBar plugin
    reads this directory as its source of truth. Format:
@@ -160,6 +163,91 @@ a *sub-agent* claude PID, not the main session's. If you need to extend
 this, change `_count_live_monitors` to a transitive descendant walk.
 Immediate children covers Monitor and `run_in_background` for the main
 session, which is the common case.
+
+### Agents-running state
+
+A session in `idle` state is upgraded to `agents` when it has a background
+`Agent`/`Task` invocation (or a `Workflow`, which spawns subagents
+internally) still running. This is distinct from `watching`: a background
+agent is *real progress* delegated by the session, whereas watching is a
+live monitor passively observing something else. Precedence is
+`agents > watching > idle` — if a session somehow has both (e.g. a
+background agent that itself launched a monitored Bash command), `agents`
+wins.
+
+Detection cannot use the process-tree approach `watching` uses. Confirmed
+empirically: a background Agent/Task/Workflow invocation runs **in-process**
+inside the main `claude` binary — it spawns no child OS process, so there is
+no PID to `ps`-walk to. The only externally-visible liveness signal is on
+disk: Claude Code writes a per-subagent transcript at
+`~/.claude/projects/<project>/<session_id>/subagents/agent-<hex>.jsonl`
+(paired with an `agent-<hex>.meta.json` written once at spawn). The
+`.jsonl`'s mtime advances continuously while the subagent is working and
+freezes the moment it finishes — "fresh mtime" plays the same liveness role
+here that `kill -0` plays for `watching`.
+
+Detection happens in `tab-title.sh`'s `idle` branch, in `_count_live_agents`:
+glob `$CCG_PROJECTS_DIR/*/<session_id>/subagents/*.jsonl` (the project-dir
+segment is wildcarded — `session_id` alone is unique across projects) and
+count entries whose mtime is within `CCG_AGENTS_FRESH_SEC` (default 60s) of
+now. `agents` is checked before `watching` in the `idle` upgrade branch, so
+it takes precedence per the ordering above.
+
+Stale agents is handled in the plugin, not the hook, mirroring `watching`:
+when the plugin reads an `agents` state file it re-runs `_count_live_agents`
+(keyed off the state file's own basename, which is the session_id) and
+downgrades to `idle` in memory if the transcript has gone stale — same
+rationale as watching's `kill -0` recheck, just filesystem- instead of
+PID-based since there's no subagent PID to check.
+
+The `agents` state is a refinement of `idle` like `watching`: it's excluded
+from `notifs` mode's state file (only logged to `events.jsonl`), and it's
+**engaged, not stalled**, in the dashboard's fleet-stall metric — the
+opposite of `watching`'s exclusion, since a background agent is genuinely
+advancing the work while a monitor is merely observing.
+
+**Stray-working guard must re-derive, not mirror.** The finishing background
+agent is itself what fires `SubagentStop` → `working` for that actor (see
+"Pending-input set" below for the stray-working guard this hits). Observed
+live: the guard originally mirrored the logical-state file straight back
+(`idle|watching|agents) effective_status="$_logical"`), which is correct for
+`watching` (a monitor's exit isn't itself a hook event, so nothing else ever
+re-checks it) but wrong for `agents` — the finishing agent's *own*
+SubagentStop is exactly the moment its transcript goes stale, yet the guard
+was reading the stale pre-computed value instead of re-checking liveness. Net
+effect: the tab stuck on ⚙️ for however long it took the next unrelated hook
+(a fresh prompt) to fire. The fix factors the idle→refinement logic into
+`_resolve_idle_refinement` (agents > watching > idle, live-checked) and calls
+it from BOTH the initial idle-upgrade path and this guard, so a stray
+subagent `working` re-derives current liveness instead of trusting the file.
+`watching`'s behavior is unaffected: `_resolve_idle_refinement` still finds
+the same live monitor marker either way, since re-deriving is a superset of
+mirroring when the underlying signal hasn't changed.
+
+**Re-deriving still isn't enough — a finishing agent's own transcript is still
+"fresh" at re-derive time.** The fix above stopped the guard from *mirroring*
+a stale value, but re-checking liveness still read `agents` back in practice
+(observed live: the tab stuck on ⚙️ for 6+ minutes with zero intervening
+hooks). Root cause: `_count_live_agents`'s freshness check
+(`mtime within CCG_AGENTS_FRESH_SEC`, default 60s) can't distinguish "still
+writing" from "wrote its last byte one second ago" — a subagent's transcript
+mtime is only a second or two old at the exact instant its own `SubagentStop`
+fires, comfortably inside the 60s window. So the stray-working guard's
+re-derive counted the very agent whose termination triggered it as still
+live, and re-confirmed `agents`. The state only cleared once that transcript
+aged *past* 60s on some later, unrelated hook — matching the reported
+symptom exactly. The fix: `_count_live_agents` takes an optional exclude
+parameter (the finishing actor's id, matched against the transcript's
+`agent-<id>.jsonl` basename), threaded through `_resolve_idle_refinement`'s
+optional third argument. The stray-working guard passes `$actor` (the
+current hook payload's `agent_id`) so a subagent's own `SubagentStop`
+provably excludes its own file from the count rather than relying on mtime
+staleness that hasn't happened yet. The initial idle-upgrade call site never
+passes this — it has no "this specific one just ended" signal, only "check
+what's live right now" — so its behavior is unchanged. A genuinely live
+sibling subagent's transcript is untouched by the exclusion (only the
+`agent-<id>.jsonl` matching the specific actor is skipped), so the state
+correctly stays at `agents` when other background work is still running.
 
 ### Pending-input set (parallel-subagent bell hold)
 
@@ -405,6 +493,16 @@ is expensive, so it's recorded here):
   pending while only a monitor ticks still counts as a stall. (Chosen
   deliberately over treating watching as activity.)
 
+- **Agents-running counts as engaged, the opposite of watching.** A session in
+  the `agents` state has a background Agent/Task/Workflow actually delegating
+  work, not just observing — real progress toward the fleet's goal. So a bell
+  pending while a background agent runs elsewhere is NOT a stall: `agents` is
+  added alongside `working` in the stalled-bin check (`w === 0 && ag === 0`).
+  This is the deliberate mirror image of the watching decision above — the two
+  states look superficially similar (both are refinements of `idle`) but have
+  opposite treatment because one is passive observation and the other is
+  active delegated work.
+
 - **Denominator = bell-pending bins, not "any engaged time."** The
   bell-pending denominator gives a readable dynamic range (~20–60% on real days)
   vs. the flat ~4–5% you get dividing by all-engaged time, which under-reads as
@@ -450,7 +548,7 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
 
 | Script | Purpose | Triggered by |
 |--------|---------|--------------|
-| `hooks/tab-title.sh` | Sets the terminal tab title via `terminalSequence` JSON output (Claude Code 2.1.141+) with a direct `/dev/tty` write as fallback; writes/removes `~/.claude/bell-state/<session_id>`; appends real state transitions to `~/.claude/.ccg/events.jsonl`; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `notify.sh` (for `input`) |
+| `hooks/tab-title.sh` | Sets the terminal tab title via `terminalSequence` JSON output (Claude Code 2.1.141+) with a direct `/dev/tty` write as fallback; writes/removes `~/.claude/bell-state/<session_id>`; upgrades idle to `watching`/`agents` when a live monitor or background Agent/Task/Workflow is detected; appends real state transitions to `~/.claude/.ccg/events.jsonl`; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `notify.sh` (for `input`) |
 | `hooks/notify.sh` | Sends `terminal-notifier`; skips if user is already on that tab; routes to `tab-title.sh` for title updates | `Notification`, `Stop` |
 | `hooks/focus-ghostty-tab.sh` | AppleScript to focus a Ghostty tab by title-contains match; works across windows and single-tab windows | Notification `-execute`, SwiftBar dropdown |
 | `hooks/refresh-menubar.sh` | `open -g swiftbar://refreshallplugins`; silent no-op if SwiftBar isn't installed | `tab-title.sh` on state change; `sweep-bell-state.sh` after pruning |
@@ -507,6 +605,14 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
   `8765`).
 - **`GHOSTTY_HOOKS_DIR`** — override the hooks directory path used by the
   SwiftBar plugin (default `~/.claude/hooks`).
+- **`CCG_PROJECTS_DIR`** — override the Claude Code projects directory
+  searched for subagent transcripts (default `~/.claude/projects`), used by
+  `_count_live_agents` in both `tab-title.sh` and the SwiftBar plugin to
+  detect background Agent/Task/Workflow liveness. The validator uses this to
+  sandbox; production hooks don't set it.
+- **`CCG_AGENTS_FRESH_SEC`** — freshness window in seconds (default `60`) for
+  a background-agent transcript's mtime before `_count_live_agents` no longer
+  counts it as live. See "Agents-running state".
 
 ## Validator
 
@@ -530,7 +636,17 @@ watching state
 (3-line state-file shape with claude PID on line 3 for all write states,
 event log records `watching`, notifs mode suppresses the state file,
 plugin downgrades stale watching files to idle, `Watching` section
-ordered between `Working` and `Idle`), `BELL_TRACE` toggle (off = 0
+ordered between `Working` and `Idle`), agents-running state (⚙️ prefix on
+the state file, event log records `agents`, notifs mode suppresses the
+state file, precedence over `watching` when both a fresh subagent
+transcript and a live monitor marker are present, plugin downgrades a
+stale-transcript agents file to idle, `Agents running` section ordered
+between `Working` and `Watching`, the finishing agent's own
+`SubagentStop` re-derives live state instead of sticking on the stale
+logical-state value, and that re-derive excludes the finishing agent's OWN
+transcript — which is still mtime-fresh at that exact instant — from the
+liveness count, while a genuinely live sibling transcript still keeps the
+state at `agents`), `BELL_TRACE` toggle (off = 0
 bytes, on = populated), dashboard verdict logic (slices `verdictFor` from
 `dashboard.html` by its `// <verdictFor>` markers and runs it under Node
 across every branch + precedence boundary; asserts `renderVerdict` has a
@@ -570,9 +686,13 @@ change the answer.
 
 The temp-plugin pattern:
 
-1. Drop a one-shot plugin into the SwiftBar dir with a name that sorts
-   AFTER the real plugin (e.g. `zzz-symbol-demo.5s.sh`) so the menubar
-   stays mostly normal.
+1. Drop a one-shot plugin into the **actual plugin directory** — the same
+   directory the real plugin (`ghostty-bells.30s.sh`) already lives in
+   (`~/swiftbar` on this machine; confirm with
+   `defaults read com.ameba.SwiftBar PluginDirectory` if unsure — see the
+   gotcha below, this is NOT `~/Library/Application Support/SwiftBar/`).
+   Name it so it sorts AFTER the real plugin (e.g. `zzz-symbol-demo.5s.sh`)
+   so the menubar stays mostly normal.
 2. The plugin's title line should put every candidate side-by-side using
    the `:name:` shorthand, e.g.
    `echo "(picking) :eye: :binoculars: :waveform.path.ecg: :eye.circle: | font=.AppleSystemUIFontBold"`.
@@ -603,6 +723,13 @@ than confirming a single guess.
 - **SwiftBar's first-launch picker cannot be skipped.** The `defaults` key
   it actually reads is `PluginDirectory` (with security-scoped bookmark),
   not `PluginDirectoryPath`. Plain `defaults write` doesn't preseed it.
+- **The SwiftBar plugin dir is `~/swiftbar`, not
+  `~/Library/Application Support/SwiftBar/`.** The latter is SwiftBar's own
+  app-support folder (it exists, is writable, and looks plausible) but
+  SwiftBar never scans it for plugins — a script dropped there silently
+  never appears. Always verify with
+  `defaults read com.ameba.SwiftBar PluginDirectory` before writing a demo
+  or real plugin file, rather than assuming the path.
 - **Hooks can't `open -g` directly during rapid bursts.** All our hook-side
   `open` calls are synchronous (not backgrounded) so we get an exit code
   in trace; SwiftBar's URL-scheme dispatch is fast enough that this adds
