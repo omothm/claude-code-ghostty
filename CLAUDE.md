@@ -102,11 +102,11 @@ Four layers cooperate:
 
 1. **Tab title (ANSI)** — `tab-title.sh` writes `⏳ Claude Code | …`,
    `🔔 Claude Code | …`, `👀 Claude Code | …` (idle session with a live
-   Claude-owned monitor — see "Watching state" below), `⚙️ Claude Code | …`
+   Claude-owned monitor — see "Watching state" below), `☕️ Claude Code | …`
    (idle session with a live background Agent/Task/Workflow — see
    "Agents-running state" below), or the base title (no prefix) via
    `\033]2;<title>\007`. Primary user-visible signal. The menubar plugin
-   uses the `binoculars` and `gearshape.fill` SF Symbols for the watching
+   uses the `binoculars` and `cup.and.heat.waves.fill` SF Symbols for the watching
    and agents-running states respectively (SF Symbols render better than
    emojis at menubar height); the tab title keeps the emoji prefixes
    because terminal ANSI titles render emojis reliably across UIs but
@@ -254,7 +254,7 @@ watching state
 (3-line state-file shape with claude PID on line 3 for all write states,
 event log records `watching`, notifs mode suppresses the state file,
 plugin downgrades stale watching files to idle, `Watching` section
-ordered between `Working` and `Idle`), agents-running state (⚙️ prefix on
+ordered between `Working` and `Idle`), agents-running state (☕️ prefix on
 the state file, event log records `agents`, notifs mode suppresses the
 state file, precedence over `watching` when both a fresh subagent
 transcript and a live monitor marker are present, plugin downgrades a

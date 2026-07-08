@@ -5,7 +5,7 @@
 # Three modes (set via ~/.claude/.ccg/config.json):
 #   notifs (default) — visible only when sessions are awaiting input; shows count
 #   off              — always hidden even if the feature is installed
-#   always-on        — always visible; :bell:N :hourglass:N :gearshape.fill:N
+#   always-on        — always visible; :bell:N :hourglass:N :cup.and.heat.waves.fill:N
 #                      :binoculars:N :zzz:N counts; switches to emoji 🔔 for
 #                      the bell count when N>0
 #
@@ -151,7 +151,7 @@ _file_status() {
     "🔔 "*)            printf 'input'   ;;
     "⏳ "*)            printf 'working' ;;
     "👀 "*)            printf 'watching' ;;
-    "⚙️ "*)             printf 'agents'  ;;
+    "☕️ "*)             printf 'agents'  ;;
     "Claude Code | "*) printf 'idle'    ;;
     # Not a recognised state file — return empty so callers can skip it.
   esac
@@ -241,16 +241,16 @@ __trace "result=visible always-on input=$n_input working=$n_working agents=$n_ag
 #     Symbols, which is the point.
 #   - :hourglass: + :zzz: (SF Symbols): always shown, "working" and "idle"
 #     are the steady-state baselines.
-#   - :gearshape.fill: (SF Symbol): only when agents > 0 — a session with a
+#   - :cup.and.heat.waves.fill: (SF Symbol): only when agents > 0 — a session with a
 #     background Agent/Task/Workflow still running is real progress, but rare
-#     enough that ":gearshape.fill: 0" would just be noise.
+#     enough that ":cup.and.heat.waves.fill: 0" would just be noise.
 #   - :binoculars:  (SF Symbol): only when watching > 0. Watching is rare enough
 #     that ":binoculars: 0" would just clutter the menubar most of the time. The
 #     section below the separator only renders when count > 0 too.
 header=""
 [ "$n_input" -gt 0 ] && header="🔔 ${n_input} "
 header="${header}:hourglass: ${n_working} "
-[ "$n_agents" -gt 0 ] && header="${header}:gearshape.fill: ${n_agents} "
+[ "$n_agents" -gt 0 ] && header="${header}:cup.and.heat.waves.fill: ${n_agents} "
 [ "$n_watching" -gt 0 ] && header="${header}:binoculars: ${n_watching} "
 header="${header}:zzz: ${n_idle}"
 echo "${header} | font=.AppleSystemUIFontBold"
@@ -268,7 +268,7 @@ while IFS= read -r f; do
   # lands in.
   if [ "$st" = "idle" ]; then
     title="${title#"👀 "}"
-    title="${title#"⚙️ "}"
+    title="${title#"☕️ "}"
   fi
   # Strip "Claude Code | " prefix and icon prefix.
   case "$title" in
@@ -285,7 +285,7 @@ while IFS= read -r f; do
       working_entries="${working_entries}$(printf '%s | sfimage=hourglass shell="%s" param1="%s" terminal=false' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     agents)
-      agents_entries="${agents_entries}$(printf '%s | sfimage=gearshape.fill shell="%s" param1="%s" terminal=false' \
+      agents_entries="${agents_entries}$(printf '%s | sfimage=cup.and.heat.waves.fill shell="%s" param1="%s" terminal=false' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     watching)
       watching_entries="${watching_entries}$(printf '%s | sfimage=binoculars shell="%s" param1="%s" terminal=false' \

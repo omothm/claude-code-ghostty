@@ -355,7 +355,7 @@ if [ "$status" != "query" ]; then
     working)  title="⏳ $base_title" ;;
     input)    title="🔔 $base_title" ;;
     watching) title="👀 $base_title" ;;
-    agents)   title="⚙️ $base_title" ;;
+    agents)   title="☕️ $base_title" ;;
     *)        title="$base_title" ;;
   esac
   # /dev/tty isn't available to hook subprocesses in newer Claude Code builds
@@ -437,7 +437,7 @@ case "$BELL_MODE" in
       input)    _write_state "🔔 $base_title" "input"   "$claude_pid" ;;
       working)  _write_state "⏳ $base_title" "working" "$claude_pid" ;;
       watching) _write_state "👀 $base_title" "watching" "$claude_pid" ;;
-      agents)   _write_state "⚙️ $base_title" "agents"  "$claude_pid" ;;
+      agents)   _write_state "☕️ $base_title" "agents"  "$claude_pid" ;;
       idle)     _write_state "$base_title"    "idle"    "$claude_pid" ;;
       end)      _remove_state ;;
       *)        __trace "state-file unchanged (status=$effective_status)" ;;

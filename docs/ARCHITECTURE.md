@@ -111,7 +111,7 @@ is correct for `watching` (a monitor's exit isn't itself a hook event, so
 nothing else ever re-checks it) but wrong for `agents` — the finishing
 agent's *own* SubagentStop is exactly the moment its transcript goes stale,
 yet the guard was reading the stale pre-computed value instead of
-re-checking liveness. Observed live: the tab stuck on ⚙️ for however long
+re-checking liveness. Observed live: the tab stuck on ☕️ for however long
 it took the next unrelated hook (a fresh prompt) to fire.
 
 **Fix:** factor the idle→refinement logic into `_resolve_idle_refinement`
@@ -124,7 +124,7 @@ mirroring when the underlying signal hasn't changed.
 
 **Rejected alternative (re-derive without excluding the finishing actor):**
 Re-checking liveness still read `agents` back in practice (observed live:
-the tab stuck on ⚙️ for 6+ minutes with zero intervening hooks). Root
+the tab stuck on ☕️ for 6+ minutes with zero intervening hooks). Root
 cause: `_count_live_agents`'s freshness check (`mtime within
 CCG_AGENTS_FRESH_SEC`, default 60s) can't distinguish "still writing" from
 "wrote its last byte one second ago" — a subagent's transcript mtime is

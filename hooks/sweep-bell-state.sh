@@ -157,7 +157,7 @@ fi
 # process is still alive, re-derive the live agents/watching/idle state and
 # correct the file + tab title if it has drifted. This closes the gap where a
 # session settles to `agents` after a background Agent/Task/Workflow finishes
-# and then goes fully quiet (no further hooks fire), leaving the ⚙️ stuck
+# and then goes fully quiet (no further hooks fire), leaving the ☕️ stuck
 # indefinitely. The same pass also catches the reverse: a session sitting at
 # plain `idle` that missed an agents-upgrade because the SubagentStop race
 # (stray-working guard) over-cleared it.
@@ -241,14 +241,14 @@ if [ -d "$STATE_DIR" ] && [ "$_sweep_bell_mode" = "always-on" ]; then
     stored_title=$(sed -n '1p' "$f" 2>/dev/null)
     # Strip any existing icon prefix to get the base title.
     case "$stored_title" in
-      "⚙️ "*) base="${stored_title#"⚙️ "}" ;;
+      "☕️ "*) base="${stored_title#"☕️ "}" ;;
       "👀 "*) base="${stored_title#"👀 "}" ;;
       "⏳ "*) base="${stored_title#"⏳ "}" ;;
       "🔔 "*) base="${stored_title#"🔔 "}" ;;
       *)      base="$stored_title" ;;
     esac
     case "$new_st" in
-      agents)   new_title="⚙️ $base" ;;
+      agents)   new_title="☕️ $base" ;;
       watching) new_title="👀 $base" ;;
       *)        new_title="$base" ;;
     esac

@@ -643,7 +643,7 @@ rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EV
 # `watching`) with NO further hook ever firing must self-correct via the
 # background sweep, not just at hook time. This is the fix for the reported
 # live bug: a background agent finished, the session went fully quiet (no
-# more hooks), and the ⚙️ tab title + menubar entry stayed stuck indefinitely
+# more hooks), and the ☕️ tab title + menubar entry stayed stuck indefinitely
 # because nothing but a hook ever re-derived idle-refinement state.
 # The pass is gated on always-on mode (see test 4 below); this section's
 # BELL_CONFIG is otherwise empty (notifs default), so switch explicitly.
@@ -653,18 +653,18 @@ mkdir -p "$CCG_PROJECTS_DIR"
 
 # 1. agents -> idle: bell-state file says agents, live PID, but the subagent
 #    transcript is stale (no live agent). Sweep must rewrite the file to idle
-#    and strip the ⚙️ prefix from the title.
+#    and strip the ☕️ prefix from the title.
 IRSID="ir-agents-stale-$$"
 mkdir -p "$CCG_PROJECTS_DIR/fake-project/$IRSID/subagents"
 : > "$CCG_PROJECTS_DIR/fake-project/$IRSID/subagents/agent-oldhex$$.jsonl"
 age_file "5 minutes ago" "$CCG_PROJECTS_DIR/fake-project/$IRSID/subagents/agent-oldhex$$.jsonl"
-printf '⚙️ Claude Code | ir-agents-stale (%s)\nagents\n%s\n' "$IRSID" "$$" > "$BELL_STATE_DIR/$IRSID"
+printf '☕️ Claude Code | ir-agents-stale (%s)\nagents\n%s\n' "$IRSID" "$$" > "$BELL_STATE_DIR/$IRSID"
 CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
 line2=$(sed -n '2p' "$BELL_STATE_DIR/$IRSID" 2>/dev/null)
 line1=$(sed -n '1p' "$BELL_STATE_DIR/$IRSID" 2>/dev/null)
 [ "$line2" = "idle" ] && ok "sweep idle-refinement: stuck agents (stale transcript, live PID) corrected to idle" \
   || ng "sweep idle-refinement: agents not corrected (got '$line2')"
-case "$line1" in "⚙️ "*) ng "sweep idle-refinement: title still has ⚙️ prefix after correction to idle" ;; *) ok "sweep idle-refinement: ⚙️ prefix stripped from title" ;; esac
+case "$line1" in "☕️ "*) ng "sweep idle-refinement: title still has ☕️ prefix after correction to idle" ;; *) ok "sweep idle-refinement: ☕️ prefix stripped from title" ;; esac
 rm -f "$BELL_STATE_DIR/$IRSID"
 
 # 2. idle -> agents: bell-state file says idle, live PID, but a fresh subagent
@@ -680,7 +680,7 @@ line2=$(sed -n '2p' "$BELL_STATE_DIR/$IRSID2" 2>/dev/null)
 line1=$(sed -n '1p' "$BELL_STATE_DIR/$IRSID2" 2>/dev/null)
 [ "$line2" = "agents" ] && ok "sweep idle-refinement: stuck idle (live transcript) corrected to agents" \
   || ng "sweep idle-refinement: idle not corrected to agents (got '$line2')"
-case "$line1" in "⚙️ "*) ok "sweep idle-refinement: ⚙️ prefix added to corrected title" ;; *) ng "sweep idle-refinement: title missing ⚙️ prefix after correction (got '$line1')" ;; esac
+case "$line1" in "☕️ "*) ok "sweep idle-refinement: ☕️ prefix added to corrected title" ;; *) ng "sweep idle-refinement: title missing ☕️ prefix after correction (got '$line1')" ;; esac
 rm -f "$BELL_STATE_DIR/$IRSID2"
 
 # 3. Dead PID is left alone by the idle-refinement pass (the PID-liveness pass
@@ -688,7 +688,7 @@ rm -f "$BELL_STATE_DIR/$IRSID2"
 IRSID3="ir-dead-pid-$$"
 mkdir -p "$CCG_PROJECTS_DIR/fake-project/$IRSID3/subagents"
 : > "$CCG_PROJECTS_DIR/fake-project/$IRSID3/subagents/agent-deadhex$$.jsonl"
-printf '⚙️ Claude Code | ir-dead-pid (%s)\nagents\n999999\n' "$IRSID3" > "$BELL_STATE_DIR/$IRSID3"
+printf '☕️ Claude Code | ir-dead-pid (%s)\nagents\n999999\n' "$IRSID3" > "$BELL_STATE_DIR/$IRSID3"
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
 if ! sf_exists "$IRSID3"; then ok "sweep idle-refinement: dead-PID agents file pruned (not corrected) by PID-liveness pass"
 else ng "sweep idle-refinement: dead-PID file unexpectedly survived"; fi
@@ -698,7 +698,7 @@ else ng "sweep idle-refinement: dead-PID file unexpectedly survived"; fi
 #    (nothing to correct).
 : > "$BELL_CONFIG"  # notifs default
 IRSID4="ir-notifs-$$"
-printf '⚙️ Claude Code | ir-notifs (%s)\nagents\n%s\n' "$IRSID4" "$$" > "$BELL_STATE_DIR/$IRSID4"
+printf '☕️ Claude Code | ir-notifs (%s)\nagents\n%s\n' "$IRSID4" "$$" > "$BELL_STATE_DIR/$IRSID4"
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
 line2=$(sed -n '2p' "$BELL_STATE_DIR/$IRSID4" 2>/dev/null)
 [ "$line2" = "agents" ] && ok "sweep idle-refinement: gated on always-on mode (untouched in notifs)" \
@@ -1007,7 +1007,7 @@ printf '{"session_id":"%s"}\n' "$ASID" | "$HOOKS_DIR/tab-title.sh" idle "$ASID" 
 if sf_exists "$ASID"; then ok "agents: state file written"; else ng "agents: no state file"; fi
 line1=$(sed -n '1p' "$BELL_STATE_DIR/$ASID" 2>/dev/null)
 line2=$(sed -n '2p' "$BELL_STATE_DIR/$ASID" 2>/dev/null)
-case "$line1" in "⚙️ "*) ok "agents: state file line 1 has ⚙️ prefix" ;; *) ng "agents: line 1 missing ⚙️: $line1" ;; esac
+case "$line1" in "☕️ "*) ok "agents: state file line 1 has ☕️ prefix" ;; *) ng "agents: line 1 missing ☕️: $line1" ;; esac
 [ "$line2" = "agents" ] && ok "agents: state file line 2 = 'agents'" || ng "agents: line 2 wrong (got '$line2')"
 
 # 2. Event log records the agents transition.
@@ -1127,7 +1127,7 @@ last_state=$(jq -r --arg sid "$NASID" 'select(.session_id == $sid) | .state' "$C
 
 # 7. Plugin output (always-on): agents session shows up under its own
 #    section, positioned between Working and Watching, with the
-#    :gearshape.fill: emoji in the header count and sfimage=gearshape.fill on
+#    :cup.and.heat.waves.fill: emoji in the header count and sfimage=cup.and.heat.waves.fill on
 #    the entry. A stale agents file (fresh transcript aged out) is downgraded
 #    to idle so the dropdown reflects current reality.
 if [ "$plugin" = "1" ]; then
@@ -1148,8 +1148,8 @@ if [ "$plugin" = "1" ]; then
   SASID="sAg1"
   _touch_subagent_transcript "$SASID" "2 minutes ago"
 
-  printf '⚙️ Claude Code | live-agents (lAg1)\nagents\n999999\n'   > "$BELL_STATE_DIR/$LASID"
-  printf '⚙️ Claude Code | stale-agents (sAg1)\nagents\n999999\n' > "$BELL_STATE_DIR/$SASID"
+  printf '☕️ Claude Code | live-agents (lAg1)\nagents\n999999\n'   > "$BELL_STATE_DIR/$LASID"
+  printf '☕️ Claude Code | stale-agents (sAg1)\nagents\n999999\n' > "$BELL_STATE_DIR/$SASID"
   printf '⏳ Claude Code | working-sess (wK2)\nworking\n'          > "$BELL_STATE_DIR/wK2"
   printf '👀 Claude Code | watch-sess (wA2)\nwatching\n%s\n' "$$"  > "$BELL_STATE_DIR/wA2"
   printf 'Claude Code | idle-sess (iD2)\nidle\n'                    > "$BELL_STATE_DIR/iD2"
@@ -1157,9 +1157,9 @@ if [ "$plugin" = "1" ]; then
   out=$(CCG_AGENTS_FRESH_SEC=60 BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" \
         CCG_PROJECTS_DIR="$CCG_PROJECTS_DIR" GHOSTTY_HOOKS_DIR="$TMPROOT" bash "$PLUGIN_PATH" 2>&1)
 
-  echo "$out" | head -n1 | grep -q ':gearshape.fill: 1' \
-    && ok "plugin: always-on header includes ':gearshape.fill: 1'" \
-    || ng "plugin: header missing ':gearshape.fill: 1': $(echo "$out" | head -n1)"
+  echo "$out" | head -n1 | grep -q ':cup.and.heat.waves.fill: 1' \
+    && ok "plugin: always-on header includes ':cup.and.heat.waves.fill: 1'" \
+    || ng "plugin: header missing ':cup.and.heat.waves.fill: 1': $(echo "$out" | head -n1)"
 
   # :zzz: count == 2 (idle-sess + downgraded stale-agents).
   echo "$out" | head -n1 | grep -q ':zzz: 2' \
@@ -1169,9 +1169,9 @@ if [ "$plugin" = "1" ]; then
   echo "$out" | grep -q '^Agents running | size=11' \
     && ok "plugin: 'Agents running' section header emitted" \
     || ng "plugin: 'Agents running' section header missing"
-  echo "$out" | grep -q 'live-agents.*sfimage=gearshape.fill' \
-    && ok "plugin: live agents entry uses sfimage=gearshape.fill" \
-    || ng "plugin: live agents entry missing sfimage=gearshape.fill"
+  echo "$out" | grep -q 'live-agents.*sfimage=cup.and.heat.waves.fill' \
+    && ok "plugin: live agents entry uses sfimage=cup.and.heat.waves.fill" \
+    || ng "plugin: live agents entry missing sfimage=cup.and.heat.waves.fill"
   echo "$out" | grep -q 'stale-agents.*sfimage=zzz' \
     && ok "plugin: stale agents downgrades to sfimage=zzz" \
     || ng "plugin: stale agents not downgraded: $out"
@@ -1190,13 +1190,13 @@ if [ "$plugin" = "1" ]; then
     ng "plugin: section order wrong (working=$working_line agents=$agents_line watching=$watching_line idle=$idle_line)"
   fi
 
-  # Agents count zero → the :gearshape.fill: segment must be entirely absent.
+  # Agents count zero → the :cup.and.heat.waves.fill: segment must be entirely absent.
   rm -f "$BELL_STATE_DIR/$LASID" "$BELL_STATE_DIR/$SASID"
   out2=$(CCG_AGENTS_FRESH_SEC=60 BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" \
          CCG_PROJECTS_DIR="$CCG_PROJECTS_DIR" GHOSTTY_HOOKS_DIR="$TMPROOT" bash "$PLUGIN_PATH" 2>&1)
-  echo "$out2" | head -n1 | grep -qv ':gearshape.fill:' \
-    && ok "plugin: ':gearshape.fill:' segment hidden when agents count is 0" \
-    || ng "plugin: ':gearshape.fill:' segment shown despite zero count: $(echo "$out2" | head -n1)"
+  echo "$out2" | head -n1 | grep -qv ':cup.and.heat.waves.fill:' \
+    && ok "plugin: ':cup.and.heat.waves.fill:' segment hidden when agents count is 0" \
+    || ng "plugin: ':cup.and.heat.waves.fill:' segment shown despite zero count: $(echo "$out2" | head -n1)"
   echo "$out2" | grep -qv '^Agents running | size=11' \
     && ok "plugin: 'Agents running' section suppressed when count is 0" \
     || ng "plugin: 'Agents running' section present despite zero count"
