@@ -213,8 +213,32 @@ _pending_nonempty() { [ -n "$(ls -A "$pending_dir" 2>/dev/null)" ]; }
 # one — see the stray-late-SubagentStop guard below.
 SESSION_STATE_DIR="${CCG_SESSION_STATE_DIR:-$HOME/.claude/.ccg/sessions}"
 session_state_file="$SESSION_STATE_DIR/$session_id"
+# Pre-bell snapshot: the effective_status in force the instant the FIRST bell
+# of a batch fires. Answering a bell doesn't mean the main session started
+# new work — e.g. a backgrounded subagent's own permission request raises the
+# bell while the main session was sitting at `agents` (idle, background
+# Agent/Task/Workflow still running); once that prompt is answered the
+# correct tab state is `agents` again, not `working`. Without this, the
+# `working` branch below had no way to tell "genuinely new work" from
+# "a bell that interrupted a non-working idle-family state" apart, and always
+# defaulted to `working`, so a resolved bell would show ⏳ even though the
+# main session was still just idling on a live background agent.
+prebell_file="$PENDING_BASE/${session_id}.prebell"
 case "$status" in
   input)
+    if ! _pending_nonempty; then
+      # First bell in this batch — capture what was in force right before it.
+      # A later, concurrent bell (second subagent asking for permission) must
+      # not overwrite this: the first bell's snapshot is the one true
+      # pre-interruption state for the whole batch.
+      _prebell=""
+      [ -f "$session_state_file" ] && _prebell=$(head -n1 "$session_state_file" 2>/dev/null)
+      if [ -n "$_prebell" ]; then
+        mkdir -p "$PENDING_BASE" 2>/dev/null
+        printf '%s\n' "$_prebell" > "$prebell_file" 2>/dev/null
+      fi
+      unset _prebell
+    fi
     mkdir -p "$pending_dir" 2>/dev/null
     : > "$pending_dir/$actor" 2>/dev/null
     __trace "pending add actor=$actor"
@@ -224,6 +248,39 @@ case "$status" in
     if _pending_nonempty; then
       effective_status="input"
       __trace "working held as input (pending actors remain: $(ls -A "$pending_dir" 2>/dev/null | tr '\n' ',' ))"
+    elif [ -f "$prebell_file" ]; then
+      # All bells in the batch are answered — reinstate whatever was in force
+      # before the FIRST one fired, rather than assuming new work started.
+      # Re-derive live (don't just mirror the snapshot back) since the
+      # snapshotted background agent/monitor may have finished during the
+      # wait — same "re-derive not mirror" rationale as the stray-working
+      # guard below. Deliberately NOT excluding this actor's own transcript
+      # here (unlike the stray-working guard below): a subagent whose
+      # permission request was just granted usually CONTINUES running, so its
+      # transcript is genuinely fresh — excluding it would wrongly downgrade
+      # `agents` to idle/watching on every granted-permission tool call. The
+      # narrow case this misses (denied permission -> subagent stops
+      # immediately, no other live agents) self-corrects via the sweep's
+      # idle-refinement pass within ~30s.
+      # Only watching/agents are worth restoring: a bell that interrupted
+      # PLAIN idle (no live background agent or monitor) legitimately means
+      # new work is starting once it's answered, so that case still falls
+      # through to `working` as before — only the refinements of idle need
+      # reinstating, since those describe something ELSE that's still live.
+      _prebell=$(head -n1 "$prebell_file" 2>/dev/null)
+      rm -f "$prebell_file" 2>/dev/null
+      case "$_prebell" in
+        watching|agents)
+          _stray_cpid=$(_find_claude_pid 2>/dev/null || true)
+          effective_status=$(_resolve_idle_refinement "$session_id" "$_stray_cpid")
+          unset _stray_cpid
+          __trace "prebell restore: was=$_prebell now=$effective_status (actor=$actor)"
+          ;;
+        *)
+          __trace "prebell restore: was=${_prebell:-<none>} -> working (actor=$actor)"
+          ;;
+      esac
+      unset _prebell
     else
       # Stray-working guard. Covers two cases:
       #
@@ -288,6 +345,7 @@ case "$status" in
     ;;
   idle|end)
     rm -rf "$pending_dir" 2>/dev/null
+    rm -f "$prebell_file" 2>/dev/null
     __trace "pending cleared (status=$status)"
     ;;
 esac

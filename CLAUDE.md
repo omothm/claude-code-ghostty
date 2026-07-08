@@ -320,6 +320,53 @@ dir. `sweep-bell-state.sh` hard-expires any pending dir untouched for 12h
 (mirrors the state-file cap; tidy-up only, no menubar refresh). Sandbox via
 `CCG_PENDING_DIR`.
 
+#### Pre-bell state restore
+
+Answering a bell used to unconditionally drop the tab into `working` once the
+pending set emptied — correct for the common case (main agent was mid-turn)
+but wrong whenever the bell interrupted a *non-working* idle-family state.
+The concrete trigger: a backgrounded subagent (`agents` state — see
+"Agents-running state" below) raises its own permission prompt. The main
+session was never "working" in the ⏳ sense; it was idling on a still-running
+background agent. Once that prompt is answered, forcing `working` painted a
+wrong tab state until some unrelated later hook happened to correct it.
+
+The fix snapshots the logical state in force at the **first** bell of a batch
+into a flat file, `~/.claude/.ccg/pending/<sid>.prebell` (a sibling of the
+`<sid>/` pending-set directory, not inside it — so it survives independently
+of which actor files come and go). Rules:
+
+- **`input`, pending set was empty** (first bell in the batch): read the
+  current logical-state file and snapshot it to `<sid>.prebell`, unless it's
+  already there. A *second*, concurrent bell (a sibling subagent's own prompt)
+  must NOT overwrite this — the first bell's snapshot is the one true
+  pre-interruption state for the whole batch, and by the time the second bell
+  fires the logical state is already `input` (not useful to snapshot).
+- **`working`, pending set now empty AND a snapshot exists**: consume the
+  snapshot (read + delete) and, if it was `watching` or `agents`, re-derive
+  that refinement **live** via `_resolve_idle_refinement` rather than
+  mirroring the stale value back — same "re-derive not mirror" rationale as
+  the stray-working guard, since the snapshotted background agent/monitor may
+  have finished during the wait. If the snapshot was plain `idle` (no live
+  refinement) or `working`, fall through to the default `working` — a bell
+  that interrupted genuinely idle or working state legitimately means new
+  work is starting once it's answered.
+- Deliberately **not** excluding the resolving actor's own transcript in this
+  path (unlike the stray-working guard's exclude parameter): a subagent whose
+  permission request was just *granted* usually keeps running, so its
+  transcript is genuinely fresh, and excluding it would wrongly downgrade
+  `agents` on every granted-permission tool call. The narrow miss — a
+  *denied* permission causing that subagent to stop immediately with no other
+  live agents — self-corrects via the sweep's idle-refinement pass within
+  ~30s (see "Agents-running state" below), the same backstop that already
+  exists for the fully-quiet-session gap.
+- **`idle` / `end`**: also remove any leftover `<sid>.prebell`, mirroring how
+  the pending-set directory itself is cleared.
+
+`sweep-bell-state.sh`'s pending-dir hard-age pass globs `-type d`, which
+doesn't match this flat file, so it separately globs `-type f -name
+'*.prebell'` to reap one left behind by a crashed session.
+
 ### Refresh gating
 
 `tab-title.sh` compares the desired state file against the on-disk state
@@ -658,7 +705,12 @@ all three per-session loops route through it), stray-working guard
 (a stray `working` — subagent arriving after `idle`, or `__main__` arriving
 after `end` deleted the logical-state file — must not resurrect `working`;
 the main agent's start-of-turn `working` and a real mid-turn subagent `working`
-both still pass through), and end-to-end
+both still pass through), pre-bell state restore (a bell that interrupts
+`agents`/`watching` restores that refinement — re-derived live — instead of
+defaulting to `working`; a second concurrent bell does not clobber the first
+bell's snapshot; a bell interrupting plain `idle` or genuine mid-turn
+`working` still defaults to/stays `working`; the snapshot file is consumed
+on restore and cleared on `idle`/`end`), and end-to-end
 `input`→state→plugin latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches

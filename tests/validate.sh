@@ -1325,6 +1325,131 @@ rm -rf "$CCG_PENDING_DIR/$SLSID" "$BELL_STATE_DIR/$SLSID" "$CCG_SESSION_STATE_DI
 : > "$BELL_CONFIG"
 
 # ---------------------------------------------------------------------------
+section "pre-bell state restore (bell must not clobber non-working idle-family state)"
+
+# Regression guard: answering a bell used to always drop the tab into
+# `working`, even when the state right before the bell fired was `agents` or
+# `watching` — e.g. a backgrounded subagent raising its OWN permission prompt
+# while the main session was sitting at `agents`. Once that prompt clears, the
+# correct tab state is whatever was in force before the bell (re-derived
+# live), not a blanket `working`.
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+# CCG_PROJECTS_DIR was unset after the "agents-running state" section above;
+# re-export it (same path, and _touch_subagent_transcript is still in scope)
+# so this section's agents-restore case can create fresh transcripts again.
+export CCG_PROJECTS_DIR="$TMPROOT/projects"
+
+# --- agents -> bell -> agents (not working) ---
+PBASID="pbA-$$"
+rm -rf "$CCG_PENDING_DIR/$PBASID" "$BELL_STATE_DIR/$PBASID" "$CCG_SESSION_STATE_DIR/$PBASID"
+_touch_subagent_transcript "$PBASID" ""
+printf '{"session_id":"%s"}\n' "$PBASID" | "$HOOKS_DIR/tab-title.sh" idle "$PBASID" >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$PBASID" 2>/dev/null)" = "agents" ] \
+  && ok "prebell: session settled to agents before bell" \
+  || ng "prebell: did not settle to agents (got '$(sed -n '2p' "$BELL_STATE_DIR/$PBASID" 2>/dev/null)')"
+# A subagent (its own, still-live transcript) raises a permission prompt.
+printf '{"session_id":"%s","agent_id":"fakehex%s"}\n' "$PBASID" "$$" | "$HOOKS_DIR/tab-title.sh" input "$PBASID" "fakehex$$" >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$PBASID" 2>/dev/null)" = "input" ] \
+  && ok "prebell: subagent bell shows input" || ng "prebell: bell did not show input"
+# Permission granted -> PostToolUse(working) for the same actor. The
+# transcript is still fresh (the subagent kept working), so the restore
+# should land back on agents, not working.
+printf '{"session_id":"%s","agent_id":"fakehex%s"}\n' "$PBASID" "$$" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$PBASID" 2>/dev/null)
+[ "$line2" = "agents" ] && ok "prebell: bell resolved restores agents (not working)" \
+  || ng "prebell: bell resolved wrongly landed on '$line2' instead of agents"
+rm -rf "$CCG_PENDING_DIR/$PBASID" "$BELL_STATE_DIR/$PBASID" "$CCG_SESSION_STATE_DIR/$PBASID"
+
+# --- watching -> bell -> watching (not working) ---
+(exec -a "_fake-mon4 /tmp/claude-decade-cwd live" sleep 30) &
+FAKE_MON4_PID=$!
+FAKE_MONITOR_PIDS="$FAKE_MONITOR_PIDS $FAKE_MON4_PID"
+sleep 0.2
+PBWSID="pbW-$$"
+rm -rf "$CCG_PENDING_DIR/$PBWSID" "$BELL_STATE_DIR/$PBWSID" "$CCG_SESSION_STATE_DIR/$PBWSID"
+CCG_CLAUDE_PID="$$" bash -c "printf '{\"session_id\":\"%s\"}\n' '$PBWSID' | '$HOOKS_DIR/tab-title.sh' idle '$PBWSID'" >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$PBWSID" 2>/dev/null)" = "watching" ] \
+  && ok "prebell: session settled to watching before bell" \
+  || ng "prebell: did not settle to watching (got '$(sed -n '2p' "$BELL_STATE_DIR/$PBWSID" 2>/dev/null)')"
+printf '{"session_id":"%s"}\n' "$PBWSID" | "$HOOKS_DIR/tab-title.sh" input "$PBWSID" >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$PBWSID" 2>/dev/null)" = "input" ] \
+  && ok "prebell: main-agent bell shows input over watching" || ng "prebell: bell did not show input"
+CCG_CLAUDE_PID="$$" bash -c "printf '{\"session_id\":\"%s\"}\n' '$PBWSID' | '$HOOKS_DIR/tab-title.sh' working" >/dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$PBWSID" 2>/dev/null)
+[ "$line2" = "watching" ] && ok "prebell: bell resolved restores watching (not working, monitor still live)" \
+  || ng "prebell: bell resolved wrongly landed on '$line2' instead of watching"
+rm -rf "$CCG_PENDING_DIR/$PBWSID" "$BELL_STATE_DIR/$PBWSID" "$CCG_SESSION_STATE_DIR/$PBWSID"
+kill "$FAKE_MON4_PID" 2>/dev/null
+wait "$FAKE_MON4_PID" 2>/dev/null
+
+# --- genuine mid-turn bell: working -> bell -> working (baseline unaffected) ---
+PBMSID="pbM-$$"
+rm -rf "$CCG_PENDING_DIR/$PBMSID" "$BELL_STATE_DIR/$PBMSID" "$CCG_SESSION_STATE_DIR/$PBMSID"
+# Establish a real logical `idle` first (SessionStart), THEN working — a bare
+# working on a session with no prior logical state hits the stray-main-after-
+# end guard (see "stray working after turn settled" section) and gets
+# suppressed to idle, which isn't what this baseline is testing.
+printf '{"session_id":"%s"}\n' "$PBMSID" | "$HOOKS_DIR/tab-title.sh" idle "$PBMSID" >/dev/null 2>&1
+printf '{"session_id":"%s"}\n' "$PBMSID" | "$HOOKS_DIR/tab-title.sh" working "$PBMSID" >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$PBMSID" 2>/dev/null)" = "working" ] \
+  && ok "prebell: session mid-turn working before bell" || ng "prebell: did not settle to working"
+printf '{"session_id":"%s"}\n' "$PBMSID" | "$HOOKS_DIR/tab-title.sh" input "$PBMSID" >/dev/null 2>&1
+printf '{"session_id":"%s"}\n' "$PBMSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$PBMSID" 2>/dev/null)" = "working" ] \
+  && ok "prebell: mid-turn bell still restores working (baseline unaffected)" \
+  || ng "prebell: mid-turn bell restore regressed (got '$(sed -n '2p' "$BELL_STATE_DIR/$PBMSID" 2>/dev/null)')"
+rm -rf "$CCG_PENDING_DIR/$PBMSID" "$BELL_STATE_DIR/$PBMSID" "$CCG_SESSION_STATE_DIR/$PBMSID"
+
+# --- batch of bells: only the FIRST bell's snapshot wins ---
+PBBSID="pbB-$$"
+rm -rf "$CCG_PENDING_DIR/$PBBSID" "$BELL_STATE_DIR/$PBBSID" "$CCG_SESSION_STATE_DIR/$PBBSID"
+_touch_subagent_transcript "$PBBSID" ""
+printf '{"session_id":"%s"}\n' "$PBBSID" | "$HOOKS_DIR/tab-title.sh" idle "$PBBSID" >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$PBBSID" 2>/dev/null)" = "agents" ] \
+  && ok "prebell(batch): session settled to agents before batch" \
+  || ng "prebell(batch): did not settle to agents"
+# First bell (subagent A) snapshots "agents".
+printf '{"session_id":"%s","agent_id":"AAAA"}\n' "$PBBSID" | "$HOOKS_DIR/tab-title.sh" input "$PBBSID" AAAA >/dev/null 2>&1
+[ "$(cat "$CCG_PENDING_DIR/${PBBSID}.prebell" 2>/dev/null)" = "agents" ] \
+  && ok "prebell(batch): first bell snapshots agents" \
+  || ng "prebell(batch): snapshot missing/wrong (got '$(cat "$CCG_PENDING_DIR/${PBBSID}.prebell" 2>/dev/null)')"
+# A second, sibling bell fires while A is still pending. The main logical
+# state is now "input" (from A's bell) — the snapshot must NOT be overwritten
+# with "input".
+printf '{"session_id":"%s","agent_id":"BBBB"}\n' "$PBBSID" | "$HOOKS_DIR/tab-title.sh" input "$PBBSID" BBBB >/dev/null 2>&1
+[ "$(cat "$CCG_PENDING_DIR/${PBBSID}.prebell" 2>/dev/null)" = "agents" ] \
+  && ok "prebell(batch): second concurrent bell does not overwrite the snapshot" \
+  || ng "prebell(batch): snapshot clobbered by second bell (got '$(cat "$CCG_PENDING_DIR/${PBBSID}.prebell" 2>/dev/null)')"
+# A clears, B still pending -> held as input.
+printf '{"session_id":"%s","agent_id":"AAAA"}\n' "$PBBSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$PBBSID" 2>/dev/null)" = "input" ] \
+  && ok "prebell(batch): bell held while sibling still pending" \
+  || ng "prebell(batch): bell cleared early (got '$(sed -n '2p' "$BELL_STATE_DIR/$PBBSID" 2>/dev/null)')"
+# B clears too -> set empty -> restore the snapshotted agents state.
+printf '{"session_id":"%s","agent_id":"BBBB"}\n' "$PBBSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$PBBSID" 2>/dev/null)
+[ "$line2" = "agents" ] && ok "prebell(batch): last bell clears and restores agents" \
+  || ng "prebell(batch): restore wrong after batch cleared (got '$line2')"
+[ ! -f "$CCG_PENDING_DIR/${PBBSID}.prebell" ] \
+  && ok "prebell(batch): snapshot file consumed after restore" \
+  || ng "prebell(batch): snapshot file leaked after restore"
+rm -rf "$CCG_PENDING_DIR/$PBBSID" "$BELL_STATE_DIR/$PBBSID" "$CCG_SESSION_STATE_DIR/$PBBSID"
+
+# --- prebell snapshot is cleared on idle/end ---
+PBCSID="pbC-$$"
+rm -rf "$CCG_PENDING_DIR/$PBCSID" "$BELL_STATE_DIR/$PBCSID" "$CCG_SESSION_STATE_DIR/$PBCSID"
+printf '{"session_id":"%s"}\n' "$PBCSID" | "$HOOKS_DIR/tab-title.sh" working "$PBCSID" >/dev/null 2>&1
+printf '{"session_id":"%s"}\n' "$PBCSID" | "$HOOKS_DIR/tab-title.sh" input "$PBCSID" >/dev/null 2>&1
+[ -f "$CCG_PENDING_DIR/${PBCSID}.prebell" ] \
+  && ok "prebell: snapshot exists while bell pending" || ng "prebell: snapshot missing while bell pending"
+printf '{"session_id":"%s"}\n' "$PBCSID" | "$HOOKS_DIR/tab-title.sh" idle "$PBCSID" >/dev/null 2>&1
+[ ! -f "$CCG_PENDING_DIR/${PBCSID}.prebell" ] \
+  && ok "prebell: idle clears a leftover snapshot" || ng "prebell: snapshot leaked past idle"
+rm -rf "$CCG_PENDING_DIR/$PBCSID" "$BELL_STATE_DIR/$PBCSID" "$CCG_SESSION_STATE_DIR/$PBCSID"
+
+: > "$BELL_CONFIG"
+
+# ---------------------------------------------------------------------------
 section "Mode=off"
 
 printf '{"mode":"off"}\n' > "$BELL_CONFIG"

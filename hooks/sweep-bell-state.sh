@@ -326,6 +326,15 @@ if [ -d "$PENDING_DIR" ]; then
     rm -rf "$d"
     __trace "pending hard-expire: $d"
   done < <(find "$PENDING_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +720 2>/dev/null)
+  # tab-title.sh also drops a flat "<sid>.prebell" file directly under this
+  # dir (the pre-bell state snapshot) — not caught by the -type d glob above.
+  # A crashed session that never fires idle/end leaks this file forever
+  # otherwise.
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    rm -f "$f"
+    __trace "pending hard-expire (prebell): $f"
+  done < <(find "$PENDING_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.prebell' -mmin +720 2>/dev/null)
 fi
 
 # Notification expiry pass: clear any ccg-* notification older than the
