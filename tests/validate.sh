@@ -725,6 +725,48 @@ else ng "sweep idle-refinement: no corrected event emitted for logical-state fil
   || ng "sweep idle-refinement: logical-state file not rewritten"
 rm -f "$CCG_SESSION_STATE_DIR/$IRSID5"
 
+# 6. agents -> idle via the logical-state pass fires the deferred "Background
+#    task completed" notification (via notify.sh) — the counterpart to
+#    notify.sh's gate=agents suppression on the Stop hook's "Task completed"
+#    call: the notification the Stop hook swallowed must show up here once the
+#    background agent actually finishes, or the user is never told.
+IRNOTIFY_BIN="$TMPROOT/bin-ir-notify"
+mkdir -p "$IRNOTIFY_BIN"
+IRNOTIFY_ARGS="$TMPROOT/tn-args-ir.txt"
+# Append (not overwrite): sweep-bell-state.sh's own notif-expiry pass also
+# calls terminal-notifier (-list ALL) later in the same run, which would
+# otherwise clobber the completion-notification argv we're checking for.
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$IRNOTIFY_ARGS" > "$IRNOTIFY_BIN/terminal-notifier"
+chmod +x "$IRNOTIFY_BIN/terminal-notifier"
+_saved_path_ir="$PATH"
+export PATH="$IRNOTIFY_BIN:$PATH"
+: > "$CCG_EVENT_LOG"
+IRSID6="ir-notify-$$"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$IRSID6/subagents"
+: > "$CCG_PROJECTS_DIR/fake-project/$IRSID6/subagents/agent-notifyhex$$.jsonl"
+age_file "5 minutes ago" "$CCG_PROJECTS_DIR/fake-project/$IRSID6/subagents/agent-notifyhex$$.jsonl"
+printf 'agents\n%s\n' "$$" > "$CCG_SESSION_STATE_DIR/$IRSID6"
+: > "$IRNOTIFY_ARGS"
+CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+grep -qF -- "-message Background task completed" "$IRNOTIFY_ARGS" 2>/dev/null \
+  && ok "sweep idle-refinement: agents->idle fires 'Background task completed' notification" \
+  || ng "sweep idle-refinement: no completion notification fired (got: $(cat "$IRNOTIFY_ARGS" 2>/dev/null))"
+rm -f "$CCG_SESSION_STATE_DIR/$IRSID6"
+
+# 6b. A plain idle->idle (no transition) or non-agents->idle transition must
+#     NOT fire the notification — only the specific agents->idle edge.
+IRSID7="ir-notify-nowatch-$$"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$IRSID7/subagents"
+printf 'watching\n%s\n' "$$" > "$CCG_SESSION_STATE_DIR/$IRSID7"
+: > "$IRNOTIFY_ARGS"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+grep -qF -- "-message Background task completed" "$IRNOTIFY_ARGS" 2>/dev/null \
+  && ng "sweep idle-refinement: watching->idle wrongly fired notification (got: $(cat "$IRNOTIFY_ARGS" 2>/dev/null))" \
+  || ok "sweep idle-refinement: watching->idle does not fire completion notification"
+rm -f "$CCG_SESSION_STATE_DIR/$IRSID7"
+
+export PATH="$_saved_path_ir"
+
 rm -rf "$CCG_PROJECTS_DIR"; unset CCG_PROJECTS_DIR
 rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
 
@@ -1676,6 +1718,68 @@ echo "$tn4" | grep -qF -- "-message API Error: 503 flushed late" \
 
 export PATH="$_saved_path"
 unset CCG_DIR
+
+# ---------------------------------------------------------------------------
+section "notify.sh agents-gate (suppress premature 'Task completed' notification)"
+
+# Stub terminal-notifier again for this section's own checks.
+NOTIFY_BIN2="$TMPROOT/bin-agents-gate"
+mkdir -p "$NOTIFY_BIN2"
+TN_ARGS_FILE2="$TMPROOT/tn-args-agents.txt"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "%s"\n' "$TN_ARGS_FILE2" > "$NOTIFY_BIN2/terminal-notifier"
+chmod +x "$NOTIFY_BIN2/terminal-notifier"
+_saved_path2="$PATH"
+export PATH="$NOTIFY_BIN2:$PATH"
+export CCG_PROJECTS_DIR="$TMPROOT/agents-gate-projects"
+mkdir -p "$CCG_PROJECTS_DIR"
+
+# (a) a live (fresh) subagent transcript for this session -> notification is
+#     suppressed entirely; this is the Stop-hook "Task completed" call site's
+#     whole point (the main turn paused but a background agent is still
+#     working, so the fleet isn't actually done).
+AG_SID="agentsGateLive"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$AG_SID/subagents"
+: > "$CCG_PROJECTS_DIR/fake-project/$AG_SID/subagents/agent-livehex.jsonl"
+: > "$TN_ARGS_FILE2"
+echo "{\"session_id\":\"$AG_SID\"}" | "$HOOKS_DIR/notify.sh" '✅' 'Task completed' '' '' agents > /dev/null 2>&1
+[ ! -s "$TN_ARGS_FILE2" ] && ok "gate=agents: live subagent transcript suppresses notification" \
+  || ng "gate=agents: notification fired despite live transcript (got: $(cat "$TN_ARGS_FILE2" 2>/dev/null))"
+
+# (b) a stale transcript (past CCG_AGENTS_FRESH_SEC) -> notification passes
+#     through normally; the background agent has actually finished.
+AG_SID2="agentsGateStale"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$AG_SID2/subagents"
+: > "$CCG_PROJECTS_DIR/fake-project/$AG_SID2/subagents/agent-stalehex.jsonl"
+age_file "5 minutes ago" "$CCG_PROJECTS_DIR/fake-project/$AG_SID2/subagents/agent-stalehex.jsonl"
+: > "$TN_ARGS_FILE2"
+CCG_AGENTS_FRESH_SEC=5 bash -c "echo '{\"session_id\":\"$AG_SID2\"}' | '$HOOKS_DIR/notify.sh' '✅' 'Task completed' '' '' agents" > /dev/null 2>&1
+grep -qF -- "-message Task completed" "$TN_ARGS_FILE2" 2>/dev/null \
+  && ok "gate=agents: stale transcript lets notification through" \
+  || ng "gate=agents: notification wrongly suppressed with stale transcript (got: $(cat "$TN_ARGS_FILE2" 2>/dev/null))"
+
+# (c) no subagent transcript at all -> notification passes through normally.
+AG_SID3="agentsGateNone"
+: > "$TN_ARGS_FILE2"
+echo "{\"session_id\":\"$AG_SID3\"}" | "$HOOKS_DIR/notify.sh" '✅' 'Task completed' '' '' agents > /dev/null 2>&1
+grep -qF -- "-message Task completed" "$TN_ARGS_FILE2" 2>/dev/null \
+  && ok "gate=agents: no subagent transcript lets notification through" \
+  || ng "gate=agents: notification wrongly suppressed with no transcript (got: $(cat "$TN_ARGS_FILE2" 2>/dev/null))"
+
+# (d) a call site that does NOT pass gate=agents (e.g. PermissionRequest) must
+#     never suppress, even with a live transcript present — only the Stop
+#     hook's "Task completed" call site opts into the gate.
+AG_SID4="agentsGateUngated"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$AG_SID4/subagents"
+: > "$CCG_PROJECTS_DIR/fake-project/$AG_SID4/subagents/agent-ungatedhex.jsonl"
+: > "$TN_ARGS_FILE2"
+echo "{\"session_id\":\"$AG_SID4\"}" | "$HOOKS_DIR/notify.sh" '🔔' 'Needs your input' input > /dev/null 2>&1
+grep -qF -- "-message Needs your input" "$TN_ARGS_FILE2" 2>/dev/null \
+  && ok "no gate arg: notification fires even with live transcript (ungated call site)" \
+  || ng "no gate arg: notification wrongly suppressed (got: $(cat "$TN_ARGS_FILE2" 2>/dev/null))"
+
+rm -rf "$CCG_PROJECTS_DIR"; unset CCG_PROJECTS_DIR
+rm -rf "$BELL_STATE_DIR/$AG_SID4" "$CCG_SESSION_STATE_DIR/$AG_SID4" "$CCG_PENDING_DIR/$AG_SID4"
+export PATH="$_saved_path2"
 
 # ---------------------------------------------------------------------------
 section "dashboard verdict logic"

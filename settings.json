@@ -56,7 +56,7 @@
           },
           {
             "type": "command",
-            "command": "~/.claude/hooks/notify.sh '✅' 'Task completed'"
+            "command": "~/.claude/hooks/notify.sh '✅' 'Task completed' '' '' agents"
           }
         ]
       }

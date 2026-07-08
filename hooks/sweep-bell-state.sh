@@ -305,6 +305,23 @@ if [ -d "$SESSION_STATE_DIR" ]; then
     printf '%s\n%s\n' "$new_st" "$spid" > "$f"
     pruned=$((pruned + 1))
     __trace "logical-refinement-correct: sid=$sid $stored_st->$new_st (pid=$spid)"
+
+    # agents -> idle specifically means a backgrounded Agent/Task/Workflow that
+    # was still live when the main turn's Stop hook fired (and suppressed its
+    # own "Task completed" notification via notify.sh's agents gate — see
+    # notify.sh) has now actually finished. This is the only place that fires
+    # the deferred completion notification: nothing else re-checks a quiet
+    # `agents` session, so without this the user would never be told the
+    # background work wrapped up. Fires unconditionally of BELL_MODE, since
+    # this pass (unlike the bell-state pass above) already runs mode-independent.
+    if [ "$stored_st" = "agents" ] && [ "$new_st" = "idle" ]; then
+      last_cwd=$(jq -rs --arg sid "$sid" \
+        '[.[] | select(.session_id==$sid) | select(.cwd != "")] | last | .cwd // empty' "$EVENT_LOG" 2>/dev/null)
+      jq -nc --arg sid "$sid" --arg cwd "$last_cwd" '{session_id: $sid, cwd: $cwd}' \
+        | "$HOOKS_DIR/notify.sh" '✅' 'Background task completed' > /dev/null 2>&1
+      __trace "agents-finished-notify: sid=$sid cwd=$last_cwd"
+      unset last_cwd
+    fi
   done < <(find "$SESSION_STATE_DIR" -type f 2>/dev/null)
 fi
 

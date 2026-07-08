@@ -1,6 +1,6 @@
 #!/bin/bash
 # Base notification script for Ghostty tab-targeted notifications.
-# Usage: notify.sh <icon> <default_message> [tab_status] [mode]
+# Usage: notify.sh <icon> <default_message> [tab_status] [mode] [gate]
 #
 # Reads hook JSON from stdin. Sends a macOS notification via terminal-notifier.
 #
@@ -12,6 +12,16 @@
 #                    session transcript into a readable log file, surface it
 #                    as the notification message, and make clicking focus the
 #                    tab AND open that log. Used by the StopFailure hook.
+#   gate             If "agents": suppress this notification entirely when a
+#                    background Agent/Task/Workflow subagent is still live for
+#                    this session (same freshness signal tab-title.sh's
+#                    `agents` state uses). Used by the Stop hook's "Task
+#                    completed" notification — the main turn paused, but the
+#                    work isn't actually done while a subagent is still
+#                    running. sweep-bell-state.sh's idle-refinement pass fires
+#                    the real completion notification once that subagent's
+#                    transcript goes stale. Not used by PermissionRequest or
+#                    StopFailure notifications, which must never be suppressed.
 #
 # Debug: set BELL_TRACE=1 to append diagnostics to $BELL_TRACE_LOG
 # (defaults to /tmp/bell-trace.log).
@@ -42,6 +52,7 @@ icon="$1"
 default_message="$2"
 tab_status="${3-}"
 mode="${4-}"
+gate="${5-}"
 
 # Read JSON data from stdin
 input=$(cat)
@@ -69,6 +80,29 @@ session_id=$(echo "$input" | jq -r '.session_id // "unknown"' 2>/dev/null)
 # parallel subagent's PostToolUse must not clear a different actor's bell).
 agent_id=$(echo "$input" | jq -r '.agent_id // empty' 2>/dev/null)
 cwd=$(echo "$input" | jq -r '.cwd // "unknown"' 2>/dev/null)
+
+# Gate=agents: suppress this notification if a background Agent/Task/Workflow
+# subagent is still live for this session. Mirrors tab-title.sh's
+# _count_live_agents — a per-subagent transcript at
+# ~/.claude/projects/<project>/<session_id>/subagents/agent-<hex>.jsonl whose
+# mtime is still fresh means the work isn't actually done yet, even though the
+# main turn just paused. sweep-bell-state.sh's idle-refinement pass fires the
+# real "finished" notification once that transcript goes stale.
+if [ "$gate" = "agents" ]; then
+  _fresh="${CCG_AGENTS_FRESH_SEC:-60}"
+  _projects_dir="${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"
+  _now=$(date +%s)
+  for _f in "$_projects_dir"/*/"$session_id"/subagents/*.jsonl; do
+    [ -f "$_f" ] || continue
+    _age=$(( _now - $(stat -f %m "$_f" 2>/dev/null || echo 0) ))
+    if [ "$_age" -le "$_fresh" ]; then
+      __trace "early-exit reason=agents-live session_id=$session_id transcript=$_f age=${_age}s"
+      __dbg "gate=agents suppressed notification: session_id=$session_id live transcript=$_f age=${_age}s"
+      exit 0
+    fi
+  done
+  unset _fresh _projects_dir _now _f _age
+fi
 message=$(echo "$input" | jq -r --arg def "$default_message" '
   .message
   // .tool_input.description
