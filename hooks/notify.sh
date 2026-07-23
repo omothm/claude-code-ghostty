@@ -80,6 +80,13 @@ session_id=$(echo "$input" | jq -r '.session_id // "unknown"' 2>/dev/null)
 # parallel subagent's PostToolUse must not clear a different actor's bell).
 agent_id=$(echo "$input" | jq -r '.agent_id // empty' 2>/dev/null)
 cwd=$(echo "$input" | jq -r '.cwd // "unknown"' 2>/dev/null)
+# AskUserQuestion fires the same PermissionRequest event as any other tool
+# permission decision, but it needs more than a yes/no answer. Forwarded to
+# tab-title.sh as `kind=query` so the tab title can show ❓ instead of 🔔 —
+# menubar/state-file behavior is unchanged.
+tool_name=$(echo "$input" | jq -r '.tool_name // empty' 2>/dev/null)
+kind=""
+[ "$tool_name" = "AskUserQuestion" ] && kind="query"
 
 # Gate=agents: suppress this notification if a background Agent/Task/Workflow
 # subagent is still live for this session. Mirrors tab-title.sh's
@@ -211,8 +218,8 @@ __dbg "match_key=[$match_key] (session_summary=[$session_summary] short_id=$shor
 
 # Update tab title if requested
 if [ -n "$tab_status" ]; then
-  __trace "calling tab-title.sh $tab_status (agent_id=${agent_id:-<none>})"
-  "$(dirname "$0")/tab-title.sh" "$tab_status" "$session_id" "$agent_id" > /dev/null
+  __trace "calling tab-title.sh $tab_status (agent_id=${agent_id:-<none>} kind=${kind:-<none>})"
+  "$(dirname "$0")/tab-title.sh" "$tab_status" "$session_id" "$agent_id" "$kind" > /dev/null
   __trace "tab-title.sh returned rc=$?"
 fi
 

@@ -1293,6 +1293,73 @@ rm -rf "$CCG_PENDING_DIR" "$BELL_STATE_DIR/$PSID"
 : > "$BELL_CONFIG"
 
 # ---------------------------------------------------------------------------
+section "AskUserQuestion bell (❓ tab-title icon, menubar unaffected)"
+
+# notify.sh forwards kind=query as tab-title.sh's 4th arg when the
+# PermissionRequest payload's tool_name is "AskUserQuestion". The tab title
+# swaps to ❓; the bell-state file (what the menubar reads) must keep the
+# plain 🔔 prefix regardless.
+QSID="askq-$$"
+rm -rf "$CCG_PENDING_DIR/$QSID" "$BELL_STATE_DIR/$QSID"
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+export BELL_TRACE=1
+
+trace_reset
+printf '{"session_id":"%s"}\n' "$QSID" | "$HOOKS_DIR/tab-title.sh" input "$QSID" "" query >/dev/null 2>&1
+grep -q 'title-set title="❓ ' "$BELL_TRACE_LOG" \
+  && ok "AskUserQuestion input sets ❓ tab title" \
+  || ng "AskUserQuestion input did not set ❓ title (trace: $(cat "$BELL_TRACE_LOG"))"
+grep -qF "🔔" "$BELL_STATE_DIR/$QSID" \
+  && ok "AskUserQuestion input still writes 🔔-prefixed bell-state file (menubar unaffected)" \
+  || ng "bell-state file missing 🔔 prefix for AskUserQuestion (got: $(cat "$BELL_STATE_DIR/$QSID" 2>/dev/null))"
+
+# notify.sh's actual call path: tab_status arg then session_id/agent_id/kind.
+trace_reset
+rm -rf "$CCG_PENDING_DIR/$QSID" "$BELL_STATE_DIR/$QSID"
+printf '{"session_id":"%s","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Pick one"}]}}\n' "$QSID" \
+  | "$HOOKS_DIR/notify.sh" '🔔' 'Needs your input' input >/dev/null 2>&1
+grep -qF "🔔" "$BELL_STATE_DIR/$QSID" \
+  && ok "notify.sh: AskUserQuestion still writes 🔔 bell-state file via full call path" \
+  || ng "notify.sh: bell-state file missing 🔔 (got: $(cat "$BELL_STATE_DIR/$QSID" 2>/dev/null))"
+
+# A plain (non-AskUserQuestion) permission request must still show the
+# ordinary 🔔 tab title, not ❓.
+PLSID="plainq-$$"
+rm -rf "$CCG_PENDING_DIR/$PLSID" "$BELL_STATE_DIR/$PLSID"
+trace_reset
+printf '{"session_id":"%s"}\n' "$PLSID" | "$HOOKS_DIR/tab-title.sh" input "$PLSID" >/dev/null 2>&1
+grep -q 'title-set title="🔔 ' "$BELL_TRACE_LOG" \
+  && ok "plain permission request keeps 🔔 tab title (no kind arg)" \
+  || ng "plain permission request wrongly got a different title (trace: $(cat "$BELL_TRACE_LOG"))"
+grep -q 'title-set title="❓ ' "$BELL_TRACE_LOG" \
+  && ng "plain permission request incorrectly showed ❓" \
+  || ok "plain permission request does not show ❓"
+
+# Mixed pending set: a sibling's plain permission prompt must not mask an
+# AskUserQuestion bell raised by a different actor in the same session.
+MQSID="mixq-$$"
+rm -rf "$CCG_PENDING_DIR/$MQSID" "$BELL_STATE_DIR/$MQSID"
+printf '{"session_id":"%s","agent_id":"PLAIN"}\n' "$MQSID" | "$HOOKS_DIR/tab-title.sh" input "$MQSID" PLAIN >/dev/null 2>&1
+trace_reset
+printf '{"session_id":"%s","agent_id":"QUERY"}\n' "$MQSID" | "$HOOKS_DIR/tab-title.sh" input "$MQSID" QUERY query >/dev/null 2>&1
+grep -q 'title-set title="❓ ' "$BELL_TRACE_LOG" \
+  && ok "mixed pending set: query actor's bell shows ❓ even with a plain sibling pending" \
+  || ng "mixed pending set: ❓ not shown (trace: $(cat "$BELL_TRACE_LOG"))"
+
+# Once the query actor's bell clears (its permission answered → working) but
+# the plain sibling is still pending, the title reverts to plain 🔔.
+trace_reset
+printf '{"session_id":"%s","agent_id":"QUERY"}\n' "$MQSID" | "$HOOKS_DIR/tab-title.sh" working >/dev/null 2>&1
+grep -q 'title-set title="🔔 ' "$BELL_TRACE_LOG" \
+  && ok "after query actor clears, remaining plain sibling shows 🔔 (not ❓)" \
+  || ng "title did not revert to 🔔 after query actor cleared (trace: $(cat "$BELL_TRACE_LOG"))"
+
+rm -rf "$CCG_PENDING_DIR/$QSID" "$CCG_PENDING_DIR/$PLSID" "$CCG_PENDING_DIR/$MQSID" \
+       "$BELL_STATE_DIR/$QSID" "$BELL_STATE_DIR/$PLSID" "$BELL_STATE_DIR/$MQSID"
+: > "$BELL_CONFIG"
+unset BELL_TRACE
+
+# ---------------------------------------------------------------------------
 section "stray working after turn settled (subagent and main-after-end)"
 
 # Regression guard for the stuck-working bug. Two variants:

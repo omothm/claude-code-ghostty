@@ -1,7 +1,12 @@
 #!/bin/bash
 # Unified tab title helper for Ghostty tabs.
-# Usage: tab-title.sh <status> [session_id]
+# Usage: tab-title.sh <status> [session_id] [agent_id] [kind]
 #   status: idle, working, input, query, end
+#   kind: only meaningful for status=input. "query" marks the bell as an
+#         AskUserQuestion dialog, swapping the tab-title icon to ❓ (tab
+#         title only — the bell-state file/menubar are unaffected). Set by
+#         notify.sh when the PermissionRequest payload's tool_name is
+#         "AskUserQuestion".
 #
 # If session_id is omitted, it is read from stdin JSON (.session_id field).
 #
@@ -44,6 +49,14 @@ __trace "bell-config mode=$BELL_MODE"
 status="$1"
 session_id="$2"
 agent_id="${3-}"
+# "query" when notify.sh detected an AskUserQuestion permission request (see
+# the pending-set `input` case and the title-icon case below) — an
+# AskUserQuestion dialog needs more than a yes/no permission decision, so the
+# tab title uses ❓ instead of 🔔 to flag that. Menubar/state-file writes are
+# untouched: they key off effective_status, not this. Only notify.sh's
+# PermissionRequest call site ever sets this; every other caller leaves it
+# empty.
+kind="${4-}"
 # Capture stdin once when we need to read fields from it (session_id arg
 # omitted — the direct-hook path). Both session_id and the subagent agent_id
 # come from the same hook JSON. When session_id is passed as an arg (the
@@ -208,6 +221,19 @@ fi
 PENDING_BASE="${CCG_PENDING_DIR:-$HOME/.claude/.ccg/pending}"
 pending_dir="$PENDING_BASE/$session_id"
 _pending_nonempty() { [ -n "$(ls -A "$pending_dir" 2>/dev/null)" ]; }
+# True if ANY actor currently pending is an AskUserQuestion dialog (its
+# marker file's content is "query", written by the `input` case below). Used
+# to pick the ❓ vs 🔔 title icon — a plain permission prompt from one actor
+# must not mask an AskUserQuestion bell from a sibling actor, so this checks
+# the whole set, not just the current actor.
+_pending_has_query() {
+  local f
+  for f in "$pending_dir"/*; do
+    [ -f "$f" ] || continue
+    [ "$(cat "$f" 2>/dev/null)" = "query" ] && return 0
+  done
+  return 1
+}
 # Per-session logical-state file (also used for event-log dedup further down).
 # Hoisted here so the `working` branch can tell an active turn from a settled
 # one — see the stray-late-SubagentStop guard below.
@@ -240,8 +266,8 @@ case "$status" in
       unset _prebell
     fi
     mkdir -p "$pending_dir" 2>/dev/null
-    : > "$pending_dir/$actor" 2>/dev/null
-    __trace "pending add actor=$actor"
+    printf '%s' "$kind" > "$pending_dir/$actor" 2>/dev/null
+    __trace "pending add actor=$actor kind=${kind:-<none>}"
     ;;
   working)
     [ -d "$pending_dir" ] && rm -f "$pending_dir/$actor" 2>/dev/null
@@ -353,7 +379,17 @@ esac
 if [ "$status" != "query" ]; then
   case "$effective_status" in
     working)  title="⏳ $base_title" ;;
-    input)    title="🔔 $base_title" ;;
+    input)
+      # ❓ instead of 🔔 when any pending actor's bell is an AskUserQuestion
+      # dialog — tab title only, so the user knows this needs more than a
+      # permission decision. Checks the whole pending set (not just this
+      # actor) so a sibling's plain permission prompt can't mask it.
+      if _pending_has_query; then
+        title="❓ $base_title"
+      else
+        title="🔔 $base_title"
+      fi
+      ;;
     watching) title="👀 $base_title" ;;
     agents)   title="☕️ $base_title" ;;
     *)        title="$base_title" ;;

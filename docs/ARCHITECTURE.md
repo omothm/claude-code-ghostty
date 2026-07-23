@@ -13,6 +13,7 @@ environment variables, and the validator summary, see the root
 - [Agents-running state](#agents-running-state)
 - [Pending-input set (parallel-subagent bell hold)](#pending-input-set-parallel-subagent-bell-hold)
   - [Pre-bell state restore](#pre-bell-state-restore)
+  - [AskUserQuestion bell (❓ tab-title icon)](#askuserquestion-bell--tab-title-icon)
 - [Deferred completion notification (agents-gated Stop notification)](#deferred-completion-notification-agents-gated-stop-notification)
 - [Refresh gating](#refresh-gating)
 - [Event log dedup](#event-log-dedup)
@@ -275,6 +276,33 @@ the fully-quiet-session gap.
 `sweep-bell-state.sh`'s pending-dir hard-age pass globs `-type d`, which
 doesn't match this flat file, so it separately globs `-type f -name
 '*.prebell'` to reap one left behind by a crashed session.
+
+### AskUserQuestion bell (❓ tab-title icon)
+
+**Problem:** A plain permission prompt (Bash, Edit, Write, …) needs a single
+allow/deny decision. An `AskUserQuestion` tool call fires the *same*
+`PermissionRequest` hook event, but it's actually asking the user to pick
+from a set of choices — a bell that looks identical to "approve this write"
+undersells what's actually being asked.
+
+**Decision:** `notify.sh` inspects the `PermissionRequest` payload's
+`tool_name`. When it's exactly `"AskUserQuestion"`, it forwards `kind=query`
+as `tab-title.sh`'s 4th argument (`tab-title.sh <status> <session_id>
+<agent_id> <kind>`). `tab-title.sh` stores that `kind` as the *content* of
+the actor's marker file in the existing per-actor pending-input set (rather
+than just an empty sentinel file) and swaps the tab-title icon to ❓ instead
+of 🔔 whenever *any* actor currently in the pending set has `kind=query` —
+checking the whole set, not just the current actor, so a sibling's ordinary
+permission prompt can't mask an AskUserQuestion bell raised by a different
+actor in the same session (mirrors the multi-actor reasoning in the
+[pending-input set](#pending-input-set-parallel-subagent-bell-hold) above).
+
+**Scope — tab title only:** the bell-state file (what the SwiftBar menubar
+reads) and the event log both keep writing the plain `input` state
+unconditionally; `kind` is invisible to both. The menubar's 🔔 count and the
+dashboard's `input` metric are deliberately unaffected — this is a
+cosmetic distinguisher for glancing at the tab bar, not a new logical
+state, so it doesn't need a fifth entry in the state machine.
 
 ## Deferred completion notification (agents-gated Stop notification)
 

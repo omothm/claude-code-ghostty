@@ -288,7 +288,13 @@ are never suppressed even with a live transcript present), the deferred
 completion notification (`sweep-bell-state.sh`'s logical-state
 idle-refinement pass fires a `Background task completed` notification
 specifically on the `agents → idle` edge, and does not fire one on
-`watching → idle` or any other transition), and end-to-end
+`watching → idle` or any other transition), the AskUserQuestion ❓ tab-title
+icon (an `input` bell whose payload's `tool_name` is `AskUserQuestion` shows
+❓ instead of 🔔 in the tab title while the bell-state file/menubar keep the
+plain 🔔 `input` state unconditionally; a plain permission request never
+shows ❓; a sibling's plain permission prompt in the same pending set does
+not mask a different actor's ❓; the icon reverts to 🔔 once the query
+actor's bell clears but a plain sibling is still pending), and end-to-end
 `input`→state→plugin latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches
