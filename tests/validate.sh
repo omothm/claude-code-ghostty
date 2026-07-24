@@ -1322,6 +1322,25 @@ grep -qF "🔔" "$BELL_STATE_DIR/$QSID" \
   && ok "notify.sh: AskUserQuestion still writes 🔔 bell-state file via full call path" \
   || ng "notify.sh: bell-state file missing 🔔 (got: $(cat "$BELL_STATE_DIR/$QSID" 2>/dev/null))"
 
+# notify.sh's macOS notification title itself must also swap 🔔 -> ❓ for an
+# AskUserQuestion PermissionRequest, independent of the tab-title/bell-state
+# behavior above (which stays 🔔 unconditionally).
+QNOTIFY_BIN="$TMPROOT/bin-askq-notify"
+mkdir -p "$QNOTIFY_BIN"
+QTN_ARGS_FILE="$TMPROOT/tn-args-askq.txt"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "%s"\n' "$QTN_ARGS_FILE" > "$QNOTIFY_BIN/terminal-notifier"
+chmod +x "$QNOTIFY_BIN/terminal-notifier"
+_saved_path_askq="$PATH"
+export PATH="$QNOTIFY_BIN:$PATH"
+rm -rf "$CCG_PENDING_DIR/$QSID" "$BELL_STATE_DIR/$QSID"
+printf '{"session_id":"%s","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Pick one"}]}}\n' "$QSID" \
+  | "$HOOKS_DIR/notify.sh" '🔔' 'Needs your input' input >/dev/null 2>&1
+qtn=$(cat "$QTN_ARGS_FILE" 2>/dev/null)
+echo "$qtn" | grep -qF -- "-title ❓ Claude Code" \
+  && ok "notify.sh: AskUserQuestion swaps notification icon to ❓" \
+  || ng "notify.sh: AskUserQuestion notification icon not swapped to ❓ (got: $qtn)"
+export PATH="$_saved_path_askq"
+
 # A plain (non-AskUserQuestion) permission request must still show the
 # ordinary 🔔 tab title, not ❓.
 PLSID="plainq-$$"
@@ -1334,6 +1353,17 @@ grep -q 'title-set title="🔔 ' "$BELL_TRACE_LOG" \
 grep -q 'title-set title="❓ ' "$BELL_TRACE_LOG" \
   && ng "plain permission request incorrectly showed ❓" \
   || ok "plain permission request does not show ❓"
+
+# A plain permission request must also keep the ordinary 🔔 notification icon.
+export PATH="$QNOTIFY_BIN:$PATH"
+: > "$QTN_ARGS_FILE"
+printf '{"session_id":"%s"}\n' "$PLSID" \
+  | "$HOOKS_DIR/notify.sh" '🔔' 'Needs your input' input >/dev/null 2>&1
+qtn2=$(cat "$QTN_ARGS_FILE" 2>/dev/null)
+echo "$qtn2" | grep -qF -- "-title 🔔 Claude Code" \
+  && ok "notify.sh: plain permission request keeps 🔔 notification icon" \
+  || ng "notify.sh: plain permission request icon wrongly changed (got: $qtn2)"
+export PATH="$_saved_path_askq"
 
 # Mixed pending set: a sibling's plain permission prompt must not mask an
 # AskUserQuestion bell raised by a different actor in the same session.

@@ -86,7 +86,12 @@ cwd=$(echo "$input" | jq -r '.cwd // "unknown"' 2>/dev/null)
 # menubar/state-file behavior is unchanged.
 tool_name=$(echo "$input" | jq -r '.tool_name // empty' 2>/dev/null)
 kind=""
-[ "$tool_name" = "AskUserQuestion" ] && kind="query"
+if [ "$tool_name" = "AskUserQuestion" ]; then
+  kind="query"
+  # Mirror tab-title.sh's ❓-for-query swap in the macOS notification itself
+  # (bell-state file / menubar icon stay 🔔 unconditionally per tab-title.sh).
+  icon="❓"
+fi
 
 # Gate=agents: suppress this notification if a background Agent/Task/Workflow
 # subagent is still live for this session. Mirrors tab-title.sh's
