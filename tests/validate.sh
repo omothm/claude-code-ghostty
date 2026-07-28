@@ -2012,6 +2012,63 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "dashboard event ordering (writer-precision + exact-tie regression)"
+
+# Root cause of a real dashboard/menubar count mismatch: tab-title.sh stamps
+# events.jsonl with fractional-second ts (gdate %s.%3N), but sweep-bell-
+# state.sh's logical-state correction pass (the one that emits the true
+# agents/watching/idle correction) used to stamp with bare-integer ts
+# (date +%s). A same-second pair then numerically sorted with the LATER-
+# written but integer-stamped correction (e.g. 1785244323) landing BEFORE
+# the earlier fractional event (e.g. 1785244323.192) — no stable secondary
+# sort can undo that, since the ts values genuinely differ. The only real
+# fix is both writers using matching precision, so once that holds, write
+# order and numeric ts order agree. Guard the writer directly.
+if grep -q '_now_frac=\$(gdate' "$HOOKS_DIR/sweep-bell-state.sh" \
+  && grep -q -- '--arg ts "\$_now_frac"' "$HOOKS_DIR/sweep-bell-state.sh"; then
+  ok "sweep-bell-state.sh: logical-state correction pass uses fractional-second ts"
+else
+  ng "sweep-bell-state.sh: logical-state correction pass still stamps events.jsonl with integer-only ts"
+fi
+
+# Separately, parseEvents should still break literal ts ties (two events
+# with the IDENTICAL numeric ts, e.g. a fast back-to-back append within the
+# same millisecond) by file-append order rather than leaving the outcome to
+# an unstable/engine-dependent sort — cheap insurance once precision is
+# aligned, distinct from the precision-mismatch case above.
+if command -v node >/dev/null 2>&1 && [ -f "$DASHBOARD_PATH" ]; then
+  PARSE_FN=$(awk '/\/\/ <parseEvents>/{f=1;next} /\/\/ <\/parseEvents>/{f=0} f' "$DASHBOARD_PATH")
+  if [ -z "$PARSE_FN" ]; then
+    ng "could not extract parseEvents from $DASHBOARD_PATH (markers missing?)"
+  else
+    PARSE_JS="$TMPROOT/parse.js"
+    {
+      printf '%s\n' "$PARSE_FN"
+      cat <<'NODE'
+const text = [
+  '{"ts":1785244323.192,"session_id":"s","state":"idle","title":"t","cwd":"c"}',
+  '{"ts":1785244323.192,"session_id":"s","state":"agents","title":"t","cwd":"c"}',
+].join('\n');
+const evs = parseEvents(text);
+let bad = 0;
+if (evs.length !== 2) { bad++; console.log(`FAIL length: got ${evs.length}`); }
+if (evs[evs.length - 1].state !== 'agents') {
+  bad++; console.log(`FAIL last state: want agents, got ${evs[evs.length-1] && evs[evs.length-1].state} (order: ${evs.map(e=>e.state).join(',')})`);
+}
+process.exit(bad);
+NODE
+    } > "$PARSE_JS"
+    if node_out=$(node "$PARSE_JS" 2>&1); then
+      ok "parseEvents: exact-tie ts resolved by file-append order"
+    else
+      ng "parseEvents exact-tie mismatch: $node_out"
+    fi
+  fi
+else
+  skip "dashboard event ordering (node or dashboard.html absent)"
+fi
+
+# ---------------------------------------------------------------------------
 section "dashboard straggler handling (end is terminal until resume)"
 
 # `end` must be terminal: a working/input/watching event arriving after a

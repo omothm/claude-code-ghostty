@@ -114,6 +114,13 @@ done < <(find "$STATE_DIR" -type f 2>/dev/null)
 # trailing-span cap (TRAILING_CAP_SEC in spanFor) — emitting at `now` would
 # retroactively inflate the dead session's working-time, so it must not be used.
 _now=$(date +%s)
+# Fractional-second variant for events.jsonl appends, matching tab-title.sh's
+# own timestamp precision (gdate +%s.%3N). A same-second correction stamped
+# with a bare integer would sort BEFORE the fractional event it's correcting
+# in the dashboard's numeric ts sort, inverting the true order and making the
+# stale state look current. Falls back to the integer _now (no fractional
+# part) if gdate is unavailable, same as tab-title.sh.
+_now_frac=$(gdate +%s.%3N 2>/dev/null || echo "$_now")
 if [ -d "$SESSION_STATE_DIR" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
@@ -136,7 +143,7 @@ if [ -d "$SESSION_STATE_DIR" ]; then
     # Synthetic `end` at last-transition + cap (not now). mtime == last logged ts.
     mtime=$(stat -f %m "$f" 2>/dev/null || echo "$_now")
     ts=$((mtime + 1800))
-    [ "$ts" -gt "$_now" ] && ts="$_now"
+    [ "$ts" -gt "$_now" ] && ts="$_now_frac"
 
     # Title/cwd carry no span for an `end` event and aren't displayed for ended
     # sessions; a placeholder is sufficient. Use the bell-state title if one
@@ -299,7 +306,7 @@ if [ -d "$SESSION_STATE_DIR" ]; then
 
     title="(reconciled)"
     [ -f "$STATE_DIR/$sid" ] && title=$(sed -n '1p' "$STATE_DIR/$sid" 2>/dev/null)
-    jq -nc --arg ts "$_now" --arg sid "$sid" --arg state "$new_st" --arg title "$title" \
+    jq -nc --arg ts "$_now_frac" --arg sid "$sid" --arg state "$new_st" --arg title "$title" \
       '{ts: ($ts|tonumber), session_id: $sid, state: $state, title: $title, cwd: ""}' \
       >> "$EVENT_LOG" 2>/dev/null
     printf '%s\n%s\n' "$new_st" "$spid" > "$f"

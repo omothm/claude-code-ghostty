@@ -314,21 +314,30 @@ async function fetchEvents() {
   return await resp.text();
 }
 
+// <parseEvents>
 function parseEvents(text) {
   const out = [];
+  let seq = 0;
   for (const line of text.split('\n')) {
     const t = line.trim();
     if (!t) continue;
     try {
       const e = JSON.parse(t);
       if (typeof e.ts === 'number' && typeof e.session_id === 'string' && typeof e.state === 'string') {
+        e._seq = seq++;
         out.push(e);
       }
     } catch (_) { /* skip malformed */ }
   }
-  out.sort((a, b) => a.ts - b.ts);
+  // Secondary key = file append order. Two writers (tab-title.sh, sweep-
+  // bell-state.sh) can log same-second events at different ts precision;
+  // without this tiebreak a same-second pair sorts by ts alone and can
+  // invert true order (see git history for the idle/agents miscount this
+  // caused).
+  out.sort((a, b) => a.ts - b.ts || a._seq - b._seq);
   return out;
 }
+// </parseEvents>
 
 // `end` is terminal: once a session ends, any later working/input/watching
 // event is a straggler (a SubagentStop/PostToolUse firing during teardown,
