@@ -206,15 +206,19 @@ if [ "$BELL_MODE" != "always-on" ]; then
 
   while IFS=$'\t' read -r mtime title; do
     [ -z "$title" ] && continue
-    # Strip leading 🔔 and swap " | " so it doesn't collide with SwiftBar's
-    # param separator.
-    display="${title#"🔔 "}"
-    display="${display// | / — }"
+    # Strip leading 🔔 so the AX contains-match still hits when tab-title.sh
+    # has swapped the live tab title to ❓ (AskUserQuestion) — the bell-state
+    # file's icon stays 🔔 unconditionally, so matching on the full title
+    # would never find the tab. Mirrors notify.sh's icon-agnostic match_key.
+    stripped="${title#"🔔 "}"
+    # Swap " | " so the display text doesn't collide with SwiftBar's param
+    # separator.
+    display="${stripped// | / — }"
     ts=$(_fmt_mtime "$mtime")
     # ansi=true renders the trailing timestamp in a muted gray; it conflicts
     # with SwiftBar's `symbolize` but not with a co-existing `sfimage=`.
     printf '%s | shell="%s" param1="%s" terminal=false ansi=true\n' \
-      "${display} $(printf '\033[38;5;245m')— ${ts}$(printf '\033[0m')" "$FOCUS" "$title"
+      "${display} $(printf '\033[38;5;245m')— ${ts}$(printf '\033[0m')" "$FOCUS" "$stripped"
   done < <(printf '%s\n' "$bell_titles" | _sort_by_mtime)
 
   _emit_dashboard_entry
@@ -302,8 +306,13 @@ while IFS= read -r f; do
   display="${display} $(printf '\033[38;5;245m')— ${ts}$(printf '\033[0m')"
   case "$st" in
     input)
+      # Strip leading 🔔 from the match key: the bell-state file keeps 🔔
+      # unconditionally even when tab-title.sh has swapped the live tab
+      # title to ❓ (AskUserQuestion), so matching on the full icon-prefixed
+      # title would never find the tab. Mirrors notify.sh's match_key.
+      match_title="${title#"🔔 "}"
       input_entries="${input_entries}${mtime}"$'\t'"$(printf '%s | sfimage=bell.fill shell="%s" param1="%s" terminal=false ansi=true' \
-        "$display" "$FOCUS" "$title")"$'\n' ;;
+        "$display" "$FOCUS" "$match_title")"$'\n' ;;
     working)
       working_entries="${working_entries}${mtime}"$'\t'"$(printf '%s | sfimage=hourglass shell="%s" param1="%s" terminal=false ansi=true' \
         "$display" "$FOCUS" "$title")"$'\n' ;;

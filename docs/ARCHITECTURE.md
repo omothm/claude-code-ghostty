@@ -304,6 +304,15 @@ dashboard's `input` metric are deliberately unaffected — this is a
 cosmetic distinguisher for glancing at the tab bar, not a new logical
 state, so it doesn't need a fifth entry in the state machine.
 
+**Menubar-click corollary:** because the bell-state file's icon never
+changes, `ghostty-bells.30s.sh` strips the leading `🔔 ` before using the
+title as `focus-ghostty-tab.sh`'s AX contains-match key (both the
+notifs-mode dropdown loop and the always-on `input` case) — matching
+`notify.sh`'s `match_key`, which was already icon-agnostic. Without the
+strip, a menubar click on a session whose live tab title had been swapped
+to ❓ would never match, because the AX title reads `❓ …` while the stale
+`param1` string still read `🔔 …`. See [Plugin display swap](#plugin-display-swap---).
+
 ## Deferred completion notification (agents-gated Stop notification)
 
 **Problem:** The `Stop` hook's "Task completed" `notify.sh` call fires
@@ -493,8 +502,11 @@ which are legitimately live.
 
 **Decision:** State file titles contain ` | ` (from `Claude Code |
 <dir>`). SwiftBar uses ` | ` as its parameter separator, so the plugin
-swaps to ` — ` in the visible display text. `param1=` retains the original
-🔔-prefixed title for `focus-ghostty-tab.sh`'s contains-match.
+swaps to ` — ` in the visible display text. `param1=` strips the leading
+`🔔 ` and passes the rest of the title as the icon-agnostic match key for
+`focus-ghostty-tab.sh`'s contains-match — see the [AskUserQuestion
+corollary](#askuserquestion-bell--tab-title-icon) for why the icon can't
+be included.
 
 ## Dashboard north-star metric: "Fleet stalled on you"
 

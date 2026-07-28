@@ -405,7 +405,8 @@ if [ "$plugin" = "1" ]; then
   echo "$out" | grep -q '^:bell.fill: 2' && ok "emits SF Symbol + correct count" || ng "missing or wrong count: $out"
   echo "$out" | grep -q 'plug-alpha' && ok "entry for plug-alpha present" || ng "missing plug-alpha"
   echo "$out" | grep -q 'plug-beta' && ok "entry for plug-beta present" || ng "missing plug-beta"
-  echo "$out" | grep -q 'param1="🔔 Claude Code | plug-alpha' && ok "param1 preserves full 🔔 title" || ng "param1 missing 🔔"
+  echo "$out" | grep -q 'param1="🔔 Claude Code | plug-alpha' && ng "param1 still has 🔔 (breaks AX match after ❓ swap)" || ok "param1 strips 🔔 (icon-agnostic match key)"
+  echo "$out" | grep -q 'param1="Claude Code | plug-alpha' && ok "param1 preserves title minus icon" || ng "param1 missing stripped title"
   # Stored title contains " | "; display must swap it to " — " so it doesn't
   # collide with SwiftBar's own " | " parameter separator.
   echo "$out" | grep -q 'Claude Code — plug-alpha' && ok "display swaps ' | ' to ' — '" || ng "display did not swap ' | ' to ' — '"
@@ -1464,6 +1465,25 @@ rm -rf "$CCG_PENDING_DIR/$QSID" "$CCG_PENDING_DIR/$PLSID" "$CCG_PENDING_DIR/$MQS
        "$BELL_STATE_DIR/$QSID" "$BELL_STATE_DIR/$PLSID" "$BELL_STATE_DIR/$MQSID"
 : > "$BELL_CONFIG"
 unset BELL_TRACE
+
+# Plugin param1 must be icon-stripped so menubar click still focuses the tab
+# after tab-title.sh has swapped the live ANSI title from 🔔 to ❓. The
+# bell-state file always writes 🔔 unconditionally; if param1 kept the full
+# "🔔 ..." string the AX contains-match would never find "❓ ...".
+if [ "$plugin" = "1" ]; then
+  pQSID="askq-plugin-$$"
+  write_sf "$pQSID" "🔔 Claude Code | askq-test ($pQSID)"
+  pqout=$(bash "$PLUGIN_PATH" 2>&1)
+  echo "$pqout" | grep -q 'param1="🔔' \
+    && ng "AskUserQuestion plugin: param1 still includes 🔔 icon (breaks ❓ AX match)" \
+    || ok "AskUserQuestion plugin (notifs): param1 does not include 🔔 icon"
+  echo "$pqout" | grep -q 'param1="Claude Code | askq-test' \
+    && ok "AskUserQuestion plugin (notifs): param1 preserves rest of title" \
+    || ng "AskUserQuestion plugin (notifs): param1 missing title body"
+  rm -f "$BELL_STATE_DIR/$pQSID"
+else
+  skip "AskUserQuestion plugin param1 tests (plugin not found)"
+fi
 
 # ---------------------------------------------------------------------------
 section "stray working after turn settled (subagent and main-after-end)"
