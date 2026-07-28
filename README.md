@@ -59,7 +59,7 @@ open -a SwiftBar  # pick ~/swiftbar as the plugins directory on first launch
 ./install.sh      # deploys the plugin
 ```
 
-The menubar icon shows live session counts. Clicking any entry focuses that tab. Three modes control when the icon appears:
+The menubar icon shows live session counts. Clicking any entry focuses that tab. Each entry shows a muted last-update time, and within each section the longest-idle tab is listed first — so the session you're most likely to have forgotten about is always at the top. Three modes control when the icon appears:
 
 | Mode | Behavior |
 |---|---|

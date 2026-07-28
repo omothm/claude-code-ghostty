@@ -66,6 +66,20 @@ _read_state_files() {
   done
 }
 
+# Formats a state file's mtime as a time-only string (e.g. "3:14 PM") so each
+# dropdown entry can show when it last transitioned, without opening the
+# dashboard to find a stale tab.
+_fmt_mtime() {
+  date -r "$1" "+%-I:%M %p" 2>/dev/null || date -r "$1" "+%H:%M" 2>/dev/null
+}
+
+# stdin: "<epoch>\t...\n" entries (one bucket's worth, tab-delimited, epoch
+# first column). Sorts oldest-update-first so the tab that's been sitting
+# longest in a section surfaces at the top of it.
+_sort_by_mtime() {
+  sort -t "$(printf '\t')" -k1,1n
+}
+
 # Emit the dashboard control entry. Toggles between "Open dashboard" (which
 # starts the server and opens the browser) and "Stop dashboard server" based
 # on whether dashboard-server.sh reports a live PID.
@@ -161,26 +175,24 @@ _file_status() {
 # notifs mode (default): show bell count, list only waiting sessions
 # -------------------------------------------------------------------------
 if [ "$BELL_MODE" != "always-on" ]; then
-  titles=""
+  # Only bell/input state files get a dropdown entry in notifs mode. Collect
+  # "<mtime>\t<title>" per file so entries can later be sorted oldest-first
+  # and each line can show when it last transitioned.
+  bell_titles=""
   if [ -d "$STATE_DIR" ]; then
     for f in "$STATE_DIR"/*; do
       [ -f "$f" ] || continue
       line=$(head -n1 "$f" 2>/dev/null)
-      [ -n "$line" ] && titles="${titles}${line}"$'\n'
+      case "$line" in
+        "🔔 "*)
+          mtime=$(stat -f %m "$f" 2>/dev/null || echo 0)
+          bell_titles="${bell_titles}${mtime}"$'\t'"${line}"$'\n'
+          ;;
+      esac
     done
-    titles="${titles%$'\n'}"
+    bell_titles="${bell_titles%$'\n'}"
   fi
-  __trace "state-read bytes=${#titles}"
-
-  # Only show entries that are in bell/input state.
-  bell_titles=""
-  while IFS= read -r t; do
-    [ -z "$t" ] && continue
-    case "$t" in
-      "🔔 "*) bell_titles="${bell_titles}${t}"$'\n' ;;
-    esac
-  done <<< "$titles"
-  bell_titles="${bell_titles%$'\n'}"
+  __trace "state-read bytes=${#bell_titles}"
 
   if [ -z "$bell_titles" ]; then
     __trace "result=hidden (zero bells)"
@@ -192,14 +204,18 @@ if [ "$BELL_MODE" != "always-on" ]; then
   echo ":bell.fill: ${count}"
   echo "---"
 
-  while IFS= read -r title; do
+  while IFS=$'\t' read -r mtime title; do
     [ -z "$title" ] && continue
     # Strip leading 🔔 and swap " | " so it doesn't collide with SwiftBar's
     # param separator.
     display="${title#"🔔 "}"
     display="${display// | / — }"
-    printf '%s | shell="%s" param1="%s" terminal=false\n' "$display" "$FOCUS" "$title"
-  done <<< "$bell_titles"
+    ts=$(_fmt_mtime "$mtime")
+    # ansi=true renders the trailing timestamp in a muted gray; it conflicts
+    # with SwiftBar's `symbolize` but not with a co-existing `sfimage=`.
+    printf '%s | shell="%s" param1="%s" terminal=false ansi=true\n' \
+      "${display} $(printf '\033[38;5;245m')— ${ts}$(printf '\033[0m')" "$FOCUS" "$title"
+  done < <(printf '%s\n' "$bell_titles" | _sort_by_mtime)
 
   _emit_dashboard_entry
 
@@ -256,7 +272,9 @@ header="${header}:zzz: ${n_idle}"
 echo "${header} | font=.AppleSystemUIFontBold"
 echo "---"
 
-# Second pass: collect entries by status group, then emit with section headers.
+# Second pass: collect entries by status group (each line prefixed with its
+# file's mtime + a tab, so the group can be sorted oldest-first just before
+# printing), then emit with section headers.
 input_entries=""; working_entries=""; agents_entries=""; watching_entries=""; idle_entries=""
 while IFS= read -r f; do
   st=$(_file_status "$f")
@@ -277,21 +295,26 @@ while IFS= read -r f; do
   esac
   # Swap " | " → " — " so it doesn't collide with SwiftBar's param separator.
   display="${dir_part// | / — }"
+  mtime=$(stat -f %m "$f" 2>/dev/null || echo 0)
+  ts=$(_fmt_mtime "$mtime")
+  # ansi=true renders the trailing timestamp in a muted gray; it conflicts
+  # with SwiftBar's `symbolize` but not with a co-existing `sfimage=`.
+  display="${display} $(printf '\033[38;5;245m')— ${ts}$(printf '\033[0m')"
   case "$st" in
     input)
-      input_entries="${input_entries}$(printf '%s | sfimage=bell.fill shell="%s" param1="%s" terminal=false' \
+      input_entries="${input_entries}${mtime}"$'\t'"$(printf '%s | sfimage=bell.fill shell="%s" param1="%s" terminal=false ansi=true' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     working)
-      working_entries="${working_entries}$(printf '%s | sfimage=hourglass shell="%s" param1="%s" terminal=false' \
+      working_entries="${working_entries}${mtime}"$'\t'"$(printf '%s | sfimage=hourglass shell="%s" param1="%s" terminal=false ansi=true' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     agents)
-      agents_entries="${agents_entries}$(printf '%s | sfimage=cup.and.heat.waves.fill shell="%s" param1="%s" terminal=false' \
+      agents_entries="${agents_entries}${mtime}"$'\t'"$(printf '%s | sfimage=cup.and.heat.waves.fill shell="%s" param1="%s" terminal=false ansi=true' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     watching)
-      watching_entries="${watching_entries}$(printf '%s | sfimage=binoculars shell="%s" param1="%s" terminal=false' \
+      watching_entries="${watching_entries}${mtime}"$'\t'"$(printf '%s | sfimage=binoculars shell="%s" param1="%s" terminal=false ansi=true' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
     *)
-      idle_entries="${idle_entries}$(printf '%s | sfimage=zzz shell="%s" param1="%s" terminal=false' \
+      idle_entries="${idle_entries}${mtime}"$'\t'"$(printf '%s | sfimage=zzz shell="%s" param1="%s" terminal=false ansi=true' \
         "$display" "$FOCUS" "$title")"$'\n' ;;
   esac
 done < <(_read_state_files)
@@ -299,31 +322,31 @@ done < <(_read_state_files)
 need_sep=0
 if [ -n "$input_entries" ]; then
   echo "Awaiting input | size=11 color=gray"
-  printf '%s' "$input_entries"
+  printf '%s' "$input_entries" | _sort_by_mtime | cut -f2-
   need_sep=1
 fi
 if [ -n "$working_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
   echo "Working | size=11 color=gray"
-  printf '%s' "$working_entries"
+  printf '%s' "$working_entries" | _sort_by_mtime | cut -f2-
   need_sep=1
 fi
 if [ -n "$agents_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
   echo "Agents running | size=11 color=gray"
-  printf '%s' "$agents_entries"
+  printf '%s' "$agents_entries" | _sort_by_mtime | cut -f2-
   need_sep=1
 fi
 if [ -n "$watching_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
   echo "Watching | size=11 color=gray"
-  printf '%s' "$watching_entries"
+  printf '%s' "$watching_entries" | _sort_by_mtime | cut -f2-
   need_sep=1
 fi
 if [ -n "$idle_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
   echo "Idle | size=11 color=gray"
-  printf '%s' "$idle_entries"
+  printf '%s' "$idle_entries" | _sort_by_mtime | cut -f2-
 fi
 
 _emit_dashboard_entry

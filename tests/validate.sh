@@ -67,6 +67,22 @@ touch "$BELL_TRACE_LOG"
 # Start with an empty (notifs-default) config.
 : > "$BELL_CONFIG"
 
+# Global terminal-notifier stub: several code paths exercised throughout this
+# suite (sweep-bell-state.sh's notif-expiry pass on every invocation, its
+# idle-refinement "Background task completed" notification, notify.sh calls
+# made before a section installs its own PATH-shadowing stub) would otherwise
+# shell out to the REAL terminal-notifier — flooding the OS with actual
+# notification banners and needlessly touching the live notification database
+# on every run. Sections that need to inspect the exact argv still prepend
+# their own stub dir onto PATH, which shadows this one, so their assertions
+# are unaffected. This just catches everything that would otherwise fall
+# through to the real binary.
+GLOBAL_NOTIFY_BIN="$TMPROOT/bin-global-notify"
+mkdir -p "$GLOBAL_NOTIFY_BIN"
+printf '#!/bin/bash\nexit 0\n' > "$GLOBAL_NOTIFY_BIN/terminal-notifier"
+chmod +x "$GLOBAL_NOTIFY_BIN/terminal-notifier"
+export PATH="$GLOBAL_NOTIFY_BIN:$PATH"
+
 if [ -t 1 ]; then
   C_OK=$'\e[32m'; C_NG=$'\e[31m'; C_SK=$'\e[33m'; C_B=$'\e[1m'; C_R=$'\e[0m'
 else
@@ -401,6 +417,66 @@ if [ "$plugin" = "1" ]; then
   [ "$rc" = "0" ] && [ -z "$out" ] && ok "empty state dir => icon hidden (no stdout, exit 0)" || ng "plugin output when empty: rc=$rc out=\"$out\""
 else
   skip "plugin output tests"
+fi
+
+# ---------------------------------------------------------------------------
+section "Plugin output: last-update timestamp + oldest-first sort"
+
+if [ "$plugin" = "1" ]; then
+  write_sf "tsNewer" "🔔 Claude Code | ts-newer (tsN1)"
+  age_file "1 minute ago" "$BELL_STATE_DIR/tsNewer"
+  write_sf "tsOlder" "🔔 Claude Code | ts-older (tsO1)"
+  age_file "5 minutes ago" "$BELL_STATE_DIR/tsOlder"
+
+  out=$(bash "$PLUGIN_PATH" 2>&1)
+
+  expected_older_ts=$(date -r "$(stat -f %m "$BELL_STATE_DIR/tsOlder")" "+%-I:%M %p" 2>/dev/null)
+  expected_newer_ts=$(date -r "$(stat -f %m "$BELL_STATE_DIR/tsNewer")" "+%-I:%M %p" 2>/dev/null)
+
+  echo "$out" | grep -q "ts-older.*${expected_older_ts}" \
+    && ok "notifs: entry shows its own last-update time" \
+    || ng "notifs: missing/wrong timestamp for ts-older: $out"
+  echo "$out" | grep -q 'ansi=true' \
+    && ok "notifs: entries opt into ansi=true for muted timestamp color" \
+    || ng "notifs: ansi=true missing: $out"
+  echo "$out" | grep -q $'\033\[38;5;245m' \
+    && ok "notifs: timestamp uses muted gray ANSI color" \
+    || ng "notifs: muted gray ANSI escape missing"
+
+  older_line=$(echo "$out" | grep -n 'ts-older' | head -n1 | cut -d: -f1)
+  newer_line=$(echo "$out" | grep -n 'ts-newer' | head -n1 | cut -d: -f1)
+  if [ -n "$older_line" ] && [ -n "$newer_line" ] && [ "$older_line" -lt "$newer_line" ]; then
+    ok "notifs: oldest-updated entry sorts first"
+  else
+    ng "notifs: sort order wrong (older=$older_line newer=$newer_line)"
+  fi
+
+  rm -f "$BELL_STATE_DIR/tsNewer" "$BELL_STATE_DIR/tsOlder"
+
+  # Same check in always-on mode, within a single section (Working).
+  printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+  printf '⏳ Claude Code | ao-ts-newer (aoTsN1)\nworking\n' > "$BELL_STATE_DIR/aoTsNewer"
+  age_file "1 minute ago" "$BELL_STATE_DIR/aoTsNewer"
+  printf '⏳ Claude Code | ao-ts-older (aoTsO1)\nworking\n' > "$BELL_STATE_DIR/aoTsOlder"
+  age_file "5 minutes ago" "$BELL_STATE_DIR/aoTsOlder"
+
+  out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+
+  older_line=$(echo "$out" | grep -n 'ao-ts-older' | head -n1 | cut -d: -f1)
+  newer_line=$(echo "$out" | grep -n 'ao-ts-newer' | head -n1 | cut -d: -f1)
+  if [ -n "$older_line" ] && [ -n "$newer_line" ] && [ "$older_line" -lt "$newer_line" ]; then
+    ok "always-on: oldest-updated entry sorts first within its section"
+  else
+    ng "always-on: sort order wrong within section (older=$older_line newer=$newer_line)"
+  fi
+  echo "$out" | grep -q 'ao-ts-older.*ansi=true' \
+    && ok "always-on: entry shows muted timestamp with ansi=true" \
+    || ng "always-on: ansi=true/timestamp missing: $out"
+
+  rm -f "$BELL_STATE_DIR/aoTsNewer" "$BELL_STATE_DIR/aoTsOlder"
+  : > "$BELL_CONFIG"
+else
+  skip "plugin output: last-update timestamp + sort tests"
 fi
 
 # ---------------------------------------------------------------------------
