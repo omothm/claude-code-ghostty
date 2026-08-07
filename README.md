@@ -73,6 +73,54 @@ Change the mode by editing `~/.claude/.ccg/config.json`:
 { "mode": "notifs" }
 ```
 
+### 5h-limit pace indicator
+
+The menubar can show a live ahead/behind indicator for Anthropic's 5-hour rate limit — how far you are from the rate at which you'd need to consume to exhaust the window exactly at reset time.
+
+**To enable:** click **Show 5h Limit Ahead/Behind** in the SwiftBar dropdown (checkbox, unchecked by default). Or set `"show5hPace": true` in `~/.claude/.ccg/config.json`.
+
+The indicator appears at the very right of the existing counters in the menubar header (always-on mode only). Example output:
+
+| Display | Meaning |
+|---|---|
+| `45%←12m🔥` | 45% used, but you're **12 minutes ahead** of linear pace — consuming slower than the clock (🔥 calls attention) |
+| `45%→8m` | 45% used, **8 minutes behind** — consuming faster than the clock (normal cruising case) |
+| `45%` | Exactly on pace |
+
+🔥 marks the "ahead of pace" case, where you have headroom: you could consume more before the reset and still stay under the limit.
+
+**Data source:** the plugin reads `~/.claude/.ccg/rate-limits-cache.json` (configurable via `"rateLimitsCacheFile"` in `config.json`). This file must be written by your statusline renderer or any other hook that receives the Claude Code session JSON. The plugin ignores absent values gracefully — if the file doesn't exist or the key is missing, the indicator is simply not shown.
+
+The cache file must contain at minimum:
+
+```json
+{
+  "five_hour": {
+    "used_percentage": 45.2,
+    "resets_at": 1754321000
+  }
+}
+```
+
+`resets_at` is a Unix timestamp (seconds). `used_percentage` is 0–100.
+
+**Example: writing the cache from a statusline command** (add to your `~/.claude/statusline-command.sh`):
+
+```sh
+# Write 5h rate-limit data for the SwiftBar pace indicator
+five_h_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
+five_h_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
+if [ -n "$five_h_pct" ] && [ -n "$five_h_reset" ]; then
+  jq -cn \
+    --argjson pct "$five_h_pct" \
+    --argjson reset "$five_h_reset" \
+    '{five_hour:{used_percentage:$pct,resets_at:$reset}}' \
+    > "$HOME/.claude/.ccg/rate-limits-cache.json" 2>/dev/null
+fi
+```
+
+`input` here is the JSON Claude Code writes to your statusline command's stdin (i.e. `input=$(cat)` at the top of the script).
+
 ## Optional: metrics dashboard
 
 The hooks log every state transition to `~/.claude/.ccg/events.jsonl`. A self-contained dashboard reads this log and shows live and last-24h metrics: sessions active, time in each state, average response latency, and peak concurrency.

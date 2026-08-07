@@ -30,16 +30,123 @@ FOCUS="$HOOKS_DIR/focus-ghostty-tab.sh"
 STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 
 # Load config from JSON (~/.claude/.ccg/config.json).
-# Only .mode is read; icon appearance is fixed and not configurable.
+# .mode controls dropdown behavior (see below). .show5hPace and
+# .rateLimitsCacheFile control the opt-in 5h-limit pace indicator (see
+# "5h-limit pace indicator" below) — icon appearance itself is fixed and not
+# configurable.
 BELL_MODE="notifs"
+SHOW_5H_PACE="false"
+RATE_CACHE_FILE="$HOME/.claude/.ccg/rate-limits-cache.json"
 BELL_CONFIG="${BELL_CONFIG:-$HOME/.claude/.ccg/config.json}"
 if [ -f "$BELL_CONFIG" ]; then
   _m=""
   IFS= read -r _m < <(jq -r '.mode // "notifs"' "$BELL_CONFIG" 2>/dev/null)
   [ -n "$_m" ] && BELL_MODE="$_m"
-  unset _m
+  _p=""
+  IFS= read -r _p < <(jq -r '.show5hPace // false' "$BELL_CONFIG" 2>/dev/null)
+  [ -n "$_p" ] && SHOW_5H_PACE="$_p"
+  _c=""
+  IFS= read -r _c < <(jq -r '.rateLimitsCacheFile // empty' "$BELL_CONFIG" 2>/dev/null)
+  [ -n "$_c" ] && RATE_CACHE_FILE="${_c/#\~/$HOME}"
+  unset _m _p _c
 fi
-__trace "mode=$BELL_MODE"
+__trace "mode=$BELL_MODE show5hPace=$SHOW_5H_PACE"
+
+# ─── 5h-limit pace indicator ─────────────────────────────────────────────────
+#
+# Reads ~/.claude/.ccg/rate-limits-cache.json (overridable via config key
+# rateLimitsCacheFile). Expected shape:
+#   { "fetched_at": <unix-ts>,
+#     "five_hour":  { "used_percentage": <0-100>, "resets_at": <unix-ts> } }
+# Absent file = feature invisible. Key "five_hour" absent = no data (no output).
+#
+# Computes the same ahead/behind pace logic as maat-usage.sh:
+#   diff = pct * window / 100  −  elapsed
+#        = pct * window / 100  −  (window − remaining)
+# Positive diff = ahead (consuming slower than the clock — 🔥 emoji alert).
+# Negative diff = behind (consuming faster than the clock).
+#
+# Formats seconds as a natural-unit duration (ceiled to the smallest unit
+# shown), matching maat-usage.sh's format_remaining. Returns empty when no
+# data, the window has elapsed, or the feature is off.
+_pace_format_remaining() {
+  local secs="$1"
+  (( secs < 0 )) && secs=0
+  local total_min=$(( (secs + 59) / 60 ))
+  if (( total_min < 60 )); then
+    printf "%dm" "$total_min"
+  elif (( total_min < 1440 )); then
+    local h=$(( total_min / 60 )) m=$(( total_min % 60 ))
+    if (( m > 0 )); then printf "%dh%dm" "$h" "$m"; else printf "%dh" "$h"; fi
+  else
+    local d=$(( total_min / 1440 )) rem=$(( total_min % 1440 ))
+    local h=$(( rem / 60 )) m=$(( rem % 60 ))
+    (( m > 0 )) && h=$(( h + 1 ))
+    if (( h >= 24 )); then d=$(( d + 1 )); h=0; fi
+    if (( h > 0 )); then printf "%dd%dh" "$d" "$h"; else printf "%dd" "$d"; fi
+  fi
+}
+
+# Returns the formatted pace segment string, or empty string when unavailable.
+# $1 = five_h_pct  (number, 0-100)
+# $2 = resets_at   (unix timestamp)
+# $3 = now         (unix timestamp)
+_compute_pace_segment() {
+  local pct="$1" resets_at="$2" now="$3"
+  local window=18000   # 5 hours in seconds
+  local remaining=$(( resets_at - now ))
+  (( remaining <= 0 )) && return
+  # bc: scale=0 truncates (integer division); format_remaining then ceils
+  local diff
+  diff=$(echo "scale=0; $pct * $window / 100 - ($window - $remaining)" | bc 2>/dev/null)
+  [ -z "$diff" ] && return
+  local pct_int
+  pct_int=$(printf "%.0f" "$pct" 2>/dev/null || echo "$pct")
+  if (( diff > 0 )); then
+    # Ahead of pace: consuming slower than clock — good. Replace icon with 🔥
+    # (no other color/markup needed — emoji grabs the eye against any bg).
+    local fmt
+    fmt=$(_pace_format_remaining "$diff")
+    printf '🔥%s%%←%s' "$pct_int" "$fmt"
+  elif (( diff < 0 )); then
+    # Behind pace: consuming faster than clock — everyday case, no alarm.
+    # :speedometer: icon provides visual separation from the adjacent counters.
+    local abs=$(( -diff ))
+    local fmt
+    fmt=$(_pace_format_remaining "$abs")
+    printf ':speedometer:%s%%→%s' "$pct_int" "$fmt"
+  else
+    # Exactly on pace.
+    printf ':speedometer:%s%%' "$pct_int"
+  fi
+}
+
+# Computes PACE_SEGMENT (exported) by reading the rate-limits cache, or sets
+# PACE_SEGMENT="" when the feature is off or data is unavailable.
+PACE_SEGMENT=""
+if [ "$SHOW_5H_PACE" = "true" ] && [ -f "$RATE_CACHE_FILE" ]; then
+  _now=$(date +%s)
+  _pct=$(jq -r '.five_hour.used_percentage // empty' "$RATE_CACHE_FILE" 2>/dev/null)
+  _reset=$(jq -r '.five_hour.resets_at // empty' "$RATE_CACHE_FILE" 2>/dev/null)
+  if [ -n "$_pct" ] && [ -n "$_reset" ]; then
+    PACE_SEGMENT=$(_compute_pace_segment "$_pct" "$_reset" "$_now")
+  fi
+  unset _now _pct _reset
+fi
+__trace "pace_segment=$PACE_SEGMENT"
+
+# Emits the "Show 5h Limit Ahead/Behind" toggle entry at the bottom of any
+# dropdown that calls it, with a checkmark when the feature is on.
+_emit_pace_toggle() {
+  local toggle_script="$HOOKS_DIR/toggle-5h-pace.sh"
+  [ -x "$toggle_script" ] || return 0
+  echo "---"
+  if [ "$SHOW_5H_PACE" = "true" ]; then
+    printf 'Show 5h Limit Ahead/Behind | checked=True bash="%s" terminal=false refresh=true\n' "$toggle_script"
+  else
+    printf 'Show 5h Limit Ahead/Behind | bash="%s" terminal=false refresh=true\n' "$toggle_script"
+  fi
+}
 
 # Fire stale-state cleanup unconditionally on every poll so notification
 # expiry and bell-state pruning run even when there are no active sessions
@@ -222,6 +329,7 @@ if [ "$BELL_MODE" != "always-on" ]; then
   done < <(printf '%s\n' "$bell_titles" | _sort_by_mtime)
 
   _emit_dashboard_entry
+  _emit_pace_toggle
 
   __trace "exit"
   exit 0
@@ -273,6 +381,14 @@ header="${header}:hourglass: ${n_working} "
 [ "$n_agents" -gt 0 ] && header="${header}:cup.and.heat.waves.fill: ${n_agents} "
 [ "$n_watching" -gt 0 ] && header="${header}:binoculars: ${n_watching} "
 header="${header}:zzz: ${n_idle}"
+# 5h-limit pace indicator: opt-in (see "5h-limit pace indicator" above),
+# comes after every other counter, at the very right. Prefixed with
+# :speedometer: (SF Symbol, matches the other counters' icon-prefix
+# convention and gives it visual separation from :zzz:) in the everyday
+# behind/on-pace case; swapped for 🔥 when ahead of pace (consuming slower
+# than time is passing — a good state worth noticing) since emoji draws the
+# eye regardless of the menu bar's background/tint in a way color text can't.
+[ -n "$PACE_SEGMENT" ] && header="${header} ${PACE_SEGMENT}"
 echo "${header} | font=.AppleSystemUIFontBold"
 echo "---"
 
@@ -359,5 +475,6 @@ if [ -n "$idle_entries" ]; then
 fi
 
 _emit_dashboard_entry
+_emit_pace_toggle
 
 __trace "exit"

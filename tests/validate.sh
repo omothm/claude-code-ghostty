@@ -504,12 +504,16 @@ if [ "$plugin" = "1" ]; then
     || ng "dashboard entry missing refresh=true"
 
   # Dashboard entry must come AFTER the session entries (separator between).
-  last_sep_line=$(echo "$out" | grep -n '^---$' | tail -n1 | cut -d: -f1)
+  # Uses the separator immediately preceding the dashboard line, not the
+  # globally last one — the pace-indicator toggle adds a further separator
+  # + entry AFTER the dashboard entry, which would otherwise read as "no
+  # separator before it".
   dash_line=$(echo "$out" | grep -n 'dashboard' | tail -n1 | cut -d: -f1)
-  if [ -n "$last_sep_line" ] && [ -n "$dash_line" ] && [ "$dash_line" -gt "$last_sep_line" ]; then
+  sep_before_dash=$(echo "$out" | head -n "$dash_line" | grep -n '^---$' | tail -n1 | cut -d: -f1)
+  if [ -n "$sep_before_dash" ] && [ -n "$dash_line" ] && [ "$dash_line" -gt "$sep_before_dash" ]; then
     ok "dashboard entry follows last separator (positioned after sessions)"
   else
-    ng "dashboard entry not positioned after sessions: sep=$last_sep_line dash=$dash_line"
+    ng "dashboard entry not positioned after sessions: sep=$sep_before_dash dash=$dash_line"
   fi
 
   # Running state: stub PID file pointing at this shell's PID (alive).
@@ -2150,6 +2154,127 @@ NODE
   fi
 else
   skip "dashboard straggler handling (node or dashboard.html absent)"
+fi
+
+# ---------------------------------------------------------------------------
+section "5h-limit pace indicator (plugin toggle + pace computation)"
+
+if [ "$plugin" = "1" ]; then
+  # Sandbox: isolate config and a fake rate-limits cache from real user data.
+  PACE_CONFIG="$TMPROOT/pace-config.json"
+  PACE_CACHE="$TMPROOT/rate-limits-cache.json"
+
+  # Write one idle state file so the plugin emits always-on output.
+  write_sf "paceA" "Claude Code | pace-alpha"
+
+  # --- Toggle off (default): no checked=, no PACE_SEGMENT in header --
+  printf '{"mode":"always-on","show5hPace":false}\n' > "$PACE_CONFIG"
+  out=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out" | grep -q 'Show 5h Limit Ahead/Behind' \
+    && ok "toggle entry present when show5hPace=false" \
+    || ng "toggle entry missing: $out"
+  if echo "$out" | grep 'Show 5h Limit Ahead/Behind' | grep -q 'checked=True'; then
+    ng "checked=True should not appear when show5hPace=false"
+  else
+    ok "no checked=True when show5hPace=false"
+  fi
+  # No pace segment expected (feature off).
+  if echo "$out" | head -1 | grep -q '🔥'; then
+    ng "fire emoji in header when feature is off"
+  else
+    ok "no fire emoji in header when show5hPace=false"
+  fi
+
+  # --- Toggle on: checked=True appears ---
+  printf '{"mode":"always-on","show5hPace":true,"rateLimitsCacheFile":"%s"}\n' "$PACE_CACHE" > "$PACE_CONFIG"
+  # Write a cache where we are well AHEAD of pace: 10% used, 4h45m left (17100 s)
+  # remaining of an 18000 s window → expected_used = 10*18000/100 = 1800 s consumed
+  # elapsed = 18000-17100 = 900 s → diff = 1800-900 = +900 s = 15 m ahead.
+  now_ts=$(date +%s)
+  resets_at=$(( now_ts + 17100 ))
+  printf '{"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$resets_at" > "$PACE_CACHE"
+  out=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out" | grep 'Show 5h Limit Ahead/Behind' | grep -q 'checked=True' \
+    && ok "checked=True present when show5hPace=true" \
+    || ng "checked=True missing when show5hPace=true: $(echo "$out" | grep 'Show 5h')"
+
+  # --- Ahead of pace: 🔥 appears in header ---
+  echo "$out" | head -1 | grep -q '🔥' \
+    && ok "fire emoji in header when ahead of pace" \
+    || ng "fire emoji missing when ahead (header: $(echo "$out" | head -1))"
+  # Numeric content: should include "10%" and "←" (arrow pointing left = ahead).
+  echo "$out" | head -1 | grep -q '10%' \
+    && ok "percentage shown in header" \
+    || ng "percentage missing in header"
+  echo "$out" | head -1 | grep -q '←' \
+    && ok "ahead arrow (←) present" \
+    || ng "ahead arrow missing in header"
+  if echo "$out" | head -1 | grep -q ':speedometer:'; then
+    ng ":speedometer: icon should be replaced by 🔥, not co-exist, when ahead"
+  else
+    ok ":speedometer: icon absent when ahead (replaced by 🔥)"
+  fi
+
+  # --- Behind pace: no 🔥, → arrow ---
+  # 90% used, only 2h left (7200 s) of 18000 s window.
+  # expected_used = 90*18000/100 = 16200 s consumed; elapsed = 18000-7200 = 10800 s
+  # diff = 16200-10800 = +5400 s — still ahead. To get behind, flip: 10% used but
+  # only 1h left (3600 s): expected_used = 1800 s; elapsed = 14400 s; diff = 1800-14400 = -12600 s behind.
+  resets_at2=$(( now_ts + 3600 ))
+  printf '{"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$resets_at2" > "$PACE_CACHE"
+  out2=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  if echo "$out2" | head -1 | grep -q '🔥'; then
+    ng "fire emoji should not appear when behind pace"
+  else
+    ok "no fire emoji when behind pace"
+  fi
+  echo "$out2" | head -1 | grep -q '→' \
+    && ok "behind arrow (→) present" \
+    || ng "behind arrow missing in header ($(echo "$out2" | head -1))"
+  echo "$out2" | head -1 | grep -q ':speedometer:' \
+    && ok "speedometer icon present when behind pace" \
+    || ng "speedometer icon missing when behind pace ($(echo "$out2" | head -1))"
+
+  # --- Absent cache file: no pace in header, toggle still shows ---
+  rm -f "$PACE_CACHE"
+  out3=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  if echo "$out3" | head -1 | grep -q '🔥\|←\|→'; then
+    ng "pace segment should be absent when cache file missing"
+  else
+    ok "no pace segment when cache file absent"
+  fi
+  echo "$out3" | grep -q 'Show 5h Limit Ahead/Behind' \
+    && ok "toggle entry still present when cache absent" \
+    || ng "toggle entry missing when cache absent: $out3"
+
+  # --- toggle-5h-pace.sh: flips show5hPace in config ---
+  TOGGLE_SCRIPT="$HOOKS_DIR/toggle-5h-pace.sh"
+  if [ -x "$TOGGLE_SCRIPT" ]; then
+    printf '{"mode":"always-on","show5hPace":false}\n' > "$PACE_CONFIG"
+    BELL_CONFIG="$PACE_CONFIG" GHOSTTY_HOOKS_DIR="$TMPROOT" bash "$TOGGLE_SCRIPT" 2>/dev/null
+    val=$(jq -r 'if has("show5hPace") then .show5hPace else "missing" end' "$PACE_CONFIG" 2>/dev/null)
+    [ "$val" = "true" ] \
+      && ok "toggle-5h-pace.sh: false→true" \
+      || ng "toggle-5h-pace.sh: false→true failed (got: $val)"
+    BELL_CONFIG="$PACE_CONFIG" GHOSTTY_HOOKS_DIR="$TMPROOT" bash "$TOGGLE_SCRIPT" 2>/dev/null
+    val=$(jq -r 'if has("show5hPace") then .show5hPace else "missing" end' "$PACE_CONFIG" 2>/dev/null)
+    [ "$val" = "false" ] \
+      && ok "toggle-5h-pace.sh: true→false" \
+      || ng "toggle-5h-pace.sh: true→false failed (got: $val)"
+    # Other config keys must be preserved across the toggle.
+    mode_after=$(jq -r '.mode // "missing"' "$PACE_CONFIG" 2>/dev/null)
+    [ "$mode_after" = "always-on" ] \
+      && ok "toggle preserves other config keys" \
+      || ng "toggle clobbered other config keys (mode: $mode_after)"
+  else
+    skip "toggle-5h-pace.sh not found"
+  fi
+
+  # Cleanup
+  rm -f "$BELL_STATE_DIR/paceA" "$PACE_CONFIG" "$PACE_CACHE"
+  unset PACE_CONFIG PACE_CACHE
+else
+  skip "5h-limit pace indicator tests"
 fi
 
 # ---------------------------------------------------------------------------
