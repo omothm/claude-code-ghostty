@@ -2170,10 +2170,10 @@ if [ "$plugin" = "1" ]; then
   # --- Toggle off (default): no checked=, no PACE_SEGMENT in header --
   printf '{"mode":"always-on","show5hPace":false}\n' > "$PACE_CONFIG"
   out=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
-  echo "$out" | grep -q 'Show 5h Limit Ahead/Behind' \
+  echo "$out" | grep -q 'Show 5h Pace' \
     && ok "toggle entry present when show5hPace=false" \
     || ng "toggle entry missing: $out"
-  if echo "$out" | grep 'Show 5h Limit Ahead/Behind' | grep -q 'checked=True'; then
+  if echo "$out" | grep 'Show 5h Pace' | grep -q 'checked=True'; then
     ng "checked=True should not appear when show5hPace=false"
   else
     ok "no checked=True when show5hPace=false"
@@ -2194,9 +2194,22 @@ if [ "$plugin" = "1" ]; then
   resets_at=$(( now_ts + 17100 ))
   printf '{"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$resets_at" > "$PACE_CACHE"
   out=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
-  echo "$out" | grep 'Show 5h Limit Ahead/Behind' | grep -q 'checked=True' \
+  echo "$out" | grep 'Show 5h Pace' | grep -q 'checked=True' \
     && ok "checked=True present when show5hPace=true" \
     || ng "checked=True missing when show5hPace=true: $(echo "$out" | grep 'Show 5h')"
+
+  # --- Toggle subtitle: "Reset: HH:MM, STATE" in muted color, ahead → "too fast" ---
+  toggle_line=$(echo "$out" | grep 'Show 5h Pace')
+  hhmm_expected=$(date -r "$resets_at" +%H:%M 2>/dev/null)
+  echo "$toggle_line" | grep -q "Reset: ${hhmm_expected}, .*too fast" \
+    && ok "toggle subtitle shows reset time + too-fast state when ahead" \
+    || ng "toggle subtitle missing/wrong when ahead: $toggle_line"
+  echo "$toggle_line" | grep -q $'\033\[38;5;245m' \
+    && ok "toggle subtitle uses muted color escape" \
+    || ng "toggle subtitle missing muted color escape: $toggle_line"
+  echo "$toggle_line" | grep -q 'ansi=true' \
+    && ok "toggle entry sets ansi=true" \
+    || ng "toggle entry missing ansi=true: $toggle_line"
 
   # --- Ahead of pace: 🔥 appears in header ---
   echo "$out" | head -1 | grep -q '🔥' \
@@ -2235,6 +2248,13 @@ if [ "$plugin" = "1" ]; then
     && ok "speedometer icon present when behind pace" \
     || ng "speedometer icon missing when behind pace ($(echo "$out2" | head -1))"
 
+  # --- Toggle subtitle: behind pace → "room available" ---
+  toggle_line2=$(echo "$out2" | grep 'Show 5h Pace')
+  hhmm_expected2=$(date -r "$resets_at2" +%H:%M 2>/dev/null)
+  echo "$toggle_line2" | grep -q "Reset: ${hhmm_expected2}, .*room available" \
+    && ok "toggle subtitle shows room-available state when behind" \
+    || ng "toggle subtitle missing/wrong when behind: $toggle_line2"
+
   # --- Absent cache file: no pace in header, toggle still shows ---
   rm -f "$PACE_CACHE"
   out3=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
@@ -2243,7 +2263,7 @@ if [ "$plugin" = "1" ]; then
   else
     ok "no pace segment when cache file absent"
   fi
-  echo "$out3" | grep -q 'Show 5h Limit Ahead/Behind' \
+  echo "$out3" | grep -q 'Show 5h Pace' \
     && ok "toggle entry still present when cache absent" \
     || ng "toggle entry missing when cache absent: $out3"
 

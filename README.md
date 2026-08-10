@@ -77,7 +77,7 @@ Change the mode by editing `~/.claude/.ccg/config.json`:
 
 The menubar can show a live ahead/behind indicator for Anthropic's 5-hour rate limit — how far you are from the rate at which you'd need to consume to exhaust the window exactly at reset time.
 
-**To enable:** click **Show 5h Limit Ahead/Behind** in the SwiftBar dropdown (checkbox, unchecked by default). Or set `"show5hPace": true` in `~/.claude/.ccg/config.json`.
+**To enable:** click **Show 5h Pace** in the SwiftBar dropdown (checkbox, unchecked by default). Or set `"show5hPace": true` in `~/.claude/.ccg/config.json`. The checkbox's subtitle always shows `Reset: HH:MM, STATE` (muted gray) — the reset time and current pace state — even while the toggle itself is off, so you can preview it before enabling the header segment.
 
 The indicator appears at the very right of the existing counters in the menubar header (always-on mode only). Example output:
 

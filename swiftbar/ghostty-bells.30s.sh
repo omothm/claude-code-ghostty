@@ -114,37 +114,85 @@ _compute_pace_segment() {
     local abs=$(( -diff ))
     local fmt
     fmt=$(_pace_format_remaining "$abs")
-    printf ':speedometer:%s%%→%s' "$pct_int" "$fmt"
+    printf ':speedometer:%s%% %s→' "$pct_int" "$fmt"
   else
     # Exactly on pace.
     printf ':speedometer:%s%%' "$pct_int"
   fi
 }
 
+# Returns "HH:MM|STATE" for the toggle-entry subtitle, or empty string when
+# unavailable. Computed independently of $SHOW_5H_PACE so the dropdown can
+# preview reset time/pace even while the header segment is off.
+# STATE mirrors the ahead/behind pace direction: ahead of pace (diff > 0,
+# consuming slower than the clock) reads "too fast" against the quota you
+# still have; behind pace (diff < 0, consuming faster than the clock) reads
+# "room available" for the time still left in the window.
+# $1 = five_h_pct  (number, 0-100)
+# $2 = resets_at   (unix timestamp)
+# $3 = now         (unix timestamp)
+_compute_pace_toggle_info() {
+  local pct="$1" resets_at="$2" now="$3"
+  local window=18000   # 5 hours in seconds
+  local remaining=$(( resets_at - now ))
+  (( remaining <= 0 )) && return
+  local diff
+  diff=$(echo "scale=0; $pct * $window / 100 - ($window - $remaining)" | bc 2>/dev/null)
+  [ -z "$diff" ] && return
+  local hhmm
+  hhmm=$(date -r "$resets_at" +%H:%M 2>/dev/null)
+  [ -z "$hhmm" ] && return
+  local state fmt
+  if (( diff > 0 )); then
+    fmt=$(_pace_format_remaining "$diff")
+    state="${fmt} too fast"
+  elif (( diff < 0 )); then
+    local abs=$(( -diff ))
+    fmt=$(_pace_format_remaining "$abs")
+    state="${fmt} room available"
+  else
+    state="on pace"
+  fi
+  printf '%s|%s' "$hhmm" "$state"
+}
+
 # Computes PACE_SEGMENT (exported) by reading the rate-limits cache, or sets
-# PACE_SEGMENT="" when the feature is off or data is unavailable.
+# PACE_SEGMENT="" when the feature is off or data is unavailable. Also
+# computes PACE_TOGGLE_INFO (unconditionally on SHOW_5H_PACE) for the
+# dropdown toggle entry's subtitle.
 PACE_SEGMENT=""
-if [ "$SHOW_5H_PACE" = "true" ] && [ -f "$RATE_CACHE_FILE" ]; then
+PACE_TOGGLE_INFO=""
+if [ -f "$RATE_CACHE_FILE" ]; then
   _now=$(date +%s)
   _pct=$(jq -r '.five_hour.used_percentage // empty' "$RATE_CACHE_FILE" 2>/dev/null)
   _reset=$(jq -r '.five_hour.resets_at // empty' "$RATE_CACHE_FILE" 2>/dev/null)
   if [ -n "$_pct" ] && [ -n "$_reset" ]; then
-    PACE_SEGMENT=$(_compute_pace_segment "$_pct" "$_reset" "$_now")
+    PACE_TOGGLE_INFO=$(_compute_pace_toggle_info "$_pct" "$_reset" "$_now")
+    if [ "$SHOW_5H_PACE" = "true" ]; then
+      PACE_SEGMENT=$(_compute_pace_segment "$_pct" "$_reset" "$_now")
+    fi
   fi
   unset _now _pct _reset
 fi
-__trace "pace_segment=$PACE_SEGMENT"
+__trace "pace_segment=$PACE_SEGMENT pace_toggle_info=$PACE_TOGGLE_INFO"
 
-# Emits the "Show 5h Limit Ahead/Behind" toggle entry at the bottom of any
-# dropdown that calls it, with a checkmark when the feature is on.
+# Emits the "Show 5h Pace" toggle entry at the bottom of any dropdown that
+# calls it, with a checkmark when the feature is on. When pace data is
+# available, appends "— Reset: HH:MM, STATE" in the same muted gray used for
+# the bell-entry timestamps (see the ansi=true comment above).
 _emit_pace_toggle() {
   local toggle_script="$HOOKS_DIR/toggle-5h-pace.sh"
   [ -x "$toggle_script" ] || return 0
   echo "---"
+  local label="Show 5h Pace"
+  if [ -n "$PACE_TOGGLE_INFO" ]; then
+    local hhmm="${PACE_TOGGLE_INFO%%|*}" state="${PACE_TOGGLE_INFO#*|}"
+    label="Show 5h Pace $(printf '\033[38;5;245m')— Reset: ${hhmm}, ${state}$(printf '\033[0m')"
+  fi
   if [ "$SHOW_5H_PACE" = "true" ]; then
-    printf 'Show 5h Limit Ahead/Behind | checked=True bash="%s" terminal=false refresh=true\n' "$toggle_script"
+    printf '%s | checked=True bash="%s" terminal=false refresh=true ansi=true\n' "$label" "$toggle_script"
   else
-    printf 'Show 5h Limit Ahead/Behind | bash="%s" terminal=false refresh=true\n' "$toggle_script"
+    printf '%s | bash="%s" terminal=false refresh=true ansi=true\n' "$label" "$toggle_script"
   fi
 }
 
