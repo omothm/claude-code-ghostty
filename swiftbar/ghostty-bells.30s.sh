@@ -69,6 +69,10 @@ __trace "mode=$BELL_MODE show5hPace=$SHOW_5H_PACE"
 # Formats seconds as a natural-unit duration (ceiled to the smallest unit
 # shown), matching maat-usage.sh's format_remaining. Returns empty when no
 # data, the window has elapsed, or the feature is off.
+#
+# Used for the AHEAD-of-pace case, where ceiling is the right call: "9m
+# ahead" rounded up to "9m" (rather than down to "8m") doesn't overstate how
+# much slack you have.
 _pace_format_remaining() {
   local secs="$1"
   (( secs < 0 )) && secs=0
@@ -83,6 +87,27 @@ _pace_format_remaining() {
     local h=$(( rem / 60 )) m=$(( rem % 60 ))
     (( m > 0 )) && h=$(( h + 1 ))
     if (( h >= 24 )); then d=$(( d + 1 )); h=0; fi
+    if (( h > 0 )); then printf "%dd%dh" "$d" "$h"; else printf "%dd" "$d"; fi
+  fi
+}
+
+# Same natural-unit formatting, but floored instead of ceiled. Used for the
+# BEHIND-pace case: ceiling there would overstate how far behind you are
+# (e.g. "12600s behind" reads as a clean 3h30m either way, but "12601s"
+# should still read "3h30m", not round up to "3h31m" and imply more slack
+# has been burned than actually has).
+_pace_format_remaining_floor() {
+  local secs="$1"
+  (( secs < 0 )) && secs=0
+  local total_min=$(( secs / 60 ))
+  if (( total_min < 60 )); then
+    printf "%dm" "$total_min"
+  elif (( total_min < 1440 )); then
+    local h=$(( total_min / 60 )) m=$(( total_min % 60 ))
+    if (( m > 0 )); then printf "%dh%dm" "$h" "$m"; else printf "%dh" "$h"; fi
+  else
+    local d=$(( total_min / 1440 )) rem=$(( total_min % 1440 ))
+    local h=$(( rem / 60 )) m=$(( rem % 60 ))
     if (( h > 0 )); then printf "%dd%dh" "$d" "$h"; else printf "%dd" "$d"; fi
   fi
 }
@@ -111,9 +136,11 @@ _compute_pace_segment() {
   elif (( diff < 0 )); then
     # Behind pace: consuming faster than clock — everyday case, no alarm.
     # :speedometer: icon provides visual separation from the adjacent counters.
+    # Floored (not ceiled) — rounding up here would overstate how far behind
+    # pace you are.
     local abs=$(( -diff ))
     local fmt
-    fmt=$(_pace_format_remaining "$abs")
+    fmt=$(_pace_format_remaining_floor "$abs")
     printf ':speedometer:%s%% %s→' "$pct_int" "$fmt"
   else
     # Exactly on pace.
@@ -148,7 +175,7 @@ _compute_pace_toggle_info() {
     state="${fmt} too fast"
   elif (( diff < 0 )); then
     local abs=$(( -diff ))
-    fmt=$(_pace_format_remaining "$abs")
+    fmt=$(_pace_format_remaining_floor "$abs")
     state="${fmt} room available"
   else
     state="on pace"
