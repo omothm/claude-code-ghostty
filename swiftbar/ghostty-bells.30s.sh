@@ -415,8 +415,15 @@ __trace "result=visible always-on input=$n_input working=$n_working agents=$n_ag
 #   - 🔔 (emoji): only when input > 0 — input is yellow attention; "0" would
 #     just be noise. The emoji also stands out against the monochrome SF
 #     Symbols, which is the point.
-#   - :hourglass: + :zzz: (SF Symbols): always shown, "working" and "idle"
-#     are the steady-state baselines.
+#   - :hourglass: (SF Symbol): always shown when n_working > 0. When
+#     n_working == 0, the zero is shown only if BOTH :cup.and.heat.waves.fill:
+#     (agents) and :binoculars: (watching) are also zero — i.e. only when
+#     there's truly nothing else going on, so ":hourglass: 0" acts as the
+#     steady-state anchor. If either agents or watching is active, omitting
+#     the zero hourglass keeps the bar from being crowded with a counter that
+#     has nothing to say.
+#   - :zzz: (SF Symbol): always shown, "idle" is the other steady-state
+#     baseline alongside :hourglass:.
 #   - :cup.and.heat.waves.fill: (SF Symbol): only when agents > 0 — a session with a
 #     background Agent/Task/Workflow still running is real progress, but rare
 #     enough that ":cup.and.heat.waves.fill: 0" would just be noise.
@@ -425,7 +432,9 @@ __trace "result=visible always-on input=$n_input working=$n_working agents=$n_ag
 #     section below the separator only renders when count > 0 too.
 header=""
 [ "$n_input" -gt 0 ] && header="🔔 ${n_input} "
-header="${header}:hourglass: ${n_working} "
+if [ "$n_working" -gt 0 ] || { [ "$n_agents" -eq 0 ] && [ "$n_watching" -eq 0 ]; }; then
+  header="${header}:hourglass: ${n_working} "
+fi
 [ "$n_agents" -gt 0 ] && header="${header}:cup.and.heat.waves.fill: ${n_agents} "
 [ "$n_watching" -gt 0 ] && header="${header}:binoculars: ${n_watching} "
 header="${header}:zzz: ${n_idle}"
