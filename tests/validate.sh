@@ -2228,6 +2228,22 @@ if [ "$plugin" = "1" ]; then
     ok ":speedometer: icon absent when ahead (replaced by 🔥)"
   fi
 
+  # --- Fractional percentage: ceiled, not rounded, in the header ---
+  # Same ahead-of-pace window as above (4h45m left of 18000s), but a
+  # fractional used_percentage that would round DOWN under nearest-integer
+  # rounding (10.4 → 10%) yet must ceil UP (10.4 → 11%) so the displayed
+  # number never understates actual usage.
+  printf '{"five_hour":{"used_percentage":10.4,"resets_at":%d}}\n' "$resets_at" > "$PACE_CACHE"
+  out_frac=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out_frac" | head -1 | grep -q '11%' \
+    && ok "fractional percentage ceiled up (10.4% → 11%)" \
+    || ng "fractional percentage not ceiled ($(echo "$out_frac" | head -1))"
+  echo "$out_frac" | head -1 | grep -q '10%' \
+    && ng "fractional percentage rounded instead of ceiled (10% should not appear)" \
+    || ok "no rounded-down 10% in header"
+  # Restore the whole-number cache for the checks below.
+  printf '{"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$resets_at" > "$PACE_CACHE"
+
   # --- Behind pace: no 🔥, → arrow ---
   # 90% used, only 2h left (7200 s) of 18000 s window.
   # expected_used = 90*18000/100 = 16200 s consumed; elapsed = 18000-7200 = 10800 s

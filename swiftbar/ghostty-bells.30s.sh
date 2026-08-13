@@ -125,8 +125,11 @@ _compute_pace_segment() {
   local diff
   diff=$(echo "scale=0; $pct * $window / 100 - ($window - $remaining)" | bc 2>/dev/null)
   [ -z "$diff" ] && return
+  # Ceiled (not rounded) — "42.1%" reads as 43% so the displayed number never
+  # understates actual usage (rounding 42.1 down to 42% would).
   local pct_int
-  pct_int=$(printf "%.0f" "$pct" 2>/dev/null || echo "$pct")
+  pct_int=$(echo "scale=0; ($pct+0.9999999)/1" | bc 2>/dev/null)
+  [ -z "$pct_int" ] && pct_int="$pct"
   if (( diff > 0 )); then
     # Ahead of pace: consuming slower than clock — good. Replace icon with 🔥
     # (no other color/markup needed — emoji grabs the eye against any bg).
