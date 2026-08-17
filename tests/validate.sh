@@ -2210,6 +2210,22 @@ if [ "$plugin" = "1" ]; then
   echo "$toggle_line" | grep -q 'ansi=true' \
     && ok "toggle entry sets ansi=true" \
     || ng "toggle entry missing ansi=true: $toggle_line"
+  # No fetched_at in the cache yet (written above without it) → no "as of" clause.
+  echo "$toggle_line" | grep -q 'as of' \
+    && ng "toggle subtitle should omit 'as of' when cache has no fetched_at: $toggle_line" \
+    || ok "no 'as of' clause when cache lacks fetched_at"
+
+  # --- Toggle subtitle: "as of HH:MM" appears when the cache has fetched_at ---
+  fetched_at=$(( now_ts - 120 ))
+  printf '{"fetched_at":%d,"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$fetched_at" "$resets_at" > "$PACE_CACHE"
+  out_fetched=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  toggle_line_fetched=$(echo "$out_fetched" | grep 'Show 5h Pace')
+  as_of_expected=$(date -r "$fetched_at" +%H:%M 2>/dev/null)
+  echo "$toggle_line_fetched" | grep -q "as of ${as_of_expected}" \
+    && ok "toggle subtitle shows 'as of HH:MM' when cache has fetched_at" \
+    || ng "toggle subtitle missing/wrong 'as of' clause: $toggle_line_fetched"
+  # Restore the fetched_at-less cache for the checks below.
+  printf '{"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$resets_at" > "$PACE_CACHE"
 
   # --- Ahead of pace: 🔥 appears in header ---
   echo "$out" | head -1 | grep -q '🔥' \

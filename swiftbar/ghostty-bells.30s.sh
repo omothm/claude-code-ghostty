@@ -151,18 +151,22 @@ _compute_pace_segment() {
   fi
 }
 
-# Returns "HH:MM|STATE" for the toggle-entry subtitle, or empty string when
-# unavailable. Computed independently of $SHOW_5H_PACE so the dropdown can
-# preview reset time/pace even while the header segment is off.
+# Returns "HH:MM|STATE|AS_OF" for the toggle-entry subtitle, or empty string
+# when unavailable. Computed independently of $SHOW_5H_PACE so the dropdown
+# can preview reset time/pace even while the header segment is off.
 # STATE mirrors the ahead/behind pace direction: ahead of pace (diff > 0,
 # consuming slower than the clock) reads "too fast" against the quota you
 # still have; behind pace (diff < 0, consuming faster than the clock) reads
 # "room available" for the time still left in the window.
-# $1 = five_h_pct  (number, 0-100)
-# $2 = resets_at   (unix timestamp)
-# $3 = now         (unix timestamp)
+# AS_OF is the cache's fetched_at formatted as HH:MM, or empty when the
+# cache predates that field (older statusline scripts) — the caller omits
+# the ", as of HH:MM" clause entirely in that case.
+# $1 = five_h_pct   (number, 0-100)
+# $2 = resets_at    (unix timestamp)
+# $3 = now          (unix timestamp)
+# $4 = fetched_at   (unix timestamp, optional)
 _compute_pace_toggle_info() {
-  local pct="$1" resets_at="$2" now="$3"
+  local pct="$1" resets_at="$2" now="$3" fetched_at="$4"
   local window=18000   # 5 hours in seconds
   local remaining=$(( resets_at - now ))
   (( remaining <= 0 )) && return
@@ -183,7 +187,9 @@ _compute_pace_toggle_info() {
   else
     state="on pace"
   fi
-  printf '%s|%s' "$hhmm" "$state"
+  local as_of=""
+  [ -n "$fetched_at" ] && as_of=$(date -r "$fetched_at" +%H:%M 2>/dev/null)
+  printf '%s|%s|%s' "$hhmm" "$state" "$as_of"
 }
 
 # Computes PACE_SEGMENT (exported) by reading the rate-limits cache, or sets
@@ -196,28 +202,35 @@ if [ -f "$RATE_CACHE_FILE" ]; then
   _now=$(date +%s)
   _pct=$(jq -r '.five_hour.used_percentage // empty' "$RATE_CACHE_FILE" 2>/dev/null)
   _reset=$(jq -r '.five_hour.resets_at // empty' "$RATE_CACHE_FILE" 2>/dev/null)
+  _fetched=$(jq -r '.fetched_at // empty' "$RATE_CACHE_FILE" 2>/dev/null)
   if [ -n "$_pct" ] && [ -n "$_reset" ]; then
-    PACE_TOGGLE_INFO=$(_compute_pace_toggle_info "$_pct" "$_reset" "$_now")
+    PACE_TOGGLE_INFO=$(_compute_pace_toggle_info "$_pct" "$_reset" "$_now" "$_fetched")
     if [ "$SHOW_5H_PACE" = "true" ]; then
       PACE_SEGMENT=$(_compute_pace_segment "$_pct" "$_reset" "$_now")
     fi
   fi
-  unset _now _pct _reset
+  unset _now _pct _reset _fetched
 fi
 __trace "pace_segment=$PACE_SEGMENT pace_toggle_info=$PACE_TOGGLE_INFO"
 
 # Emits the "Show 5h Pace" toggle entry at the bottom of any dropdown that
 # calls it, with a checkmark when the feature is on. When pace data is
-# available, appends "— Reset: HH:MM, STATE" in the same muted gray used for
-# the bell-entry timestamps (see the ansi=true comment above).
+# available, appends "— Reset: HH:MM, STATE, as of HH:MM" in the same muted
+# gray used for the bell-entry timestamps (see the ansi=true comment above).
+# The ", as of HH:MM" clause is the cache's fetched_at — it's how staleness
+# (e.g. a cache that stopped updating while idle) is visible at a glance —
+# and is omitted for caches written before that field existed.
 _emit_pace_toggle() {
   local toggle_script="$HOOKS_DIR/toggle-5h-pace.sh"
   [ -x "$toggle_script" ] || return 0
   echo "---"
   local label="Show 5h Pace"
   if [ -n "$PACE_TOGGLE_INFO" ]; then
-    local hhmm="${PACE_TOGGLE_INFO%%|*}" state="${PACE_TOGGLE_INFO#*|}"
-    label="Show 5h Pace $(printf '\033[38;5;245m')— Reset: ${hhmm}, ${state}$(printf '\033[0m')"
+    local hhmm="${PACE_TOGGLE_INFO%%|*}" _rest="${PACE_TOGGLE_INFO#*|}"
+    local state="${_rest%%|*}" as_of="${_rest#*|}"
+    local as_of_part=""
+    [ -n "$as_of" ] && as_of_part=", as of ${as_of}"
+    label="Show 5h Pace $(printf '\033[38;5;245m')— Reset: ${hhmm}, ${state}${as_of_part}$(printf '\033[0m')"
   fi
   if [ "$SHOW_5H_PACE" = "true" ]; then
     printf '%s | checked=True bash="%s" terminal=false refresh=true ansi=true\n' "$label" "$toggle_script"

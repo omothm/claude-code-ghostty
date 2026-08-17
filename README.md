@@ -77,7 +77,7 @@ Change the mode by editing `~/.claude/.ccg/config.json`:
 
 The menubar can show a live ahead/behind indicator for Anthropic's 5-hour rate limit — how far you are from the rate at which you'd need to consume to exhaust the window exactly at reset time.
 
-**To enable:** click **Show 5h Pace** in the SwiftBar dropdown (checkbox, unchecked by default). Or set `"show5hPace": true` in `~/.claude/.ccg/config.json`. The checkbox's subtitle always shows `Reset: HH:MM, STATE` (muted gray) — the reset time and current pace state — even while the toggle itself is off, so you can preview it before enabling the header segment.
+**To enable:** click **Show 5h Pace** in the SwiftBar dropdown (checkbox, unchecked by default). Or set `"show5hPace": true` in `~/.claude/.ccg/config.json`. The checkbox's subtitle always shows `Reset: HH:MM, STATE, as of HH:MM` (muted gray) — the reset time, current pace state, and when the cache was last written — even while the toggle itself is off, so you can preview it before enabling the header segment. The `as of` clause is omitted if the cache predates the `fetched_at` field (see below); it's what lets you confirm the cache is still updating rather than stuck on stale data.
 
 The indicator appears at the very right of the existing counters in the menubar header (always-on mode only). Example output:
 
@@ -89,7 +89,21 @@ The indicator appears at the very right of the existing counters in the menubar 
 
 🔥 marks the "ahead of pace" case, where you have headroom: you could consume more before the reset and still stay under the limit.
 
-**Data source:** the plugin reads `~/.claude/.ccg/rate-limits-cache.json` (configurable via `"rateLimitsCacheFile"` in `config.json`). This file must be written by your statusline renderer or any other hook that receives the Claude Code session JSON. The plugin ignores absent values gracefully — if the file doesn't exist or the key is missing, the indicator is simply not shown.
+**Data source:** the plugin reads `~/.claude/.ccg/rate-limits-cache.json` (configurable via `"rateLimitsCacheFile"` in `config.json`). This file must be written by your statusline renderer — `rate_limits` is a statusline-only field; no Claude Code hook payload carries it (verified against the hooks reference), so a hook can't be used to write this cache. The plugin ignores absent values gracefully — if the file doesn't exist or the key is missing, the indicator is simply not shown.
+
+**Keeping the cache fresh while idle or waiting on background agents:** a statusline command normally only re-runs on event-driven triggers (new assistant message, tool call, etc.), which go quiet whenever the main session is idle — e.g. while it waits on a background Task/subagent. That leaves the cache stale until you interact with that session again. Claude Code's statusline `refreshInterval` setting is the documented fix: it re-runs the statusline command on a fixed wall-clock timer, independent of those events. Add it to the `statusLine` block in `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash ~/.claude/statusline-command.sh",
+    "refreshInterval": 30
+  }
+}
+```
+
+30 s matches the SwiftBar plugin's own poll interval and is cheap as long as your statusline script (like the example below) does no network calls — it's pure `jq`/`git`/`bc` work.
 
 The cache file must contain at minimum:
 
@@ -104,6 +118,8 @@ The cache file must contain at minimum:
 
 `resets_at` is a Unix timestamp (seconds). `used_percentage` is 0–100.
 
+Optionally, a top-level `fetched_at` (Unix timestamp, seconds) records when the cache was last written; the toggle subtitle shows it as `as of HH:MM`. Omit it and that clause is simply left off.
+
 **Example: writing the cache from a statusline command** (add to your `~/.claude/statusline-command.sh`):
 
 ```sh
@@ -114,7 +130,8 @@ if [ -n "$five_h_pct" ] && [ -n "$five_h_reset" ]; then
   jq -cn \
     --argjson pct "$five_h_pct" \
     --argjson reset "$five_h_reset" \
-    '{five_hour:{used_percentage:$pct,resets_at:$reset}}' \
+    --argjson fetched "$(date +%s)" \
+    '{fetched_at:$fetched,five_hour:{used_percentage:$pct,resets_at:$reset}}' \
     > "$HOME/.claude/.ccg/rate-limits-cache.json" 2>/dev/null
 fi
 ```
