@@ -159,8 +159,10 @@ _compute_pace_segment() {
 # still have; behind pace (diff < 0, consuming faster than the clock) reads
 # "room available" for the time still left in the window.
 # AS_OF is the cache's fetched_at formatted as HH:MM, or empty when the
-# cache predates that field (older statusline scripts) — the caller omits
-# the ", as of HH:MM" clause entirely in that case.
+# cache predates that field (older statusline scripts) or is fresh (fetched
+# within the last minute) — the caller omits the ", as of HH:MM" clause
+# entirely in either case, since a fresh cache doesn't need a staleness
+# callout.
 # $1 = five_h_pct   (number, 0-100)
 # $2 = resets_at    (unix timestamp)
 # $3 = now          (unix timestamp)
@@ -188,7 +190,9 @@ _compute_pace_toggle_info() {
     state="on pace"
   fi
   local as_of=""
-  [ -n "$fetched_at" ] && as_of=$(date -r "$fetched_at" +%H:%M 2>/dev/null)
+  if [ -n "$fetched_at" ] && (( now - fetched_at > 60 )); then
+    as_of=$(date -r "$fetched_at" +%H:%M 2>/dev/null)
+  fi
   printf '%s|%s|%s' "$hhmm" "$state" "$as_of"
 }
 
@@ -219,7 +223,8 @@ __trace "pace_segment=$PACE_SEGMENT pace_toggle_info=$PACE_TOGGLE_INFO"
 # gray used for the bell-entry timestamps (see the ansi=true comment above).
 # The ", as of HH:MM" clause is the cache's fetched_at — it's how staleness
 # (e.g. a cache that stopped updating while idle) is visible at a glance —
-# and is omitted for caches written before that field existed.
+# and is omitted both for caches written before that field existed and for
+# caches fetched within the last minute (nothing stale to call out yet).
 _emit_pace_toggle() {
   local toggle_script="$HOOKS_DIR/toggle-5h-pace.sh"
   [ -x "$toggle_script" ] || return 0

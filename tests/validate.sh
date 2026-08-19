@@ -2224,6 +2224,18 @@ if [ "$plugin" = "1" ]; then
   echo "$toggle_line_fetched" | grep -q "as of ${as_of_expected}" \
     && ok "toggle subtitle shows 'as of HH:MM' when cache has fetched_at" \
     || ng "toggle subtitle missing/wrong 'as of' clause: $toggle_line_fetched"
+  # --- Toggle subtitle: "as of" omitted when fetched_at is <1min old (fresh) ---
+  # Uses a fresh "now" (not the now_ts captured earlier) since prior checks in
+  # this block burn real wall-clock time and would otherwise push the delta
+  # past the 60s threshold by the time the plugin actually runs.
+  fresh_fetched_at=$(( $(date +%s) - 30 ))
+  printf '{"fetched_at":%d,"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$fresh_fetched_at" "$resets_at" > "$PACE_CACHE"
+  out_fresh=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  toggle_line_fresh=$(echo "$out_fresh" | grep 'Show 5h Pace')
+  echo "$toggle_line_fresh" | grep -q 'as of' \
+    && ng "toggle subtitle should omit 'as of' when fetched_at is <1min old: $toggle_line_fresh" \
+    || ok "no 'as of' clause when fetched_at is fresh (<1min)"
+
   # Restore the fetched_at-less cache for the checks below.
   printf '{"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$resets_at" > "$PACE_CACHE"
 
