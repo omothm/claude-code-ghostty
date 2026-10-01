@@ -512,10 +512,10 @@ if [ "${NOTIF_EXPIRY_HOURS}" -gt 0 ] 2>/dev/null; then
   while IFS=$'\t' read -r grp delivered_at; do
     epoch=$(date -j -f "%Y-%m-%d %H:%M:%S %z" "$delivered_at" "+%s" 2>/dev/null) || continue
     [ "$epoch" -gt "$_notif_cutoff" ] && continue
-    terminal-notifier -remove "$grp" 2>/dev/null
+    terminal-notifier -remove "$grp" < /dev/null 2>/dev/null
     __trace "notif-expire: group=$grp delivered=$delivered_at epoch=$epoch cutoff=$_notif_cutoff"
   done < <(terminal-notifier -list ALL 2>/dev/null | awk -F'\t' '
-    /^ccg-/ { grp = $1 }
+    /^ccg-/ && NF >= 4 { grp = $1 }
     grp != "" && $NF ~ /^20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] [+-][0-9]/ {
       print grp "\t" $NF; grp = ""
     }

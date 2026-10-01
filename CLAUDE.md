@@ -332,11 +332,17 @@ icon (an `input` bell whose payload's `tool_name` is `AskUserQuestion` shows
 plain 🔔 `input` state unconditionally; a plain permission request never
 shows ❓; a sibling's plain permission prompt in the same pending set does
 not mask a different actor's ❓; the icon reverts to 🔔 once the query
-actor's bell clears but a plain sibling is still pending), and end-to-end
-`input`→state→plugin latency.
+actor's bell clears but a plain sibling is still pending), the sweep's
+notification-expiry pass (each `terminal-notifier -remove` gets stdin from
+`/dev/null` — otherwise it reads the rest of the `-list ALL` stream as a
+message body and *posts* it as a new "Terminal" notification, a
+self-sustaining flood — and `ccg-…<TAB><date>` lines inside a message body
+are never parsed as groups), and end-to-end `input`→state→plugin latency.
 
 It sandboxes via `BELL_STATE_DIR` pointing at a temp dir, so it never touches
-real session state.
+real session state. Global stubs for `terminal-notifier` and for
+`open swiftbar://…` keep it from posting real notifications or re-running the
+real plugin (and with it the real deployed sweep against live state).
 
 ```sh
 ./tests/validate.sh            # failures + summary

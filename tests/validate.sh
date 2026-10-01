@@ -95,6 +95,17 @@ fi
 exec /usr/bin/defaults "$@"
 STUB
 chmod +x "$GLOBAL_NOTIFY_BIN/defaults"
+# Global `open` stub for swiftbar:// URLs: every state change the suite causes
+# runs refresh-menubar.sh, which would otherwise re-run the REAL plugin — and
+# with it the real deployed sweep against live state — dozens of times per
+# run. Exits 0 so the refresh-gate checks still see open-exit=0. Every other
+# `open` call passes through to the real binary.
+cat > "$GLOBAL_NOTIFY_BIN/open" <<'STUB'
+#!/bin/bash
+for a in "$@"; do case "$a" in swiftbar://*) exit 0 ;; esac; done
+exec /usr/bin/open "$@"
+STUB
+chmod +x "$GLOBAL_NOTIFY_BIN/open"
 export PATH="$GLOBAL_NOTIFY_BIN:$PATH"
 
 if [ -t 1 ]; then
@@ -2415,6 +2426,53 @@ rm -rf "$SWEEP_LOCK_DIR"
 
 rm -rf "$CCG_PROJECTS_DIR"; unset CCG_PROJECTS_DIR
 rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
+
+# ---------------------------------------------------------------------------
+section "notification expiry (stdin isolation + body-line parsing)"
+
+# terminal-notifier reads its message body from stdin when stdin isn't a TTY.
+# The expiry loop feeds `-list ALL` through stdin, so an un-redirected
+# `-remove` swallowed the rest of the list and POSTED it as a new "Terminal"
+# notification. Those bodies contain `ccg-…<TAB><date>` lines, which the old
+# parser then read as expired groups on every later sweep — a self-sustaining
+# flood once the live sweep could reach the real binary. Fixture: two expired
+# real entries (one with a multi-line message), one fresh entry, and a polluted
+# Terminal entry whose body lines look like `ccg-…<TAB><old date>`.
+EXP_BIN="$TMPROOT/bin-expiry-notify"
+EXP_LOG="$TMPROOT/tn-expiry.log"
+EXP_LIST="$TMPROOT/tn-expiry-list.txt"
+mkdir -p "$EXP_BIN"
+_exp_fresh="$(date -u -v-1H '+%Y-%m-%d %H:%M:%S +0000')"
+{
+  printf 'GroupID\tTitle\tSubtitle\tMessage\tDelivered At\n'
+  printf 'ccg-old1\t✅ Claude Code\t(null)\tTask completed\t2020-01-01 00:00:00 +0000\n'
+  printf 'ccg-old2\t🔔 Claude Code\t(null)\tline one\nline two\t2020-01-02 00:00:00 +0000\n'
+  printf 'ccg-fresh\t✅ Claude Code\t(null)\tTask completed\t%s\n' "$_exp_fresh"
+  printf '(null)\tTerminal\t(null)\tccg-body1\t2020-01-03 00:00:00 +0000\n'
+  printf 'ccg-body2\t2020-01-04 00:00:00 +0000\t%s\n' "$_exp_fresh"
+} > "$EXP_LIST"
+cat > "$EXP_BIN/terminal-notifier" <<STUB
+#!/bin/bash
+case "\$1" in
+  -list) cat "$EXP_LIST" ;;
+  -remove) if [ -t 0 ]; then n=tty; else n=\$(cat | wc -c | tr -d ' '); fi
+           printf 'remove %s stdin=%s\n' "\$2" "\$n" >> "$EXP_LOG" ;;
+  *) printf 'post %s\n' "\$*" >> "$EXP_LOG" ;;
+esac
+STUB
+chmod +x "$EXP_BIN/terminal-notifier"
+: > "$EXP_LOG"
+PATH="$EXP_BIN:$PATH" "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+_exp_removed="$(awk '$1 == "remove" { print $2 }' "$EXP_LOG" | sort | tr '\n' ' ')"
+[ "$_exp_removed" = "ccg-old1 ccg-old2 " ] \
+  && ok "expiry: removes exactly the expired real groups (multi-line message included)" \
+  || ng "expiry: removed [$_exp_removed] (want [ccg-old1 ccg-old2 ])"
+grep -q '^remove .* stdin=[1-9]' "$EXP_LOG" \
+  && ng "expiry: -remove read the -list stream from stdin ($(grep -c 'stdin=[1-9]' "$EXP_LOG") calls)" \
+  || ok "expiry: -remove never inherits the -list stream on stdin"
+grep -q '^post ' "$EXP_LOG" \
+  && ng "expiry: sweep posted a notification while expiring ($(grep '^post ' "$EXP_LOG" | head -1))" \
+  || ok "expiry: no notification posted by the expiry pass"
 
 # ---------------------------------------------------------------------------
 section "dashboard event ordering (writer-precision + exact-tie regression)"
