@@ -1193,7 +1193,7 @@ printf '{"session_id":"%s"}\n' "$ESID" | "$HOOKS_DIR/tab-title.sh" idle "$ESID" 
 # No aging here — the transcript's mtime is still fresh, exactly as it would
 # be in production when SubagentStop fires within a second or two of the
 # subagent's last write.
-printf '{"session_id":"%s","agent_id":"%s"}\n' "$ESID" "$EACTOR" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}\n' "$ESID" "$EACTOR" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
 line2=$(sed -n '2p' "$BELL_STATE_DIR/$ESID" 2>/dev/null)
 [ "$line2" = "idle" ] && ok "stray-agents-fresh: finishing agent's own fresh transcript is excluded, downgrades to idle" \
   || ng "stray-agents-fresh: agents state stuck on own fresh transcript (got '$line2')"
@@ -1210,11 +1210,30 @@ printf '{"session_id":"%s"}\n' "$FSID" | "$HOOKS_DIR/tab-title.sh" idle "$FSID" 
 # Add a second, sibling transcript for a different actor, also fresh.
 _sib_dir="$CCG_PROJECTS_DIR/fake-project/$FSID/subagents"
 : > "$_sib_dir/agent-siblinghex$$.jsonl"
-printf '{"session_id":"%s","agent_id":"%s"}\n' "$FSID" "$FACTOR" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}\n' "$FSID" "$FACTOR" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
 line2=$(sed -n '2p' "$BELL_STATE_DIR/$FSID" 2>/dev/null)
 [ "$line2" = "agents" ] && ok "stray-agents-fresh: sibling still live keeps state at agents (only own transcript excluded)" \
   || ng "stray-agents-fresh: wrongly downgraded despite live sibling (got '$line2')"
 rm -f "$BELL_STATE_DIR/$FSID"
+
+# 5e. Regression: a lone background subagent's PostToolUse (also routed to
+#     `tab-title.sh working`) must NOT exclude its own transcript — the actor
+#     is alive mid-run. Excluding it resolved the session to `idle` on every
+#     subagent tool call, then the sweep flipped it back to `agents` ~1 s
+#     later (visible tab/menubar flicker).
+GSID="agG-$$"
+GACTOR="fakehex$$"
+_touch_subagent_transcript "$GSID" ""
+printf '{"session_id":"%s"}\n' "$GSID" | "$HOOKS_DIR/tab-title.sh" idle "$GSID" > /dev/null 2>&1
+_idle_before=$(grep -c "\"session_id\":\"$GSID\".*\"state\":\"idle\"" "$CCG_EVENT_LOG" 2>/dev/null)
+printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"PostToolUse"}\n' "$GSID" "$GACTOR" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+line2=$(sed -n '2p' "$BELL_STATE_DIR/$GSID" 2>/dev/null)
+_idle_after=$(grep -c "\"session_id\":\"$GSID\".*\"state\":\"idle\"" "$CCG_EVENT_LOG" 2>/dev/null)
+[ "$line2" = "agents" ] && ok "stray-agents-posttooluse: lone subagent's PostToolUse keeps state at agents" \
+  || ng "stray-agents-posttooluse: lone subagent's PostToolUse flipped state (got '$line2')"
+[ "$_idle_before" = "$_idle_after" ] && ok "stray-agents-posttooluse: no idle event logged" \
+  || ng "stray-agents-posttooluse: idle event logged ($_idle_before -> $_idle_after)"
+rm -f "$BELL_STATE_DIR/$GSID"
 
 # 6. notifs mode: agents does NOT write a state file (agents is a refinement
 #    of idle, and idle is invisible in notifs mode).

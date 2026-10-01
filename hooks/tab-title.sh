@@ -66,8 +66,12 @@ if [ -z "$session_id" ]; then
   _stdin_json=$(cat)
   session_id=$(printf '%s' "$_stdin_json" | jq -r '.session_id // "unknown"' 2>/dev/null)
   [ -z "$agent_id" ] && agent_id=$(printf '%s' "$_stdin_json" | jq -r '.agent_id // empty' 2>/dev/null)
+  # PostToolUse and SubagentStop both arrive as `working`; the stray-subagent
+  # guard below needs to tell them apart (only SubagentStop means the actor
+  # has finished).
+  hook_event=$(printf '%s' "$_stdin_json" | jq -r '.hook_event_name // empty' 2>/dev/null)
   unset _stdin_json
-  __trace "session_id from stdin=$session_id agent_id=${agent_id:-<none>}"
+  __trace "session_id from stdin=$session_id agent_id=${agent_id:-<none>} hook_event=${hook_event:-<none>}"
 fi
 # Actor key for the pending-input set. The main agent has no agent_id in its
 # payload, so it maps to the __main__ sentinel; subagent agent_ids are hex and
@@ -359,9 +363,17 @@ case "$status" in
             # re-derive would count the very agent that just finished as
             # still live and `agents` would never clear until the file aged
             # out on some later, unrelated hook.
+            #
+            # Only exclude on SubagentStop. A background subagent's
+            # PostToolUse lands here too, and that actor is very much alive:
+            # excluding it would resolve a lone-agent session to `idle` on
+            # every tool call, and the sweep would flip it back to `agents`
+            # ~1 s later (visible as a tab/menubar flicker).
             _stray_cpid=$(_find_claude_pid 2>/dev/null || true)
-            effective_status=$(_resolve_idle_refinement "$session_id" "$_stray_cpid" "$actor")
-            unset _stray_cpid
+            _stray_excl=""
+            [ "${hook_event:-}" = "SubagentStop" ] && _stray_excl="$actor"
+            effective_status=$(_resolve_idle_refinement "$session_id" "$_stray_cpid" "$_stray_excl")
+            unset _stray_cpid _stray_excl
             __trace "stray subagent working re-resolved (actor=$actor, was=$_logical, now=$effective_status)"
             ;;
         esac
