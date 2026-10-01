@@ -6,6 +6,10 @@ Running multiple Claude Code sessions in Ghostty tabs? This gives you three thin
 - **Tab titles that show session state** — glance at your tab bar and know which agents are working, waiting, or idle
 - **An optional menubar indicator** — a SwiftBar plugin that shows session counts and a one-click jump to any session, without leaving your current app
 
+![Metrics dashboard: fleet idle on you, concurrent share and agent-hours over 30 days, plus a 24h fleet-activity timeline](docs/dashboard.png)
+
+*The optional [metrics dashboard](#optional-metrics-dashboard) — how much of your active time the fleet sat idle waiting on you, how often sessions ran in parallel, and where the gaps were today.*
+
 ## Install
 
 ```sh
