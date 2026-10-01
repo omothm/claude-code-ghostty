@@ -238,7 +238,8 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
 title-write to parent's TTY (regression guard against the no-controlling-
 terminal hook environment introduced in Claude Code 2.1.139), refresh
 gating (fire vs skip), event-log dedup + JSON shape, `refresh-menubar.sh`
-gate paths, plugin output (SF Symbol + count, param1 preservation,
+gate paths, plugin output (SF Symbol + count, bell → idle → working
+header and section order, param1 preservation,
 ` | ` → ` — ` swap, empty-dir hiding), dashboard-entry toggle (open/stop
 based on PID file, stale-PID handling, position after sessions),
 `dashboard-server.sh status` modes, stale-file sweep (hard-age prune
@@ -254,7 +255,7 @@ watching state
 (3-line state-file shape with claude PID on line 3 for all write states,
 event log records `watching`, notifs mode suppresses the state file,
 plugin downgrades stale watching files to idle, `Watching` section
-ordered between `Working` and `Idle`), agents-running state (☕️ prefix on
+ordered after `Idle` and `Working`), agents-running state (☕️ prefix on
 the state file, event log records `agents`, notifs mode suppresses the
 state file, precedence over `watching` when both a fresh subagent
 transcript and a live monitor marker are present, plugin downgrades a

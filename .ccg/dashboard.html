@@ -14,7 +14,7 @@
   --accent-wait: #d4651a;
   --accent-agents: #6a5acd;
   --accent-watch: #4a8bb8;
-  --accent-idle: #888;
+  --accent-idle: #888888;
   --error-bg: #fff0ec;
   --error-fg: #7a2300;
 }
@@ -28,7 +28,7 @@
     --accent-wait: #f08540;
     --accent-agents: #9d8cff;
     --accent-watch: #6ba8d4;
-    --accent-idle: #888;
+    --accent-idle: #888888;
     --error-bg: #3a1810;
     --error-fg: #ffb89a;
   }
@@ -189,10 +189,10 @@ h2 {
 <h2>Right now</h2>
 <div class="row row5">
   <div class="card wait"><div class="label">Awaiting input</div><div class="value" id="now-input">0</div><div class="sub">🔔 blocked on you · act now</div></div>
+  <div class="card idle"><div class="label">Idle</div><div class="value" id="now-idle">0</div><div class="sub">💤 between prompts</div></div>
   <div class="card work"><div class="label">Working</div><div class="value" id="now-working">0</div><div class="sub">⏳ active sessions</div></div>
   <div class="card agents"><div class="label">Agents running</div><div class="value" id="now-agents">0</div><div class="sub">☕️ idle but delegating</div></div>
   <div class="card watch"><div class="label">Watching</div><div class="value" id="now-watching">0</div><div class="sub">👀 idle but supervising</div></div>
-  <div class="card idle"><div class="label">Idle</div><div class="value" id="now-idle">0</div><div class="sub">💤 between prompts</div></div>
 </div>
 
 <h2>Last 24h</h2>
@@ -224,9 +224,9 @@ h2 {
 
 <h2>Background · last 24h</h2>
 <div class="row">
+  <div class="card idle small"><div class="label">Time idle</div><div class="value" id="t-idle">—</div><div class="sub">parked between prompts</div></div>
   <div class="card agents small"><div class="label">Time agents running</div><div class="value" id="t-agents">—</div><div class="sub">delegating to background agents</div></div>
   <div class="card watch small"><div class="label">Time watching</div><div class="value" id="t-watching">—</div><div class="sub">supervising background work</div></div>
-  <div class="card idle small"><div class="label">Time idle</div><div class="value" id="t-idle">—</div><div class="sub">parked between prompts</div></div>
   <div class="card small"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
 </div>
 
@@ -886,11 +886,11 @@ function buildChart(labels, data) {
     data: {
       labels,
       datasets: [
-        { label: 'Working',        data: data.tlWorking,  borderColor: work,   backgroundColor: work   + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
         { label: 'Awaiting input', data: data.tlInput,    borderColor: wait,   backgroundColor: wait   + '66', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Idle',           data: data.tlIdle,     borderColor: idle,   backgroundColor: idle   + '33', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
+        { label: 'Working',        data: data.tlWorking,  borderColor: work,   backgroundColor: work   + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
         { label: 'Agents running', data: data.tlAgents,   borderColor: agents, backgroundColor: agents + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
         { label: 'Watching',       data: data.tlWatching, borderColor: watch,  backgroundColor: watch  + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Idle',           data: data.tlIdle,     borderColor: idle,   backgroundColor: idle   + '33', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
       ]
     },
     options: {
@@ -994,11 +994,11 @@ function render(data, nowSec) {
   if (!chart) chart = buildChart(labels, data);
   else {
     chart.data.labels = labels;
-    chart.data.datasets[0].data = data.tlWorking;
-    chart.data.datasets[1].data = data.tlInput;
-    chart.data.datasets[2].data = data.tlAgents;
-    chart.data.datasets[3].data = data.tlWatching;
-    chart.data.datasets[4].data = data.tlIdle;
+    chart.data.datasets[2].data = data.tlWorking;
+    chart.data.datasets[0].data = data.tlInput;
+    chart.data.datasets[3].data = data.tlAgents;
+    chart.data.datasets[4].data = data.tlWatching;
+    chart.data.datasets[1].data = data.tlIdle;
     chart.update('none');
   }
 

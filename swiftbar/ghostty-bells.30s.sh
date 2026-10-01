@@ -474,6 +474,9 @@ __trace "result=visible always-on input=$n_input working=$n_working agents=$n_ag
 #   - 🔔 (emoji): only when input > 0 — input is yellow attention; "0" would
 #     just be noise. The emoji also stands out against the monochrome SF
 #     Symbols, which is the point.
+#   - :zzz: (SF Symbol): always shown, right after 🔔 (idle sessions are the
+#     next-most-actionable after input); "idle" is the other steady-state
+#     baseline alongside :hourglass:.
 #   - :hourglass: (SF Symbol): always shown when n_working > 0. When
 #     n_working == 0, the zero is shown only if BOTH :cup.and.heat.waves.fill:
 #     (agents) and :binoculars: (watching) are also zero — i.e. only when
@@ -481,8 +484,6 @@ __trace "result=visible always-on input=$n_input working=$n_working agents=$n_ag
 #     steady-state anchor. If either agents or watching is active, omitting
 #     the zero hourglass keeps the bar from being crowded with a counter that
 #     has nothing to say.
-#   - :zzz: (SF Symbol): always shown, "idle" is the other steady-state
-#     baseline alongside :hourglass:.
 #   - :cup.and.heat.waves.fill: (SF Symbol): only when agents > 0 — a session with a
 #     background Agent/Task/Workflow still running is real progress, but rare
 #     enough that ":cup.and.heat.waves.fill: 0" would just be noise.
@@ -491,16 +492,17 @@ __trace "result=visible always-on input=$n_input working=$n_working agents=$n_ag
 #     section below the separator only renders when count > 0 too.
 header=""
 [ "$n_input" -gt 0 ] && header="🔔 ${n_input} "
+header="${header}:zzz: ${n_idle} "
 if [ "$n_working" -gt 0 ] || { [ "$n_agents" -eq 0 ] && [ "$n_watching" -eq 0 ]; }; then
   header="${header}:hourglass: ${n_working} "
 fi
 [ "$n_agents" -gt 0 ] && header="${header}:cup.and.heat.waves.fill: ${n_agents} "
 [ "$n_watching" -gt 0 ] && header="${header}:binoculars: ${n_watching} "
-header="${header}:zzz: ${n_idle}"
+header="${header% }"
 # 5h-limit pace indicator: opt-in (see "5h-limit pace indicator" above),
 # comes after every other counter, at the very right. Prefixed with
 # :speedometer: (SF Symbol, matches the other counters' icon-prefix
-# convention and gives it visual separation from :zzz:) in the everyday
+# convention and gives it visual separation from the counters) in the everyday
 # behind/on-pace case; swapped for 🔥 when ahead of pace (consuming slower
 # than time is passing — a good state worth noticing) since emoji draws the
 # eye regardless of the menu bar's background/tint in a way color text can't.
@@ -566,6 +568,12 @@ if [ -n "$input_entries" ]; then
   printf '%s' "$input_entries" | _sort_by_mtime | cut -f2-
   need_sep=1
 fi
+if [ -n "$idle_entries" ]; then
+  [ "$need_sep" = "1" ] && echo "---"
+  echo "Idle | size=11 color=#4a4a4a,#b0b0b0"
+  printf '%s' "$idle_entries" | _sort_by_mtime | cut -f2-
+  need_sep=1
+fi
 if [ -n "$working_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
   echo "Working | size=11 color=#4a4a4a,#b0b0b0"
@@ -582,12 +590,6 @@ if [ -n "$watching_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
   echo "Watching | size=11 color=#4a4a4a,#b0b0b0"
   printf '%s' "$watching_entries" | _sort_by_mtime | cut -f2-
-  need_sep=1
-fi
-if [ -n "$idle_entries" ]; then
-  [ "$need_sep" = "1" ] && echo "---"
-  echo "Idle | size=11 color=#4a4a4a,#b0b0b0"
-  printf '%s' "$idle_entries" | _sort_by_mtime | cut -f2-
 fi
 
 _emit_dashboard_entry

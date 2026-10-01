@@ -968,7 +968,7 @@ if [ "$ps_seen" -gt 0 ]; then
   [ "$last_state" = "watching" ] && ok "notifs mode: event log still records watching" || ng "notifs mode: event state wrong (got '$last_state')"
 
   # 6. Plugin output (always-on): watching session shows up under its own
-  #    section, positioned between Working and Idle, with the 👀 emoji in
+  #    section, positioned after Idle and Working, with the 👀 emoji in
   #    the header count and sfimage=binoculars on the entry. Stale watching files
   #    (claude_pid alive but no marker child OR claude_pid dead) are
   #    downgraded to idle so the dropdown reflects current reality.
@@ -1020,14 +1020,14 @@ if [ "$ps_seen" -gt 0 ]; then
       && ok "plugin: stale watching downgrades to sfimage=zzz" \
       || ng "plugin: stale watching not downgraded: $out"
 
-    # Section order: Working appears before Watching appears before Idle.
+    # Section order: Idle appears before Working appears before Watching.
     working_line=$(echo "$out" | grep -n '^Working | size=11' | head -n1 | cut -d: -f1)
     watching_line=$(echo "$out" | grep -n '^Watching | size=11' | head -n1 | cut -d: -f1)
     idle_line=$(echo "$out" | grep -n '^Idle | size=11' | head -n1 | cut -d: -f1)
     if [ -n "$working_line" ] && [ -n "$watching_line" ] && [ -n "$idle_line" ] \
-       && [ "$working_line" -lt "$watching_line" ] \
-       && [ "$watching_line" -lt "$idle_line" ]; then
-      ok "plugin: section order is Working → Watching → Idle"
+       && [ "$idle_line" -lt "$working_line" ] \
+       && [ "$working_line" -lt "$watching_line" ]; then
+      ok "plugin: section order is Idle → Working → Watching"
     else
       ng "plugin: section order wrong (working=$working_line watching=$watching_line idle=$idle_line)"
     fi
@@ -1247,7 +1247,7 @@ last_state=$(jq -r --arg sid "$NASID" 'select(.session_id == $sid) | .state' "$C
 [ "$last_state" = "agents" ] && ok "notifs mode: event log still records agents" || ng "notifs mode: event state wrong (got '$last_state')"
 
 # 7. Plugin output (always-on): agents session shows up under its own
-#    section, positioned between Working and Watching, with the
+#    section, positioned between Working and Watching (after Idle), with the
 #    :cup.and.heat.waves.fill: emoji in the header count and sfimage=cup.and.heat.waves.fill on
 #    the entry. A stale agents file (fresh transcript aged out) is downgraded
 #    to idle so the dropdown reflects current reality.
@@ -1297,16 +1297,16 @@ if [ "$plugin" = "1" ]; then
     && ok "plugin: stale agents downgrades to sfimage=zzz" \
     || ng "plugin: stale agents not downgraded: $out"
 
-  # Section order: Working → Agents running → Watching → Idle.
+  # Section order: Idle → Working → Agents running → Watching.
   working_line=$(echo "$out" | grep -n '^Working | size=11' | head -n1 | cut -d: -f1)
   agents_line=$(echo "$out" | grep -n '^Agents running | size=11' | head -n1 | cut -d: -f1)
   watching_line=$(echo "$out" | grep -n '^Watching | size=11' | head -n1 | cut -d: -f1)
   idle_line=$(echo "$out" | grep -n '^Idle | size=11' | head -n1 | cut -d: -f1)
   if [ -n "$working_line" ] && [ -n "$agents_line" ] && [ -n "$watching_line" ] && [ -n "$idle_line" ] \
+     && [ "$idle_line" -lt "$working_line" ] \
      && [ "$working_line" -lt "$agents_line" ] \
-     && [ "$agents_line" -lt "$watching_line" ] \
-     && [ "$watching_line" -lt "$idle_line" ]; then
-    ok "plugin: section order is Working → Agents running → Watching → Idle"
+     && [ "$agents_line" -lt "$watching_line" ]; then
+    ok "plugin: section order is Idle → Working → Agents running → Watching"
   else
     ng "plugin: section order wrong (working=$working_line agents=$agents_line watching=$watching_line idle=$idle_line)"
   fi
@@ -1813,6 +1813,20 @@ if [ "$plugin" = "1" ]; then
   echo "$out" | grep -q 'Awaiting input' && ok "always-on: input section header present" || ng "always-on: input section header missing: $out"
   echo "$out" | grep -q 'Working' && ok "always-on: working section header present" || ng "always-on: working section header missing: $out"
   echo "$out" | grep -q 'Idle' && ok "always-on: idle section header present" || ng "always-on: idle section header missing: $out"
+
+  # Order: bell → idle → everything else, in both the header and the dropdown.
+  echo "$out" | head -n1 | grep -q '^🔔 1 :zzz: 1 :hourglass: 1 |' \
+    && ok "always-on: header order is 🔔 → :zzz: → :hourglass:" \
+    || ng "always-on: header order wrong: $(echo "$out" | head -n1)"
+  input_line=$(echo "$out" | grep -n '^Awaiting input | size=11' | head -n1 | cut -d: -f1)
+  idle_line=$(echo "$out" | grep -n '^Idle | size=11' | head -n1 | cut -d: -f1)
+  working_line=$(echo "$out" | grep -n '^Working | size=11' | head -n1 | cut -d: -f1)
+  if [ -n "$input_line" ] && [ -n "$idle_line" ] && [ -n "$working_line" ] \
+     && [ "$input_line" -lt "$idle_line" ] && [ "$idle_line" -lt "$working_line" ]; then
+    ok "always-on: section order is Awaiting input → Idle → Working"
+  else
+    ng "always-on: section order wrong (input=$input_line idle=$idle_line working=$working_line)"
+  fi
 
   # With only idle/working (no bell), header shows only hourglass + zzz
   rm -f "$BELL_STATE_DIR/aoB1"
