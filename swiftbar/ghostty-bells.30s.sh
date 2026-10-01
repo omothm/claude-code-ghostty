@@ -27,6 +27,17 @@ __trace "entry swiftbar_ppid=$PPID"
 
 HOOKS_DIR="${GHOSTTY_HOOKS_DIR:-$HOME/.claude/hooks}"
 FOCUS="$HOOKS_DIR/focus-ghostty-tab.sh"
+
+# Muted ANSI gray for timestamps and the 5h Pace subtitle. ANSI only takes a
+# single fixed color (unlike `color=light,dark`), so pick it per appearance:
+# a fixed mid-gray is unreadable over macOS 27's translucent menu. Matches the
+# section headers' color=#4a4a4a,#b0b0b0 pair; refreshes on the next run after
+# an appearance switch.
+if [ "$(defaults read -g AppleInterfaceStyle 2>/dev/null)" = "Dark" ]; then
+  MUTED=$(printf '\033[38;5;249m')
+else
+  MUTED=$(printf '\033[38;5;239m')
+fi
 STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 
 # Load config from JSON (~/.claude/.ccg/config.json).
@@ -159,8 +170,10 @@ _compute_pace_segment() {
 # still have; behind pace (diff < 0, consuming faster than the clock) reads
 # "room available" for the time still left in the window.
 # AS_OF is the cache's fetched_at formatted as HH:MM, or empty when the
-# cache predates that field (older statusline scripts) — the caller omits
-# the ", as of HH:MM" clause entirely in that case.
+# cache predates that field (older statusline scripts) or is fresh (fetched
+# within the last minute) — the caller omits the ", as of HH:MM" clause
+# entirely in either case, since a fresh cache doesn't need a staleness
+# callout.
 # $1 = five_h_pct   (number, 0-100)
 # $2 = resets_at    (unix timestamp)
 # $3 = now          (unix timestamp)
@@ -188,7 +201,9 @@ _compute_pace_toggle_info() {
     state="on pace"
   fi
   local as_of=""
-  [ -n "$fetched_at" ] && as_of=$(date -r "$fetched_at" +%H:%M 2>/dev/null)
+  if [ -n "$fetched_at" ] && (( now - fetched_at > 60 )); then
+    as_of=$(date -r "$fetched_at" +%H:%M 2>/dev/null)
+  fi
   printf '%s|%s|%s' "$hhmm" "$state" "$as_of"
 }
 
@@ -219,7 +234,8 @@ __trace "pace_segment=$PACE_SEGMENT pace_toggle_info=$PACE_TOGGLE_INFO"
 # gray used for the bell-entry timestamps (see the ansi=true comment above).
 # The ", as of HH:MM" clause is the cache's fetched_at — it's how staleness
 # (e.g. a cache that stopped updating while idle) is visible at a glance —
-# and is omitted for caches written before that field existed.
+# and is omitted both for caches written before that field existed and for
+# caches fetched within the last minute (nothing stale to call out yet).
 _emit_pace_toggle() {
   local toggle_script="$HOOKS_DIR/toggle-5h-pace.sh"
   [ -x "$toggle_script" ] || return 0
@@ -230,7 +246,7 @@ _emit_pace_toggle() {
     local state="${_rest%%|*}" as_of="${_rest#*|}"
     local as_of_part=""
     [ -n "$as_of" ] && as_of_part=", as of ${as_of}"
-    label="Show 5h Pace $(printf '\033[38;5;245m')— Reset: ${hhmm}, ${state}${as_of_part}$(printf '\033[0m')"
+    label="Show 5h Pace ${MUTED}— Reset: ${hhmm}, ${state}${as_of_part}$(printf '\033[0m')"
   fi
   if [ "$SHOW_5H_PACE" = "true" ]; then
     printf '%s | checked=True bash="%s" terminal=false refresh=true ansi=true\n' "$label" "$toggle_script"
@@ -416,7 +432,7 @@ if [ "$BELL_MODE" != "always-on" ]; then
     # ansi=true renders the trailing timestamp in a muted gray; it conflicts
     # with SwiftBar's `symbolize` but not with a co-existing `sfimage=`.
     printf '%s | shell="%s" param1="%s" terminal=false ansi=true\n' \
-      "${display} $(printf '\033[38;5;245m')— ${ts}$(printf '\033[0m')" "$FOCUS" "$stripped"
+      "${display} ${MUTED}— ${ts}$(printf '\033[0m')" "$FOCUS" "$stripped"
   done < <(printf '%s\n' "$bell_titles" | _sort_by_mtime)
 
   _emit_dashboard_entry
@@ -519,7 +535,7 @@ while IFS= read -r f; do
   ts=$(_fmt_mtime "$mtime")
   # ansi=true renders the trailing timestamp in a muted gray; it conflicts
   # with SwiftBar's `symbolize` but not with a co-existing `sfimage=`.
-  display="${display} $(printf '\033[38;5;245m')— ${ts}$(printf '\033[0m')"
+  display="${display} ${MUTED}— ${ts}$(printf '\033[0m')"
   case "$st" in
     input)
       # Strip leading 🔔 from the match key: the bell-state file keeps 🔔
@@ -546,31 +562,31 @@ done < <(_read_state_files)
 
 need_sep=0
 if [ -n "$input_entries" ]; then
-  echo "Awaiting input | size=11 color=gray"
+  echo "Awaiting input | size=11 color=#4a4a4a,#b0b0b0"
   printf '%s' "$input_entries" | _sort_by_mtime | cut -f2-
   need_sep=1
 fi
 if [ -n "$working_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
-  echo "Working | size=11 color=gray"
+  echo "Working | size=11 color=#4a4a4a,#b0b0b0"
   printf '%s' "$working_entries" | _sort_by_mtime | cut -f2-
   need_sep=1
 fi
 if [ -n "$agents_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
-  echo "Agents running | size=11 color=gray"
+  echo "Agents running | size=11 color=#4a4a4a,#b0b0b0"
   printf '%s' "$agents_entries" | _sort_by_mtime | cut -f2-
   need_sep=1
 fi
 if [ -n "$watching_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
-  echo "Watching | size=11 color=gray"
+  echo "Watching | size=11 color=#4a4a4a,#b0b0b0"
   printf '%s' "$watching_entries" | _sort_by_mtime | cut -f2-
   need_sep=1
 fi
 if [ -n "$idle_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
-  echo "Idle | size=11 color=gray"
+  echo "Idle | size=11 color=#4a4a4a,#b0b0b0"
   printf '%s' "$idle_entries" | _sort_by_mtime | cut -f2-
 fi
 
