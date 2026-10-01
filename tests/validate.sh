@@ -81,6 +81,19 @@ GLOBAL_NOTIFY_BIN="$TMPROOT/bin-global-notify"
 mkdir -p "$GLOBAL_NOTIFY_BIN"
 printf '#!/bin/bash\nexit 0\n' > "$GLOBAL_NOTIFY_BIN/terminal-notifier"
 chmod +x "$GLOBAL_NOTIFY_BIN/terminal-notifier"
+# Global `defaults` stub: the plugin picks its muted ANSI gray from
+# `defaults read -g AppleInterfaceStyle`, so pin the appearance (light unless
+# FAKE_APPEARANCE=Dark) to keep checks independent of the machine's mode.
+# Every other `defaults` call passes through to the real binary.
+cat > "$GLOBAL_NOTIFY_BIN/defaults" <<'STUB'
+#!/bin/bash
+if [ "$1 $2 $3" = "read -g AppleInterfaceStyle" ]; then
+  [ "$FAKE_APPEARANCE" = "Dark" ] && { echo Dark; exit 0; }
+  exit 1
+fi
+exec /usr/bin/defaults "$@"
+STUB
+chmod +x "$GLOBAL_NOTIFY_BIN/defaults"
 export PATH="$GLOBAL_NOTIFY_BIN:$PATH"
 
 if [ -t 1 ]; then
@@ -440,9 +453,12 @@ if [ "$plugin" = "1" ]; then
   echo "$out" | grep -q 'ansi=true' \
     && ok "notifs: entries opt into ansi=true for muted timestamp color" \
     || ng "notifs: ansi=true missing: $out"
-  echo "$out" | grep -q $'\033\[38;5;245m' \
+  echo "$out" | grep -q $'\033\[38;5;239m' \
     && ok "notifs: timestamp uses muted gray ANSI color" \
     || ng "notifs: muted gray ANSI escape missing"
+  FAKE_APPEARANCE=Dark bash "$PLUGIN_PATH" 2>&1 | grep -q $'\033\[38;5;249m' \
+    && ok "notifs: dark appearance uses lighter muted gray (249)" \
+    || ng "notifs: dark-appearance muted gray (249) missing"
 
   older_line=$(echo "$out" | grep -n 'ts-older' | head -n1 | cut -d: -f1)
   newer_line=$(echo "$out" | grep -n 'ts-newer' | head -n1 | cut -d: -f1)
@@ -473,6 +489,11 @@ if [ "$plugin" = "1" ]; then
   echo "$out" | grep -q 'ao-ts-older.*ansi=true' \
     && ok "always-on: entry shows muted timestamp with ansi=true" \
     || ng "always-on: ansi=true/timestamp missing: $out"
+  # Section headers use a light,dark color pair: a single fixed gray is
+  # unreadable over macOS 27's translucent menu background.
+  echo "$out" | grep -q '^Working | size=11 color=#4a4a4a,#b0b0b0$' \
+    && ok "always-on: section header uses light,dark color pair" \
+    || ng "always-on: section header color not the light,dark pair: $(echo "$out" | grep '^Working')"
 
   rm -f "$BELL_STATE_DIR/aoTsNewer" "$BELL_STATE_DIR/aoTsOlder"
   : > "$BELL_CONFIG"
@@ -2204,7 +2225,7 @@ if [ "$plugin" = "1" ]; then
   echo "$toggle_line" | grep -q "Reset: ${hhmm_expected}, .*too fast" \
     && ok "toggle subtitle shows reset time + too-fast state when ahead" \
     || ng "toggle subtitle missing/wrong when ahead: $toggle_line"
-  echo "$toggle_line" | grep -q $'\033\[38;5;245m' \
+  echo "$toggle_line" | grep -q $'\033\[38;5;239m' \
     && ok "toggle subtitle uses muted color escape" \
     || ng "toggle subtitle missing muted color escape: $toggle_line"
   echo "$toggle_line" | grep -q 'ansi=true' \
@@ -2224,6 +2245,13 @@ if [ "$plugin" = "1" ]; then
   echo "$toggle_line_fetched" | grep -q "as of ${as_of_expected}" \
     && ok "toggle subtitle shows 'as of HH:MM' when cache has fetched_at" \
     || ng "toggle subtitle missing/wrong 'as of' clause: $toggle_line_fetched"
+  # A fresh cache (fetched within the last minute) has nothing stale to call out.
+  fetched_at=$(( now_ts - 10 ))
+  printf '{"fetched_at":%d,"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$fetched_at" "$resets_at" > "$PACE_CACHE"
+  toggle_line_fresh=$(BELL_CONFIG="$PACE_CONFIG" bash "$PLUGIN_PATH" 2>&1 | grep 'Show 5h Pace')
+  echo "$toggle_line_fresh" | grep -q 'as of' \
+    && ng "toggle subtitle should omit 'as of' when cache is fresh: $toggle_line_fresh" \
+    || ok "no 'as of' clause when cache was fetched within the last minute"
   # Restore the fetched_at-less cache for the checks below.
   printf '{"five_hour":{"used_percentage":10,"resets_at":%d}}\n' "$resets_at" > "$PACE_CACHE"
 
