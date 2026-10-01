@@ -2073,32 +2073,46 @@ if command -v node >/dev/null 2>&1 && [ -f "$DASHBOARD_PATH" ]; then
     {
       printf '%s\n' "$VERDICT_FN"
       cat <<'NODE'
+const B = (i, c) => ({ idleShare: i, concShare: c });   // your typical day
+const NOB = B(null, null);                             // no baseline yet
 const cases = [
-  // [fleetIdle, conc, bellStall, expectedKind]
-  [null, null, null, 'quiet'],          // no signal at all
-  [null, 0.10, null, 'quiet'],          // idle gated → quiet even with low conc
-  [null, null, 0.60, 'bells'],          // bell stall surfaces even when fleet is gated
-  [0.20, 0.80, 0.50, 'bells'],          // boundary: 0.5 bell stall dominates a good fleet
-  [0.20, 0.80, 0.49, 'good'],           // just below the bell threshold → ignored
-  [0.70, 0.80, null, 'idle-critical'],  // high fleet-idle dominates great conc
-  [0.50, 0.80, 0.10, 'idle-critical'],  // boundary: 0.5 is critical
-  [0.49, 0.80, null, 'idle-high'],      // just below critical
-  [0.35, 0.80, null, 'idle-high'],      // boundary: 0.35 is high
-  [0.34, 0.10, null, 'fanout'],         // idle healthy, conc low → fan out
-  [0.20, 0.29, null, 'fanout'],         // boundary: 0.29 still fan-out
-  [0.20, 0.30, null, 'good'],           // boundary: 0.30 is healthy
-  [0.20, null, null, 'good'],           // idle healthy, conc gated → good (not fanout)
+  // [fleetIdle, conc, bellStall, base, expectedKind]
+  [null, null, null, B(0.4, 0.3), 'quiet'],         // no signal at all
+  [null, 0.10, null, B(0.4, 0.3), 'quiet'],         // idle gated → quiet even with low conc
+  [null, null, 0.60, B(0.4, 0.3), 'bells'],         // bell stall surfaces even when fleet is gated
+  [0.20, 0.80, 0.50, B(0.4, 0.3), 'bells'],         // boundary: 0.5 bell stall dominates a good fleet
+  [0.20, 0.80, 0.49, B(0.4, 0.3), 'good'],          // just below the bell threshold → ignored
+  // Fixed 50% floor wins even when it's better than your typical day.
+  [0.50, 0.80, null, B(0.60, 0.3), 'idle-critical'],
+  [0.49, 0.80, null, B(0.60, 0.3), 'good'],         // under the floor and better than typical
+  // Relative idle: worse than typical by more than the 2pt band → act.
+  [0.43, 0.80, null, B(0.40, 0.3), 'idle-high'],    // 3pt worse
+  [0.42, 0.80, null, B(0.40, 0.3), 'good'],         // exactly at the band edge → on par
+  [0.25, 0.80, null, B(0.20, 0.3), 'idle-high'],    // under the old absolute 35% but worse than *your* 20%
+  [0.38, 0.80, null, B(0.45, 0.3), 'good'],         // over the old absolute 35% but better than typical
+  // Relative concurrency, checked only once idle is on par or better.
+  [0.30, 0.40, null, B(0.40, 0.50), 'fanout'],      // conc 10pt below typical
+  [0.30, 0.48, null, B(0.40, 0.50), 'good'],        // conc inside the band → on par
+  [0.30, 0.20, null, B(0.40, 0.10), 'good'],        // under the old absolute 30% but above *your* 10%
+  [0.45, 0.10, null, B(0.40, 0.50), 'idle-high'],   // idle worse dominates conc worse
+  [0.30, null, null, B(0.40, 0.50), 'good'],        // conc gated → never fanout
+  // No baseline yet → absolute fallbacks (35% idle, 30% conc).
+  [0.35, 0.80, null, NOB, 'idle-high'],
+  [0.34, 0.29, null, NOB, 'fanout'],
+  [0.34, 0.30, null, NOB, 'good'],
+  [0.34, 0.80, null, undefined, 'good'],            // base omitted entirely
+  [0.40, 0.80, null, B(null, 0.5), 'idle-high'],    // per-lever fallback: no idle baseline only
 ];
 let bad = 0;
-for (const [i, c, s, want] of cases) {
-  const got = verdictFor(i, c, s).kind;
-  if (got !== want) { bad++; console.log(`FAIL idle=${i} conc=${c} stall=${s}: want ${want}, got ${got}`); }
+for (const [i, c, s, base, want] of cases) {
+  const got = verdictFor(i, c, s, base).kind;
+  if (got !== want) { bad++; console.log(`FAIL idle=${i} conc=${c} stall=${s} base=${JSON.stringify(base)}: want ${want}, got ${got}`); }
 }
 process.exit(bad);
 NODE
     } > "$VERDICT_JS"
     if node_out=$(node "$VERDICT_JS" 2>&1); then
-      ok "verdictFor selects correct branch across all cases + boundaries"
+      ok "verdictFor selects correct branch: floor, baseline-relative bands, fallbacks"
     else
       ng "verdictFor branch mismatch: $node_out"
     fi

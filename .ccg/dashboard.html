@@ -866,25 +866,43 @@ function computeFleet(sessions, nowSec) {
   return { days, daily, last24, tl, base, lastBusyEnd, cutoff, bins };
 }
 
-// Pure branch-selection for the verdict banner. Given the live levers it picks
-// the ONE highest-leverage move and returns {kind, cls, icon}. Kept pure (no
-// DOM, no formatting) so the validator can assert precedence in isolation —
-// renderVerdict() below wraps it with the human copy. Order of precedence:
-// a bell problem (rare in auto mode, but a stalled fleet you can fix with one
-// allow rule) → not enough signal → fleet idle on you too high → low
-// parallelism → all good. Fleet-idle dominates concurrency because idle fleet
-// time is wall-clock you lost; low concurrency is only opportunity cost.
-// The markers below are load-bearing: tests/validate.sh slices this function
+// Pure branch-selection for the verdict banner. Given the live levers and your
+// typical day it picks the ONE highest-leverage move and returns
+// {kind, cls, icon}. Kept pure (no DOM, no formatting) so the validator can
+// assert precedence in isolation — renderVerdict() below wraps it with the
+// human copy. Order of precedence: a bell problem (rare in auto mode, but a
+// stalled fleet you can fix with one allow rule) → not enough signal → fleet
+// idle past the fixed 50% floor → fleet idle worse than your typical day →
+// concurrency worse than your typical day → good. Fleet-idle dominates
+// concurrency because idle fleet time is wall-clock you lost; low
+// concurrency is only opportunity cost.
+//
+// The middle cut-offs are relative to `base` (median of your previous
+// active days) so the banner keeps pushing as you improve; a fixed cut-off
+// would read "good" forever once you cleared it. VERDICT_BAND is a dead-band
+// so a 24h value hovering at your typical doesn't flip the banner every
+// tick. With no baseline yet (new install, thin history) it falls back to
+// the absolute cut-offs.
+// The markers below are load-bearing: tests/validate.sh slices this block
 // out by them to test it under Node. Keep them on their own lines.
 // <verdictFor>
-function verdictFor(idle, conc, stall) {
+const VERDICT_IDLE_FLOOR = 0.5;      // always flag, whatever your typical is
+const VERDICT_BAND = 0.02;           // ±2pt around typical counts as "on par"
+const VERDICT_IDLE_HIGH_ABS = 0.35;  // fallback when there's no idle baseline
+const VERDICT_CONC_LOW_ABS = 0.3;    // fallback when there's no conc baseline
+function verdictFor(idle, conc, stall, base) {
   // idle is null when gated (under ACTIVE_MIN_SEC active time); conc is null
   // under CONC_MIN_BUSY_SEC busy time; stall is null under STALL_MIN_SAMPLE.
-  if (stall != null && stall >= 0.5) return { kind: 'bells',         cls: 'warn', icon: '🔔' };
-  if (idle == null)                  return { kind: 'quiet',         cls: '',     icon: '·' };
-  if (idle >= 0.5)                   return { kind: 'idle-critical', cls: 'act',  icon: '▲' };
-  if (idle >= 0.35)                  return { kind: 'idle-high',     cls: 'act',  icon: '▲' };
-  if (conc != null && conc < 0.3)    return { kind: 'fanout',        cls: '',     icon: '→' };
+  // base.{idleShare,concShare} are null with no scored previous days.
+  const bIdle = base && base.idleShare != null ? base.idleShare : null;
+  const bConc = base && base.concShare != null ? base.concShare : null;
+  if (stall != null && stall >= 0.5) return { kind: 'bells', cls: 'warn', icon: '🔔' };
+  if (idle == null)                  return { kind: 'quiet', cls: '',     icon: '·' };
+  if (idle >= VERDICT_IDLE_FLOOR)    return { kind: 'idle-critical', cls: 'act', icon: '▲' };
+  const idleWorse = bIdle != null ? idle > bIdle + VERDICT_BAND : idle >= VERDICT_IDLE_HIGH_ABS;
+  if (idleWorse)                     return { kind: 'idle-high', cls: 'act', icon: '▲' };
+  const concWorse = conc != null && (bConc != null ? conc < bConc - VERDICT_BAND : conc < VERDICT_CONC_LOW_ABS);
+  if (concWorse)                     return { kind: 'fanout', cls: '', icon: '→' };
   return { kind: 'good', cls: 'good', icon: '✓' };
 }
 // </verdictFor>
@@ -905,7 +923,7 @@ function renderVerdict(fleet, data) {
 
   const f = fleet.last24;
   const idle = f.idleShare, conc = f.concShare;
-  const v = verdictFor(idle, conc, data.stallShare);
+  const v = verdictFor(idle, conc, data.stallShare, fleet.base);
 
   if (v.cls) el.classList.add(v.cls);
   icon.textContent = v.icon;
@@ -923,13 +941,13 @@ function renderVerdict(fleet, data) {
       txt.innerHTML = `<b>Your fleet sat idle ${fmtPct(idle)} of your active time</b>${idleNote} — <span class="lever">${fmtDuration(f.deadSecs)}</span> with nothing running while you reviewed or decided. Before you read a finished session's output, queue the next task in another so something is always running.`;
       break;
     case 'idle-high':
-      txt.innerHTML = `<b>Fleet idle ${fmtPct(idle)} of active time</b>${idleNote} — <span class="lever">${fmtDuration(f.deadSecs)}</span> lost. Overlap your review time: keep a second session working while you read the first one's output.`;
+      txt.innerHTML = `<b>Fleet idle ${fmtPct(idle)} of active time</b>${fleet.base.idleShare != null ? ` — worse than your typical ${fmtPct(fleet.base.idleShare)}` : ''}, <span class="lever">${fmtDuration(f.deadSecs)}</span> lost. Overlap your review time: keep a second session working while you read the first one's output.`;
       break;
     case 'fanout':
-      txt.innerHTML = `The fleet rarely waits on you (idle <span class="lever">${fmtPct(idle)}</span>), but only <span class="lever">${fmtPct(conc)}</span> of busy time had ≥2 sessions going${concNote}. Next gain is throughput: fan out a second or third task.`;
+      txt.innerHTML = `Fleet idle is holding at <span class="lever">${fmtPct(idle)}</span>${idleNote}, but only <span class="lever">${fmtPct(conc)}</span> of busy time had ≥2 sessions going${fleet.base.concShare != null ? ` — below your typical ${fmtPct(fleet.base.concShare)}` : ''}. Next gain is throughput: fan out a second or third task.`;
       break;
     case 'good':
-      txt.innerHTML = `Fleet idle <span class="lever">${fmtPct(idle)}</span>${idleNote}, concurrent share <span class="lever">${fmtPct(conc)}</span>, <span class="lever">${f.parallelism.toFixed(1)}</span> sessions busy on average. You're keeping agents busy in parallel — hold the line.`;
+      txt.innerHTML = `Fleet idle <span class="lever">${fmtPct(idle)}</span>${idleNote}, concurrent share <span class="lever">${fmtPct(conc)}</span>${concNote}, <span class="lever">${f.parallelism.toFixed(1)}</span> sessions busy on average. At or better than your typical day — keep raising the bar.`;
       break;
   }
 }

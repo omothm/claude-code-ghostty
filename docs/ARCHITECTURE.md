@@ -734,8 +734,9 @@ own working style, not a fact the data reveals. 10 min treats a longer
 pause as stepping away rather than charging it as idle. The dashboard
 re-reads `config.json` every tick (`breakSecFrom`; missing, non-numeric or
 < 1 min falls back to the default), so a change applies without a reload.
-The verdict thresholds (50% / 35%) still separate good days (16–33%) from
-typical ones (~45–60%) at 10 min. **Rejected alternative (prompt-to-prompt "active
+Changing it shifts your baseline along with today's value, so the verdict
+(which compares against your typical day) stays meaningful at any setting.
+**Rejected alternative (prompt-to-prompt "active
 intervals"):** inferring presence from `idle→working` transitions fails
 because background-task completions also wake the main loop into `working`
 without a user prompt, and the event log can't tell them apart.
@@ -764,13 +765,27 @@ width. It replaced a five-band stacked area chart whose translucent fills
 overlapped and which showed state counts without saying where time was
 lost.
 
-**Verdict banner:** `verdictFor(idle, conc, stall)` is pure (sliced out by
-`// <verdictFor>` markers for the validator) with precedence: bells (bell
-stall ≥ 50% — rare, but one allow rule fixes it) → quiet (idle gated) →
-idle-critical (≥ 50%) → idle-high (≥ 35%) → fanout (concurrent share <
-30%) → good. **Fleet-idle dominates concurrency** for the same reason
-stall used to: idle fleet time is wall-clock you lost; low concurrency is
-only opportunity cost. The fleet helpers live between `// <fleetMetrics>`
+**Verdict banner:** `verdictFor(idle, conc, stall, base)` is pure (sliced
+out by `// <verdictFor>` markers for the validator) with precedence: bells
+(bell stall ≥ 50% — rare, but one allow rule fixes it) → quiet (idle gated)
+→ idle-critical (≥ 50%, a fixed floor) → idle-high (worse than your typical
+day) → fanout (concurrent share worse than your typical day) → good (on par
+or better on both). **Fleet-idle dominates concurrency** for the same
+reason stall used to: idle fleet time is wall-clock you lost; low
+concurrency is only opportunity cost.
+
+**Why the middle cut-offs are relative, not fixed:** the first version used
+fixed 35% idle / 30% concurrency cut-offs, eyeballed from one month of data.
+Fixed cut-offs stop pushing once you clear them — the banner would read
+"good" forever. Comparing against `base` (the same median-of-previous-7-
+active-days baseline the panel deltas use) keeps the bar moving with you.
+Three deliberate exceptions: the **50% idle floor** stays absolute so a
+genuinely bad day is always flagged, even when your typical is worse;
+`VERDICT_BAND` (±2pt) counts values near your typical as on par so a
+rolling-24h value hovering at the baseline doesn't flip the banner every
+tick (a smoothing choice, not a quality bar); and with **no baseline** for
+a lever (new install, thin history) that lever falls back to the old
+absolute cut-off. The fleet helpers live between `// <fleetMetrics>`
 markers and are validator-tested on a synthetic fleet.
 
 ## Bell section metric: "Fleet stalled on bells"

@@ -290,7 +290,9 @@ liveness count, while a genuinely live sibling transcript still keeps the
 state at `agents`), `BELL_TRACE` toggle (off = 0
 bytes, on = populated), dashboard verdict logic (slices `verdictFor` from
 `dashboard.html` by its `// <verdictFor>` markers and runs it under Node
-across every branch + precedence boundary; asserts `renderVerdict` has a
+across every branch + precedence boundary — the fixed 50% idle floor, the
+±2pt band around your typical day, relative-beats-absolute cases, and the
+absolute fallbacks with no baseline; asserts `renderVerdict` has a
 `case` for each kind), dashboard fleet metrics (slices the
 `// <fleetMetrics>` block and checks on a synthetic fleet that only gaps
 from 1 min up to the break threshold count as fleet-idle — sub-minute noise
