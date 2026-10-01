@@ -55,6 +55,7 @@ export BELL_CONFIG="$TMPROOT/bell-config"
 export CCG_EVENT_LOG="$TMPROOT/events.jsonl"
 export CCG_SESSION_STATE_DIR="$TMPROOT/sessions"
 export CCG_PENDING_DIR="$TMPROOT/pending"
+export CCG_STOPPED_DIR="$TMPROOT/stopped"
 # The validator typically runs INSIDE a live Claude Code session, whose
 # claude process has live Monitor descendants. Without an override, every
 # `idle` test would walk up the process tree, find that claude, and upgrade
@@ -119,7 +120,7 @@ cleanup() {
   done
   rm -rf "$TMPROOT"
   unset BELL_STATE_DIR BELL_TRACE BELL_TRACE_LOG BELL_CONFIG GHOSTTY_HOOKS_DIR \
-        CCG_EVENT_LOG CCG_SESSION_STATE_DIR CCG_CLAUDE_PID CCG_PENDING_DIR
+        CCG_EVENT_LOG CCG_SESSION_STATE_DIR CCG_CLAUDE_PID CCG_PENDING_DIR CCG_STOPPED_DIR
 }
 trap cleanup EXIT
 
@@ -724,21 +725,34 @@ if [ ! -f "$CCG_SESSION_STATE_DIR/recon-legacy-old" ] && jq -e 'select(.session_
 else ng "reconcile: legacy no-PID aged file not reaped/end-emitted"; fi
 rm -f "$CCG_SESSION_STATE_DIR/recon-legacy-fresh"
 
-# tab-title.sh writes a 2-line logical-state file (state + pid) and dedup still
-# works off line 1. Precede with idle so the logical-state file exists — a real
-# session always fires SessionStart(idle) before the first working.
+# tab-title.sh writes a 3-line logical-state file (state + pid + last logged
+# ts) and dedup still works off line 1. Precede with idle so the logical-state
+# file exists — a real session always fires SessionStart(idle) before the
+# first working.
 : > "$CCG_EVENT_LOG"; rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"
 CCG_CLAUDE_PID=4242 "$HOOKS_DIR/tab-title.sh" idle "recon-fmt" >/dev/null 2>&1
 CCG_CLAUDE_PID=4242 "$HOOKS_DIR/tab-title.sh" working "recon-fmt" >/dev/null 2>&1
 _lsf="$CCG_SESSION_STATE_DIR/recon-fmt"
-if [ "$(sed -n '1p' "$_lsf" 2>/dev/null)" = "working" ] && [ "$(sed -n '2p' "$_lsf" 2>/dev/null)" = "4242" ]; then
-  ok "tab-title: logical-state file is 2-line (state + pid)"
-else ng "tab-title: logical-state file not 2-line state+pid (got: $(cat "$_lsf" 2>/dev/null | tr '\n' '/'))"; fi
+_lts=$(sed -n '3p' "$_lsf" 2>/dev/null)
+_ets=$(jq -r 'select(.session_id=="recon-fmt" and .state=="working") | .ts' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
+if [ "$(sed -n '1p' "$_lsf" 2>/dev/null)" = "working" ] && [ "$(sed -n '2p' "$_lsf" 2>/dev/null)" = "4242" ] \
+   && [ -n "$_lts" ] && awk -v a="$_lts" -v b="$_ets" 'BEGIN { exit !(a + 0 == b + 0) }'; then
+  ok "tab-title: logical-state file is 3-line (state + pid + logged ts)"
+else ng "tab-title: logical-state file not 3-line state+pid+ts matching the event (got: $(cat "$_lsf" 2>/dev/null | tr '\n' '/'), event ts=$_ets)"; fi
 # Second identical working must dedup (no new event appended).
 _before=$(wc -l < "$CCG_EVENT_LOG")
 CCG_CLAUDE_PID=4242 "$HOOKS_DIR/tab-title.sh" working "recon-fmt" >/dev/null 2>&1
 _after=$(wc -l < "$CCG_EVENT_LOG")
-[ "$_before" = "$_after" ] && ok "tab-title: dedup still works off line 1 (2-line file)" || ng "tab-title: dedup broke with 2-line logical-state file"
+[ "$_before" = "$_after" ] && ok "tab-title: dedup still works off line 1 (3-line file)" || ng "tab-title: dedup broke with 3-line logical-state file"
+# A legacy 2-line (state + pid) file still dedups and gets upgraded on the next
+# real transition (no line 3 = no clamp, not an error).
+printf 'working\n4242\n' > "$_lsf"
+CCG_CLAUDE_PID=4242 "$HOOKS_DIR/tab-title.sh" working "recon-fmt" >/dev/null 2>&1
+[ "$(wc -l < "$CCG_EVENT_LOG")" = "$_after" ] && ok "tab-title: legacy 2-line logical-state file still dedups" \
+  || ng "tab-title: legacy 2-line logical-state file broke dedup"
+CCG_CLAUDE_PID=4242 "$HOOKS_DIR/tab-title.sh" idle "recon-fmt" >/dev/null 2>&1
+[ -n "$(sed -n '3p' "$_lsf" 2>/dev/null)" ] && ok "tab-title: legacy 2-line file upgraded to 3-line on next transition" \
+  || ng "tab-title: legacy file not upgraded (got: $(cat "$_lsf" 2>/dev/null | tr '\n' '/'))"
 rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
 
 # Idle-refinement correction pass: a bell-state file stuck at `agents` (or
@@ -2090,30 +2104,330 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-section "dashboard event ordering (writer-precision + exact-tie regression)"
+section "event ts ordering (sweep correction vs same-second hook event)"
 
-# Root cause of a real dashboard/menubar count mismatch: tab-title.sh stamps
-# events.jsonl with fractional-second ts (gdate %s.%3N), but sweep-bell-
-# state.sh's logical-state correction pass (the one that emits the true
-# agents/watching/idle correction) used to stamp with bare-integer ts
-# (date +%s). A same-second pair then numerically sorted with the LATER-
-# written but integer-stamped correction (e.g. 1785244323) landing BEFORE
-# the earlier fractional event (e.g. 1785244323.192) — no stable secondary
-# sort can undo that, since the ts values genuinely differ. The only real
-# fix is both writers using matching precision, so once that holds, write
-# order and numeric ts order agree. Guard the writer directly.
-if grep -q '_now_frac=\$(gdate' "$HOOKS_DIR/sweep-bell-state.sh" \
-  && grep -q -- '--arg ts "\$_now_frac"' "$HOOKS_DIR/sweep-bell-state.sh"; then
-  ok "sweep-bell-state.sh: logical-state correction pass uses fractional-second ts"
+# Root cause of the dashboard under-reporting `agents` time: tab-title.sh
+# stamps events.jsonl with fractional-second ts, but the SwiftBar plugin
+# launches sweep-bell-state.sh with SwiftBar's PATH (/usr/bin:/bin:/usr/sbin:
+# /sbin — no Homebrew gdate), and the sweep fell back to an INTEGER ts
+# captured at script start. Its correction (e.g. `agents` at …067) was written
+# AFTER a hook's `idle` at …067.430 but sorted BEFORE it in the dashboard's
+# "ts, then file order" sort, so the session read as idle — and since the
+# logical-state file then said `agents`, tab-title.sh dedup'd every later
+# agents event. Reproduce: hook-style `idle` at the current fractional second,
+# a genuinely live (unrecorded) subagent transcript, sweep run with SwiftBar's
+# PATH; the session's latest state in dashboard order must be the sweep's
+# `agents`. The `nogdate` variant additionally shadows gdate with a failing
+# stub (the sweep appends Homebrew to PATH itself, so plain SwiftBar PATH still
+# finds gdate on this machine) to exercise the /usr/bin/perl fallback.
+export CCG_PROJECTS_DIR="$TMPROOT/ts-projects"
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+SWIFTBAR_PATH="$GLOBAL_NOTIFY_BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+NOGDATE_BIN="$TMPROOT/bin-nogdate"
+mkdir -p "$NOGDATE_BIN"
+printf '#!/bin/bash\nexit 1\n' > "$NOGDATE_BIN/gdate"
+chmod +x "$NOGDATE_BIN/gdate"
+
+# Latest state for session $1 in the dashboard's order (parseEvents sorts by
+# ts, then file-append order; jq's sort_by is stable, so append order breaks
+# exact ties the same way).
+_dash_latest() {
+  jq -rs --arg sid "$1" '[.[] | select(.session_id == $sid)] | sort_by(.ts) | last | .state // empty' "$CCG_EVENT_LOG" 2>/dev/null
+}
+_dash_events() {
+  jq -c --arg s "$1" 'select(.session_id == $s) | [.ts, .state]' "$CCG_EVENT_LOG" 2>/dev/null | tr '\n' ' '
+}
+# $1 = sid, $2 = ts of the hook's `idle`. Sets up the race: `idle` logged by
+# the "hook", 3-line logical-state file says idle, live PID ($$), and a fresh
+# subagent transcript with no stopped-agent record (a genuinely live agent).
+_ts_race_setup() {
+  local sid="$1" ts="$2"
+  mkdir -p "$CCG_PROJECTS_DIR/fake-project/$sid/subagents"
+  printf '{"type":"assistant"}\n' > "$CCG_PROJECTS_DIR/fake-project/$sid/subagents/agent-livehex.jsonl"
+  jq -nc --arg ts "$ts" --arg sid "$sid" '{ts: ($ts|tonumber), session_id: $sid, state: "idle", title: "t", cwd: "c"}' >> "$CCG_EVENT_LOG"
+  printf 'idle\n%s\n%s\n' "$$" "$ts" > "$CCG_SESSION_STATE_DIR/$sid"
+}
+
+: > "$CCG_EVENT_LOG"
+for _variant in swiftbar nogdate; do
+  TSID="ts-$_variant-$$"
+  _ts_race_setup "$TSID" "$(gdate +%s.%3N)"
+  if [ "$_variant" = "swiftbar" ]; then _p="$SWIFTBAR_PATH"; else _p="$NOGDATE_BIN:$SWIFTBAR_PATH"; fi
+  env PATH="$_p" /bin/bash "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+  _latest=$(_dash_latest "$TSID")
+  [ "$_latest" = "agents" ] \
+    && ok "ts order ($_variant PATH): sweep's same-second correction is the latest state in dashboard order" \
+    || ng "ts order ($_variant PATH): latest state '$_latest', want agents ($(_dash_events "$TSID"))"
+  _sts=$(sed -n '3p' "$CCG_SESSION_STATE_DIR/$TSID" 2>/dev/null)
+  case "$_sts" in
+    *.[0-9][0-9][0-9]) ok "ts order ($_variant PATH): sweep stamped a sub-second ts ($_sts)" ;;
+    *) ng "ts order ($_variant PATH): sweep ts not sub-second (got '$_sts')" ;;
+  esac
+  rm -f "$CCG_SESSION_STATE_DIR/$TSID"
+done
+
+# Clamp: the sweep's correction must land strictly above the session's last
+# logged ts (logical-state line 3) even when that ts is AHEAD of the sweep's
+# own clock reading (a clamped earlier event, or a hook whose clock read
+# later), and tab-title.sh must in turn clamp above the sweep's stamp.
+TSID="ts-clamp-$$"
+_future=$(awk -v t="$(gdate +%s.%3N)" 'BEGIN { printf "%.3f", t + 5.5 }')
+_ts_race_setup "$TSID" "$_future"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+_got=$(sed -n '3p' "$CCG_SESSION_STATE_DIR/$TSID" 2>/dev/null)
+_want=$(awk -v t="$_future" 'BEGIN { printf "%.3f", t + 0.001 }')
+[ "$_got" = "$_want" ] && ok "ts clamp: sweep correction stamped at last logged ts + 0.001 ($_got)" \
+  || ng "ts clamp: sweep ts '$_got', want '$_want' ($(_dash_events "$TSID"))"
+[ "$(_dash_latest "$TSID")" = "agents" ] && ok "ts clamp: sweep correction is the latest state in dashboard order" \
+  || ng "ts clamp: latest state wrong ($(_dash_events "$TSID"))"
+CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" working "$TSID" > /dev/null 2>&1
+_hook_ts=$(sed -n '3p' "$CCG_SESSION_STATE_DIR/$TSID" 2>/dev/null)
+_want2=$(awk -v t="$_got" 'BEGIN { printf "%.3f", t + 0.001 }')
+[ "$_hook_ts" = "$_want2" ] && [ "$(_dash_latest "$TSID")" = "working" ] \
+  && ok "ts clamp: tab-title.sh stamps above the sweep's ts ($_hook_ts)" \
+  || ng "ts clamp: tab-title.sh ts '$_hook_ts', want '$_want2' ($(_dash_events "$TSID"))"
+rm -f "$CCG_SESSION_STATE_DIR/$TSID" "$BELL_STATE_DIR/$TSID"
+
+# Synthetic `end` on the `now` path (fresh mtime, dead PID) is clamped too; the
+# uncapped `mtime + 30min` path is covered (unchanged) in the sweep section.
+TSID="ts-end-$$"
+printf 'idle\n999999\n%s\n' "$_future" > "$CCG_SESSION_STATE_DIR/$TSID"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+_end_ts=$(jq -r --arg s "$TSID" 'select(.session_id == $s and .state == "end") | .ts' "$CCG_EVENT_LOG" 2>/dev/null | tail -1)
+awk -v a="$_end_ts" -v b="$_future" 'BEGIN { exit !(a != "" && a + 0 > b + 0) }' \
+  && ok "ts clamp: synthetic end (now path) stamped above the last logged ts" \
+  || ng "ts clamp: synthetic end ts '${_end_ts:-<none>}' not above last logged '$_future'"
+
+rm -rf "$CCG_PROJECTS_DIR"; unset CCG_PROJECTS_DIR
+rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
+: > "$BELL_CONFIG"
+
+# ---------------------------------------------------------------------------
+section "stopped-agent records (SubagentStop exclusion honored by every counter)"
+
+# SubagentStop fires when a background agent finishes OR merely pauses (hand-
+# back / waiting for SendMessage). Its transcript mtime is still fresh at that
+# moment, and Claude Code appends a SubagentStop hook_success attachment to it
+# ~0.2 s later. tab-title.sh used to exclude it only for its own re-derive, so
+# the sweep/plugin/notify gate kept counting it live for CCG_AGENTS_FRESH_SEC
+# and flipped the session back to `agents`. The stopped-agent record makes the
+# exclusion stick until the agent actually resumes.
+export CCG_PROJECTS_DIR="$TMPROOT/stop-projects"
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+STOP_BIN="$TMPROOT/bin-stop-notify"
+STOP_ARGS="$TMPROOT/tn-args-stop.txt"
+mkdir -p "$STOP_BIN"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$STOP_ARGS" > "$STOP_BIN/terminal-notifier"
+chmod +x "$STOP_BIN/terminal-notifier"
+_saved_path_stop="$PATH"
+export PATH="$STOP_BIN:$PATH"
+: > "$CCG_EVENT_LOG"; : > "$STOP_ARGS"
+
+XSID="stopX-$$"; XA="xagent$$"; YA="yagent$$"
+XDIR="$CCG_PROJECTS_DIR/fake-project/$XSID/subagents"
+XF="$XDIR/agent-$XA.jsonl"
+XREC="$CCG_STOPPED_DIR/$XSID/$XA"
+mkdir -p "$XDIR"
+printf '{"type":"assistant"}\n' > "$XF"
+_x_state() { sed -n '2p' "$BELL_STATE_DIR/$XSID" 2>/dev/null; }
+_x_logical() { sed -n '1p' "$CCG_SESSION_STATE_DIR/$XSID" 2>/dev/null; }
+_x_count() { jq -r --arg s "$XSID" --arg st "$1" 'select(.session_id == $s and .state == $st) | .state' "$CCG_EVENT_LOG" 2>/dev/null | grep -c .; }
+_x_subagent_stop() {
+  printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}\n' "$XSID" "$1" \
+    | CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+}
+# What Claude Code writes to the subagent transcript right after the hook ran.
+_x_post_stop_attachment() {
+  printf '{"type":"attachment","attachment":{"type":"hook_success","hookEvent":"SubagentStop"}}\n' >> "$1"
+}
+_x_plugin() {
+  BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" CCG_PROJECTS_DIR="$CCG_PROJECTS_DIR" \
+    GHOSTTY_HOOKS_DIR="$TMPROOT" bash "$PLUGIN_PATH" 2>&1 | grep -F "($(printf '%s' "$XSID" | cut -c1-8))"
+}
+
+# 1. Main Stop while X runs -> agents.
+printf '{"session_id":"%s"}\n' "$XSID" | CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+[ "$(_x_state)" = "agents" ] && ok "stopped: session settles to agents while X is live" \
+  || ng "stopped: did not settle to agents (got '$(_x_state)')"
+
+# 2. X's SubagentStop -> idle, record written with the transcript's mtime, and
+#    the deferred "Background task completed" notification fires right away.
+_x_subagent_stop "$XA"
+[ "$(_x_state)" = "idle" ] && [ "$(_x_logical)" = "idle" ] && ok "stopped: X's SubagentStop settles to idle" \
+  || ng "stopped: SubagentStop did not settle to idle (bell=$(_x_state) logical=$(_x_logical))"
+if [ -f "$XREC" ] && [ "$(head -n1 "$XREC")" = "$(stat -f %Fm "$XF")" ]; then
+  ok "stopped: record written at \$CCG_STOPPED_DIR/<sid>/<agent> with the transcript mtime"
+else ng "stopped: record missing or wrong (got: $(cat "$XREC" 2>/dev/null | tr '\n' '/'))"; fi
+[ "$(grep -cF -- '-message Background task completed' "$STOP_ARGS" 2>/dev/null)" = "1" ] \
+  && ok "stopped: agents -> idle on SubagentStop fires 'Background task completed' once" \
+  || ng "stopped: completion notification count wrong (got: $(cat "$STOP_ARGS" 2>/dev/null))"
+
+# 3. Claude Code's post-hook attachment bumps the mtime; the sweep must still
+#    treat X as stopped (no flip back to agents, no second notification).
+_x_post_stop_attachment "$XF"
+_agents_before=$(_x_count agents)
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_x_state)" = "idle" ] && [ "$(_x_logical)" = "idle" ] \
+  && ok "stopped: sweep does not count X's still-fresh transcript (stays idle)" \
+  || ng "stopped: sweep flipped X back (bell=$(_x_state) logical=$(_x_logical))"
+[ "$(_x_count agents)" = "$_agents_before" ] && ok "stopped: sweep appends no phantom agents event" \
+  || ng "stopped: sweep appended an agents event ($(_dash_events "$XSID"))"
+[ -f "$XREC" ] && [ "$(head -n1 "$XREC")" = "$(stat -f %Fm "$XF")" ] \
+  && ok "stopped: post-stop SubagentStop attachment keeps the record (mtime refreshed)" \
+  || ng "stopped: record dropped/not refreshed after post-stop attachment"
+[ "$(grep -cF -- '-message Background task completed' "$STOP_ARGS" 2>/dev/null)" = "1" ] \
+  && ok "stopped: no duplicate completion notification from the sweep" \
+  || ng "stopped: duplicate completion notification (got: $(cat "$STOP_ARGS" 2>/dev/null))"
+
+# 4. Plugin: a (stale) agents bell-state file for the session is shown as idle.
+if [ "$plugin" = "1" ]; then
+  cp "$BELL_STATE_DIR/$XSID" "$TMPROOT/xsid.bak"
+  printf '☕️ Claude Code | stop-x (%s)\nagents\n%s\n' "$(printf '%s' "$XSID" | cut -c1-8)" "$$" > "$BELL_STATE_DIR/$XSID"
+  _x_plugin | grep -q 'sfimage=zzz' && ok "stopped: plugin does not count X's still-fresh transcript (downgrades to idle)" \
+    || ng "stopped: plugin counted stopped X as live: $(_x_plugin)"
+  mv "$TMPROOT/xsid.bak" "$BELL_STATE_DIR/$XSID"
 else
-  ng "sweep-bell-state.sh: logical-state correction pass still stamps events.jsonl with integer-only ts"
+  skip "stopped: plugin counter"
 fi
 
-# Separately, parseEvents should still break literal ts ties (two events
+# 5. tab-title.sh's own idle upgrade (e.g. a later main Stop) honors it too.
+printf '{"session_id":"%s"}\n' "$XSID" | CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+[ "$(_x_state)" = "idle" ] && ok "stopped: tab-title.sh idle upgrade does not count stopped X" \
+  || ng "stopped: tab-title.sh upgraded on stopped X (got '$(_x_state)')"
+
+# 6. notify.sh's agents gate lets "Task completed" through for a stopped X.
+: > "$STOP_ARGS"
+printf '{"session_id":"%s"}\n' "$XSID" | "$HOOKS_DIR/notify.sh" '✅' 'Task completed' '' '' agents > /dev/null 2>&1
+grep -qF -- "-message Task completed" "$STOP_ARGS" && ok "stopped: notify.sh agents gate ignores stopped X" \
+  || ng "stopped: notify.sh gate suppressed on stopped X"
+
+# 7. A live sibling Y (no record) still counts.
+printf '{"type":"assistant"}\n' > "$XDIR/agent-$YA.jsonl"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_x_state)" = "agents" ] && [ "$(_x_logical)" = "agents" ] && ok "stopped: live sibling Y still counts (sweep -> agents)" \
+  || ng "stopped: live sibling not counted (bell=$(_x_state) logical=$(_x_logical))"
+age_file "5 minutes ago" "$XDIR/agent-$YA.jsonl"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_x_state)" = "idle" ] && ok "stopped: sibling going stale (X still stopped) settles back to idle" \
+  || ng "stopped: did not settle to idle after sibling went stale (got '$(_x_state)')"
+
+# 8. X resumes (SendMessage): Claude Code appends a user entry, mtime advances.
+#    Every counter must count it again, and the record is dropped.
+printf '{"type":"user"}\n' >> "$XF"
+printf '{"session_id":"%s"}\n' "$XSID" | CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+[ "$(_x_state)" = "agents" ] && ok "stopped: resumed X (mtime advanced, new non-stop entry) counts again in tab-title.sh" \
+  || ng "stopped: resumed X not counted by tab-title.sh (got '$(_x_state)')"
+[ ! -f "$XREC" ] && ok "stopped: record dropped once X resumed" || ng "stopped: record kept after resume"
+if [ "$plugin" = "1" ]; then
+  _x_plugin | grep -q 'sfimage=cup.and.heat.waves.fill' && ok "stopped: plugin counts resumed X" \
+    || ng "stopped: plugin did not count resumed X: $(_x_plugin)"
+fi
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_x_logical)" = "agents" ] && ok "stopped: sweep counts resumed X (stays agents)" \
+  || ng "stopped: sweep dropped resumed X (logical=$(_x_logical))"
+# Resume detection through a fresh record on the sweep's side: stop X again,
+# then resume — the sweep alone (no hook in between) must pick it back up.
+_x_subagent_stop "$XA"
+_x_post_stop_attachment "$XF"
+[ "$(_x_state)" = "idle" ] && [ -f "$XREC" ] && ok "stopped: second SubagentStop re-records X" \
+  || ng "stopped: second SubagentStop not recorded (bell=$(_x_state))"
+printf '{"type":"user"}\n' >> "$XF"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_x_logical)" = "agents" ] && [ ! -f "$XREC" ] && ok "stopped: sweep detects resume on its own (agents, record dropped)" \
+  || ng "stopped: sweep missed resume (logical=$(_x_logical) record=$([ -f "$XREC" ] && echo kept || echo gone))"
+
+# 9. `end` drops the session's records.
+_x_subagent_stop "$XA"
+[ -d "$CCG_STOPPED_DIR/$XSID" ] || ng "stopped: precondition — record dir missing before end"
+CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" end "$XSID" > /dev/null 2>&1
+[ ! -d "$CCG_STOPPED_DIR/$XSID" ] && ok "stopped: end removes the session's stopped-agent records" \
+  || ng "stopped: records survived end"
+
+# 10. Sweep cleanup: a synthetic end drops records; a 12h-untouched dir is reaped.
+mkdir -p "$CCG_STOPPED_DIR/stopDead-$$" "$CCG_STOPPED_DIR/stopOld-$$" "$CCG_STOPPED_DIR/stopFresh-$$"
+: > "$CCG_STOPPED_DIR/stopDead-$$/a"; : > "$CCG_STOPPED_DIR/stopOld-$$/a"; : > "$CCG_STOPPED_DIR/stopFresh-$$/a"
+age_file "13 hours ago" "$CCG_STOPPED_DIR/stopOld-$$"
+printf 'idle\n999999\n' > "$CCG_SESSION_STATE_DIR/stopDead-$$"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ ! -d "$CCG_STOPPED_DIR/stopDead-$$" ] && ok "stopped: sweep's synthetic end removes the session's records" \
+  || ng "stopped: records survived synthetic end"
+[ ! -d "$CCG_STOPPED_DIR/stopOld-$$" ] && [ -d "$CCG_STOPPED_DIR/stopFresh-$$" ] \
+  && ok "stopped: sweep hard-expires 12h-old record dirs, keeps fresh ones" \
+  || ng "stopped: record-dir hard-age prune wrong"
+
+export PATH="$_saved_path_stop"
+rm -rf "$CCG_PROJECTS_DIR" "$CCG_STOPPED_DIR"; unset CCG_PROJECTS_DIR
+rm -f "$BELL_STATE_DIR/$XSID"
+rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
+: > "$BELL_CONFIG"
+
+# ---------------------------------------------------------------------------
+section "sweep single-flight lock"
+
+# One sweep is dispatched per plugin run (30 s poll + every push refresh), so
+# they overlap; without a lock two sweeps both derive the same correction and
+# both append it. The lock lives next to the (sandboxed) logical-state dir.
+export CCG_PROJECTS_DIR="$TMPROOT/lock-projects"
+SWEEP_LOCK_DIR="$(dirname "$CCG_SESSION_STATE_DIR")/sweep.lock"
+LSID="lock-$$"
+mkdir -p "$CCG_PROJECTS_DIR/fake-project/$LSID/subagents"
+printf '{"type":"assistant"}\n' > "$CCG_PROJECTS_DIR/fake-project/$LSID/subagents/agent-lockhex.jsonl"
+age_file "5 minutes ago" "$CCG_PROJECTS_DIR/fake-project/$LSID/subagents/agent-lockhex.jsonl"
+# Logged as agents, live PID, stale transcript -> every sweep wants to append idle.
+_lock_setup() { : > "$CCG_EVENT_LOG"; printf 'agents\n%s\n%s\n' "$$" "$(gdate +%s.%3N)" > "$CCG_SESSION_STATE_DIR/$LSID"; }
+_lock_idles() { jq -r --arg s "$LSID" 'select(.session_id == $s and .state == "idle") | .state' "$CCG_EVENT_LOG" 2>/dev/null | grep -c .; }
+
+_lock_setup
+_lpids=""
+for _i in 1 2 3 4 5 6; do
+  CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1 &
+  _lpids="$_lpids $!"
+done
+for _lp in $_lpids; do wait "$_lp" 2>/dev/null; done
+[ "$(_lock_idles)" = "1" ] && ok "lock: 6 concurrent sweeps append the correction exactly once" \
+  || ng "lock: concurrent sweeps appended $(_lock_idles) idle events (want 1)"
+[ ! -d "$SWEEP_LOCK_DIR" ] && ok "lock: released on exit" || ng "lock: left behind after sweeps exited"
+
+# Stale lock, dead owner PID -> broken immediately.
+_lock_setup
+mkdir -p "$SWEEP_LOCK_DIR"; echo 999999 > "$SWEEP_LOCK_DIR/pid"
+CCG_SWEEP_LOCK_WAIT=2 CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_lock_idles)" = "1" ] && [ ! -d "$SWEEP_LOCK_DIR" ] && ok "lock: dead-owner lock is broken and the sweep runs" \
+  || ng "lock: dead-owner lock not broken (idles=$(_lock_idles), lock $([ -d "$SWEEP_LOCK_DIR" ] && echo present || echo gone))"
+
+# Stale lock, live owner but older than 60 s (wedged/crashed-and-reused PID) -> broken.
+_lock_setup
+mkdir -p "$SWEEP_LOCK_DIR"; echo "$$" > "$SWEEP_LOCK_DIR/pid"
+age_file "2 minutes ago" "$SWEEP_LOCK_DIR"
+CCG_SWEEP_LOCK_WAIT=2 CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_lock_idles)" = "1" ] && [ ! -d "$SWEEP_LOCK_DIR" ] && ok "lock: >60 s-old lock is broken and the sweep runs" \
+  || ng "lock: aged lock not broken (idles=$(_lock_idles))"
+
+# Fresh lock held by a live owner -> the sweep waits, then gives up without
+# appending and without removing someone else's lock.
+_lock_setup
+mkdir -p "$SWEEP_LOCK_DIR"; echo "$$" > "$SWEEP_LOCK_DIR/pid"
+CCG_SWEEP_LOCK_WAIT=1 CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_lock_idles)" = "0" ] && [ "$(cat "$SWEEP_LOCK_DIR/pid" 2>/dev/null)" = "$$" ] \
+  && ok "lock: live fresh lock is respected (no append, holder's lock untouched)" \
+  || ng "lock: live lock not respected (idles=$(_lock_idles))"
+rm -rf "$SWEEP_LOCK_DIR"
+
+rm -rf "$CCG_PROJECTS_DIR"; unset CCG_PROJECTS_DIR
+rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
+
+# ---------------------------------------------------------------------------
+section "dashboard event ordering (writer-precision + exact-tie regression)"
+
+# The writer side of this (sweep corrections stamped sub-second at append
+# time and clamped above the session's last logged ts, even under SwiftBar's
+# gdate-less PATH) is covered behaviorally in the "event ts ordering" section.
+
+# parseEvents should still break literal ts ties (two events
 # with the IDENTICAL numeric ts, e.g. a fast back-to-back append within the
 # same millisecond) by file-append order rather than leaving the outcome to
 # an unstable/engine-dependent sort — cheap insurance once precision is
-# aligned, distinct from the precision-mismatch case above.
+# aligned and ts is clamped monotonic per session.
 if command -v node >/dev/null 2>&1 && [ -f "$DASHBOARD_PATH" ]; then
   PARSE_FN=$(awk '/\/\/ <parseEvents>/{f=1;next} /\/\/ <\/parseEvents>/{f=0} f' "$DASHBOARD_PATH")
   if [ -z "$PARSE_FN" ]; then
