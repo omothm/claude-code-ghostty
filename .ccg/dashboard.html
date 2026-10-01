@@ -2,19 +2,25 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude Code · Ghostty metrics</title>
+<link rel="icon" href="data:,">
 <style>
 :root {
   color-scheme: light dark;
   --fg: #1a1a1a;
   --bg: #fafafa;
   --card-bg: rgba(0,0,0,0.04);
+  --line: rgba(0,0,0,0.08);
   --muted: rgba(0,0,0,0.55);
   --accent-work: #2e8b57;
   --accent-wait: #d4651a;
   --accent-agents: #6a5acd;
   --accent-watch: #4a8bb8;
   --accent-idle: #888888;
+  --accent-dead: #d14b4b;
+  --good-fg: #2e8b57;
+  --bad-fg: #c0392b;
   --error-bg: #fff0ec;
   --error-fg: #7a2300;
 }
@@ -23,12 +29,16 @@
     --fg: #f0f0f0;
     --bg: #1a1a1a;
     --card-bg: rgba(255,255,255,0.06);
+    --line: rgba(255,255,255,0.08);
     --muted: rgba(255,255,255,0.55);
     --accent-work: #4caf6a;
     --accent-wait: #f08540;
     --accent-agents: #9d8cff;
     --accent-watch: #6ba8d4;
     --accent-idle: #888888;
+    --accent-dead: #ff6b6b;
+    --good-fg: #5fd17f;
+    --bad-fg: #ff7b6b;
     --error-bg: #3a1810;
     --error-fg: #ffb89a;
   }
@@ -39,23 +49,28 @@ body {
   font: 14px -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   color: var(--fg);
   background: var(--bg);
-  padding: 28px 32px 48px;
-  max-width: 1100px;
+  padding: 20px 28px 48px;
+  max-width: 1280px;
   margin: 0 auto;
 }
 header {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 20px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin-bottom: 14px;
 }
-h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+.brand { display: flex; align-items: baseline; gap: 14px; }
+h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
 h2 {
   font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--muted);
-  margin: 32px 0 12px;
+  margin: 36px 0 12px;
+  display: flex; align-items: baseline; gap: 10px;
 }
+h2 .h2-sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .tick {
   display: inline-block; width: 7px; height: 7px; border-radius: 50%;
@@ -70,23 +85,99 @@ h2 {
   70%  { box-shadow: 0 0 0 6px rgba(46,139,87,0); }
   100% { box-shadow: 0 0 0 0 rgba(46,139,87,0); }
 }
-.row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-.row.row5 { grid-template-columns: repeat(5, 1fr); }
-.row.row3 { grid-template-columns: repeat(3, 1fr); }
-.row.row2 { grid-template-columns: repeat(2, 1fr); }
-.row + .row { margin-top: 12px; }
-.card {
+
+/* Right-now strip: one pill per live state, plus the fleet pill. */
+.now { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--card-bg);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.pill b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.pill.zero { opacity: 0.55; }
+.pill.input.hot { background: rgba(212,101,26,0.18); color: var(--fg); }
+.pill.fleet.busy { background: rgba(46,139,87,0.14); color: var(--fg); }
+.pill.fleet.dead { background: rgba(209,75,75,0.16); color: var(--fg); }
+@media (prefers-color-scheme: dark) {
+  .pill.input.hot { background: rgba(240,133,64,0.22); }
+  .pill.fleet.busy { background: rgba(76,175,106,0.18); }
+  .pill.fleet.dead { background: rgba(255,107,107,0.18); }
+}
+
+.verdict {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 11px 16px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  background: var(--card-bg);
+  border-left: 3px solid var(--accent-idle);
+}
+.verdict.act   { background: rgba(209,75,75,0.10); border-left-color: var(--accent-dead); }
+.verdict.warn  { background: rgba(212,101,26,0.10); border-left-color: var(--accent-wait); }
+.verdict.good  { background: rgba(46,139,87,0.12);  border-left-color: var(--accent-work); }
+@media (prefers-color-scheme: dark) {
+  .verdict.act  { background: rgba(255,107,107,0.12); }
+  .verdict.warn { background: rgba(240,133,64,0.14); }
+  .verdict.good { background: rgba(76,175,106,0.14); }
+}
+.verdict-icon { font-size: 15px; line-height: 1.35; flex: 0 0 auto; }
+.verdict b { font-weight: 600; }
+.verdict .lever { color: var(--fg); font-weight: 600; }
+
+/* Chart panels: header carries the 24h KPI + delta vs your typical day. */
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.panel {
   background: var(--card-bg);
   border-radius: 10px;
-  padding: 18px 20px;
+  padding: 14px 16px 12px;
+  min-width: 0;
 }
-.card .label {
+.grid3 + .panel, .cards + .panel { margin-top: 12px; }
+.panel-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.label {
   font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--muted);
 }
+.hint { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.kpi { text-align: right; flex: 0 0 auto; }
+.kpi .value {
+  font: 600 26px/1 -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.kpi .value.dead { color: var(--accent-dead); }
+.kpi .value.work { color: var(--accent-work); }
+.delta { font-size: 11px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.delta .better { color: var(--good-fg); font-weight: 600; }
+.delta .worse  { color: var(--bad-fg); font-weight: 600; }
+.chart-box { position: relative; height: 180px; }
+.chart-box.tall { height: 250px; }
+.chart-box.short { height: 170px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); justify-content: flex-end; }
+.chips b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.chips .dead b { color: var(--accent-dead); }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.card {
+  background: var(--card-bg);
+  border-radius: 10px;
+  padding: 12px 16px;
+}
 .card .value {
-  font: 600 36px/1 -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  font: 600 22px/1 -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
   margin-top: 6px;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
@@ -97,56 +188,14 @@ h2 {
 .card.agents .value { color: var(--accent-agents); }
 .card.watch .value { color: var(--accent-watch); }
 .card.idle .value { color: var(--accent-idle); }
-.card.hero { padding: 22px 24px; }
-.card.hero .value {
-  font-size: 48px;
-}
-.row.wait-row > .card:nth-child(1),
-.row.wait-row > .card:nth-child(2) {
-  background: rgba(212,101,26,0.10);
-}
-@media (prefers-color-scheme: dark) {
-  .row.wait-row > .card:nth-child(1),
-  .row.wait-row > .card:nth-child(2) {
-    background: rgba(240,133,64,0.12);
-  }
-}
-.card.small .value { font-size: 24px; }
-.card.small { padding: 14px 18px; }
 .caption {
   font-size: 12px;
   color: var(--muted);
   margin: 10px 2px 0;
+  line-height: 1.5;
   letter-spacing: 0.01em;
 }
 .caption code { font-size: 12px; }
-.verdict {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  margin-top: 14px;
-  padding: 13px 16px;
-  border-radius: 10px;
-  font-size: 13.5px;
-  line-height: 1.45;
-  background: var(--card-bg);
-  border-left: 3px solid var(--accent-idle);
-}
-.verdict.act   { background: rgba(212,101,26,0.12); border-left-color: var(--accent-wait); }
-.verdict.good  { background: rgba(46,139,87,0.12);  border-left-color: var(--accent-work); }
-@media (prefers-color-scheme: dark) {
-  .verdict.act  { background: rgba(240,133,64,0.14); }
-  .verdict.good { background: rgba(76,175,106,0.14); }
-}
-.verdict-icon { font-size: 15px; line-height: 1.35; flex: 0 0 auto; }
-.verdict b { font-weight: 600; }
-.verdict .lever { color: var(--fg); font-weight: 600; }
-.chart-wrap {
-  background: var(--card-bg);
-  border-radius: 10px;
-  padding: 16px;
-  height: 280px;
-}
 .error {
   background: var(--error-bg);
   color: var(--error-fg);
@@ -154,7 +203,7 @@ h2 {
   padding: 16px 20px;
   line-height: 1.5;
   font-size: 13px;
-  margin-bottom: 24px;
+  margin-bottom: 16px;
 }
 .error code {
   background: rgba(0,0,0,0.08);
@@ -170,64 +219,96 @@ h2 {
   font-size: 12px;
   overflow-x: auto;
 }
-.empty {
-  text-align: center;
-  color: var(--muted);
-  padding: 40px 0;
-  font-size: 13px;
+@media (max-width: 960px) {
+  body { padding: 16px 16px 40px; }
+  .grid3 { grid-template-columns: 1fr; }
 }
 </style>
 </head>
 <body>
 <header>
-  <h1>Claude Code · Ghostty</h1>
-  <div class="status"><span class="tick" id="tick"></span><span id="status-text">connecting…</span></div>
+  <div class="brand">
+    <h1>Claude Code · Ghostty</h1>
+    <div class="status"><span class="tick" id="tick"></span><span id="status-text">connecting…</span></div>
+  </div>
+  <div class="now">
+    <span class="pill fleet" id="pill-fleet">—</span>
+    <span class="pill input" id="pill-input">🔔 <b id="now-input">0</b> awaiting you</span>
+    <span class="pill" id="pill-working">⏳ <b id="now-working">0</b> working</span>
+    <span class="pill" id="pill-agents">☕️ <b id="now-agents">0</b> agents</span>
+    <span class="pill" id="pill-watching">👀 <b id="now-watching">0</b> watching</span>
+    <span class="pill" id="pill-idle">💤 <b id="now-idle">0</b> idle</span>
+  </div>
 </header>
 
 <div id="error" class="error" style="display:none;"></div>
 
-<h2>Right now</h2>
-<div class="row row5">
-  <div class="card wait"><div class="label">Awaiting input</div><div class="value" id="now-input">0</div><div class="sub">🔔 blocked on you · act now</div></div>
-  <div class="card idle"><div class="label">Idle</div><div class="value" id="now-idle">0</div><div class="sub">💤 between prompts</div></div>
-  <div class="card work"><div class="label">Working</div><div class="value" id="now-working">0</div><div class="sub">⏳ active sessions</div></div>
-  <div class="card agents"><div class="label">Agents running</div><div class="value" id="now-agents">0</div><div class="sub">☕️ idle but delegating</div></div>
-  <div class="card watch"><div class="label">Watching</div><div class="value" id="now-watching">0</div><div class="sub">👀 idle but supervising</div></div>
-</div>
-
-<h2>Last 24h</h2>
-<div class="row wait-row">
-  <div class="card wait hero"><div class="label">Fleet stalled on you</div><div class="value" id="t-stall-share">—</div><div class="sub">of on-the-hook time, share with no agent working</div></div>
-  <div class="card hero"><div class="label">Concurrent share</div><div class="value" id="t-concurrent-share">—</div><div class="sub">working-time with ≥2 sessions</div></div>
-  <div class="card hero"><div class="label">Bells answered</div><div class="value" id="t-bells">0</div><div class="sub">🔔 → next-prompt pairs</div></div>
-  <div class="card hero"><div class="label">Peak concurrent working</div><div class="value" id="t-peak">0</div><div class="sub">max parallelism reached</div></div>
-</div>
-<div class="row wait-row">
-  <div class="card wait small"><div class="label">Median per bell</div><div class="value" id="t-latency">—</div><div class="sub">typical wait you cost each 🔔</div></div>
-  <div class="card wait small"><div class="label">p90 per bell</div><div class="value" id="t-p90-latency">—</div><div class="sub">90% of 🔔 answered within</div></div>
-  <div class="card wait small"><div class="label">Total wait</div><div class="value" id="t-input">—</div><div class="sub">summed across all 🔔</div></div>
-  <div class="card work small"><div class="label">Time working</div><div class="value" id="t-working">—</div><div class="sub">summed across sessions</div></div>
-</div>
 <div class="verdict" id="verdict"><span class="verdict-icon" id="verdict-icon">→</span><span id="verdict-text">reading your last 24h…</span></div>
-<p class="caption">Top row are the levers — pull <em>fleet stalled on you</em> down, push <em>concurrent share</em> up. Neither moves against you when you automate easy bells or run more agents. Bottom row diagnoses what a typical answered bell felt like.</p>
 
-<h2>Fleet stalled on you · last 30 days</h2>
-<div class="chart-wrap"><canvas id="trend"></canvas></div>
-<p class="caption">Daily share of your <em>on-the-hook</em> time (≥1 session awaiting you) that was a <em>full stall</em> — a 🔔 blocking with no agent working and no background agent running. Watching counts as idle: a background monitor isn't progress, but a background Agent/Task/Workflow is, so it counts as engaged. Thin days (under an hour on the hook) are left blank rather than scored on noise. Today's bar is partial. Lower is better; flat-or-falling is the trend you want.</p>
+<div class="grid3">
+  <div class="panel">
+    <div class="panel-head">
+      <div><div class="label">Fleet idle on you</div><div class="hint">active time with nothing running · lower is better</div></div>
+      <div class="kpi"><div class="value dead" id="k-idle">—</div><div class="delta" id="d-idle"></div></div>
+    </div>
+    <div class="chart-box"><canvas id="c-idle"></canvas></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head">
+      <div><div class="label">Concurrent share</div><div class="hint">busy time with ≥2 sessions busy · higher is better</div></div>
+      <div class="kpi"><div class="value work" id="k-conc">—</div><div class="delta" id="d-conc"></div></div>
+    </div>
+    <div class="chart-box"><canvas id="c-conc"></canvas></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head">
+      <div><div class="label">Agent-hours</div><div class="hint">session-time spent working · higher is better</div></div>
+      <div class="kpi"><div class="value" id="k-hours">—</div><div class="delta" id="d-hours"></div></div>
+    </div>
+    <div class="chart-box"><canvas id="c-hours"></canvas></div>
+  </div>
+</div>
 
-<h2>Concurrent share · last 30 days</h2>
-<div class="chart-wrap"><canvas id="concurrent-trend"></canvas></div>
-<p class="caption">Daily share of working-time bins with ≥2 sessions running in parallel. Today's bar is partial. Higher is better; the trend you want climbing.</p>
+<div class="panel">
+  <div class="panel-head">
+    <div><div class="label">Fleet activity · last 24h</div><div class="hint">sessions busy per 5 min · red = you were active but nothing ran · leading quiet hours trimmed</div></div>
+    <div class="chips">
+      <span>busy <b id="x-busy">—</b></span>
+      <span class="dead">idle on you <b id="x-dead">—</b></span>
+      <span>avg while busy <b id="x-par">—</b></span>
+      <span>peak <b id="x-peak">—</b></span>
+    </div>
+  </div>
+  <div class="chart-box tall"><canvas id="c-fleet"></canvas></div>
+</div>
+<p class="caption">
+  <b>Fleet idle on you</b> is the north star: of your <em>active time</em> (busy stretches plus the 1–<span class="break-min">10</span> min gaps between them), the share when no session was working and no background agent was running — you were reviewing, deciding or away for a moment and the whole fleet waited. Gaps over <span class="break-min">10</span> min count as breaks, not idle (set <code>fleetBreakMin</code> in <code>config.json</code> to change it). Close the red gaps by queuing the next task in another session <em>before</em> you sit down to review a finished one.
+  <b>Concurrent share</b> and <b>agent-hours</b> are the payoff: more of your busy time with ≥2 sessions running, and more total session-time worked per day. Deltas compare the last 24h to the median of your previous 7 active days. Background agents (☕️) count as busy; watching (👀) and idle don't.
+</p>
 
-<h2>Last 24 hours · concurrency</h2>
-<div class="chart-wrap"><canvas id="timeline"></canvas></div>
+<h2>Permission bells <span class="h2-sub">· rare in auto mode, but each one can stall the fleet</span></h2>
+<div class="cards">
+  <div class="card wait"><div class="label">Fleet stalled on bells</div><div class="value" id="t-stall-share">—</div><div class="sub">of on-the-hook time, nothing else running</div></div>
+  <div class="card"><div class="label">Bells answered</div><div class="value" id="t-bells">0</div><div class="sub">🔔 → next-event pairs · 24h</div></div>
+  <div class="card wait"><div class="label">Median per bell</div><div class="value" id="t-latency">—</div><div class="sub">typical wait you cost each 🔔</div></div>
+  <div class="card wait"><div class="label">p90 per bell</div><div class="value" id="t-p90-latency">—</div><div class="sub">90% of 🔔 answered within</div></div>
+  <div class="card wait"><div class="label">Total wait</div><div class="value" id="t-input">—</div><div class="sub">summed across all 🔔</div></div>
+</div>
+<div class="panel">
+  <div class="panel-head">
+    <div><div class="label">Fleet stalled on bells · last 30 days</div><div class="hint">share of on-the-hook time with nothing else running · lower is better</div></div>
+  </div>
+  <div class="chart-box short"><canvas id="trend"></canvas></div>
+</div>
+<p class="caption">On-the-hook time is any 5-min bin with ≥1 session awaiting you; a <em>stall</em> is such a bin with no agent working and no background agent running. Days with under an hour on the hook are left blank rather than scored on noise. If this ever lights up in auto mode, it's usually one recurring permission prompt — find it and add an allow rule.</p>
 
-<h2>Background · last 24h</h2>
-<div class="row">
-  <div class="card idle small"><div class="label">Time idle</div><div class="value" id="t-idle">—</div><div class="sub">parked between prompts</div></div>
-  <div class="card agents small"><div class="label">Time agents running</div><div class="value" id="t-agents">—</div><div class="sub">delegating to background agents</div></div>
-  <div class="card watch small"><div class="label">Time watching</div><div class="value" id="t-watching">—</div><div class="sub">supervising background work</div></div>
-  <div class="card small"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
+<h2>Time by state <span class="h2-sub">· last 24h</span></h2>
+<div class="cards">
+  <div class="card work"><div class="label">Working</div><div class="value" id="t-working">—</div><div class="sub">⏳ summed across sessions</div></div>
+  <div class="card agents"><div class="label">Agents running</div><div class="value" id="t-agents">—</div><div class="sub">☕️ delegating to background agents</div></div>
+  <div class="card watch"><div class="label">Watching</div><div class="value" id="t-watching">—</div><div class="sub">👀 supervising a monitor</div></div>
+  <div class="card idle"><div class="label">Idle</div><div class="value" id="t-idle">—</div><div class="sub">💤 parked between prompts</div></div>
+  <div class="card"><div class="label">Sessions started</div><div class="value" id="t-sessions">0</div><div class="sub">in last 24h</div></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
@@ -240,12 +321,25 @@ const TRAILING_CAP_SEC = 30 * 60;  // cap open-ended trailing spans at 30 min
 const NOW_RECENT_SEC = 12 * 3600;  // a session counts as "right now" if its last event is ≤ 12 h old (matches sweep interval)
 const STATES = ['working', 'input', 'agents', 'watching', 'idle'];
 const TREND_DAYS = 30;             // daily-trend chart window
+const BASELINE_DAYS = 7;           // "typical" = median of this many previous active days
 const P90_MIN_SAMPLE = 8;          // min bells in the window before p90 is stable enough to show
 const STALL_MIN_SAMPLE = 12;       // min bell-pending 5-min bins (=1h on the hook) before stall-share is stable enough to show — below this it's just noise
+// Fleet-idle gap bounds. A gap between busy stretches shorter than MIN_GAP is
+// hook noise (agents↔idle flicker, an instant re-prompt) and counts as
+// neither busy nor idle; longer than the break threshold (`fleetBreakMin` in
+// config.json, default 10 min — see breakSecFrom) it's a break, not review
+// time.
+const MIN_GAP_SEC = 60;
+const DEFAULT_BREAK_MIN = 10;
+let breakSec = DEFAULT_BREAK_MIN * 60; // refreshed from config.json every tick
+const ACTIVE_MIN_SEC = 3600;       // min active time before fleet-idle share is scored
+const CONC_MIN_BUSY_SEC = 30 * 60; // min busy time before concurrent share is scored
 
-let chart = null;
-let trendChart = null;
-let concurrentTrendChart = null;
+const charts = {};
+
+function css(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 
 function trendlineData(values) {
   const defined = [];
@@ -303,6 +397,22 @@ function fmtPct(x) {
   return `${Math.round(x * 100)}%`;
 }
 
+function fmtHours(secs) {
+  if (secs == null) return '—';
+  return `${(secs / 3600).toFixed(1)}h`;
+}
+
+// config.json sits next to events.jsonl. Any failure (absent, malformed)
+// reads as {} so the dashboard falls back to its defaults rather than erroring.
+async function fetchConfig() {
+  try {
+    const resp = await fetch('./config.json', { cache: 'no-store' });
+    return resp.ok ? await resp.json() : {};
+  } catch (_) {
+    return {};
+  }
+}
+
 async function fetchEvents() {
   const resp = await fetch('./events.jsonl', { cache: 'no-store' });
   if (resp.status === 404) {
@@ -346,10 +456,10 @@ function parseEvents(text) {
 // A fresh `idle` (SessionStart) DOES reopen it, because session ids are reused
 // across `claude --continue`/`--resume`. So: walk in ts order, mark ended on
 // `end`, clear on `idle`, and drop non-idle events seen while ended. Used by
-// every per-session consumer (right-now counts AND the timeline/daily spans)
-// so a straggler can neither inflate the "working" card nor paint a phantom
-// open span. The markers are load-bearing: tests/validate.sh slices this out
-// to run it under Node. Keep them on their own lines.
+// every per-session consumer (right-now counts, the bell bins AND the fleet
+// spans) so a straggler can neither inflate the "working" pill nor paint a
+// phantom open span. The markers are load-bearing: tests/validate.sh slices
+// this out to run it under Node. Keep them on their own lines.
 // <stripStragglers>
 function stripStragglers(evs) {
   const out = [];
@@ -382,35 +492,173 @@ function windowCutoff(nowSec) {
   return (currentBin - bins + 1) * BIN_SEC;
 }
 
-function compute(events, nowSec) {
-  const cutoff = windowCutoff(nowSec);
-
-  // Group by session, preserving sort order.
+function groupBySession(events) {
   const sessions = new Map();
   for (const e of events) {
     let arr = sessions.get(e.session_id);
     if (!arr) { arr = []; sessions.set(e.session_id, arr); }
     arr.push(e);
   }
+  return sessions;
+}
+
+// Every session's state spans from `since` on: [{state, s, e}], stragglers
+// stripped, open trailing spans capped. Feeds the fleet metrics.
+function buildSpans(sessions, nowSec, since) {
+  const spans = [];
+  for (const rawEvs of sessions.values()) {
+    const evs = stripStragglers(rawEvs);
+    for (let i = 0; i < evs.length; i++) {
+      if (!STATES.includes(evs[i].state)) continue;
+      const [s, e] = spanFor(evs, i, nowSec);
+      if (e <= since || e <= s) continue;
+      spans.push({ state: evs[i].state, s, e });
+    }
+  }
+  return spans;
+}
+
+// Fleet metrics — wall-clock, not per-session. A session is BUSY when it is
+// `working` or `agents` (a background Agent/Task/Workflow is real progress);
+// `watching` and `idle` are parked. The fleet is busy whenever ≥1 session is.
+// Gaps between busy stretches of MIN_GAP..BREAK seconds are "fleet idle on
+// you": you were active (you came back and prompted within BREAK) but nothing
+// ran. Active time = busy wall-clock + those gaps. The trailing gap (fleet
+// idle right now) isn't scored until it closes — it may yet become a break.
+// The markers are load-bearing: tests/validate.sh slices this block out to
+// run it under Node. Keep them on their own lines.
+// <fleetMetrics>
+// Break threshold in seconds from config.json's `fleetBreakMin` (minutes).
+// Missing, non-numeric, or under the 1-min noise floor (a break shorter than
+// MIN_GAP would score nothing as idle) falls back to defaultMin.
+function breakSecFrom(cfg, defaultMin) {
+  const m = cfg && typeof cfg.fleetBreakMin === 'number' ? cfg.fleetBreakMin : NaN;
+  return (Number.isFinite(m) && m >= 1 ? m : defaultMin) * 60;
+}
+
+function fleetSegments(spans) {
+  // Sweep-line over span edges → non-overlapping [s, e) segments with
+  // per-state session counts (w = working, a = agents, i = input).
+  const pts = [];
+  for (const p of spans) {
+    const k = p.state === 'working' ? 'w' : p.state === 'agents' ? 'a' : p.state === 'input' ? 'i' : null;
+    if (!k || p.e <= p.s) continue;
+    pts.push([p.s, k, 1], [p.e, k, -1]);
+  }
+  pts.sort((x, y) => x[0] - y[0] || x[2] - y[2]);
+  const segs = [];
+  const c = { w: 0, a: 0, i: 0 };
+  let last = null;
+  for (const [t, k, d] of pts) {
+    if (last != null && t > last && (c.w || c.a || c.i)) segs.push({ s: last, e: t, w: c.w, a: c.a, i: c.i });
+    c[k] += d;
+    last = t;
+  }
+  return segs;
+}
+
+function fleetGaps(segs, minGap, breakSec) {
+  const busy = [];
+  for (const g of segs) {
+    if (g.w + g.a === 0) continue;
+    const b = busy[busy.length - 1];
+    if (b && g.s <= b[1]) b[1] = Math.max(b[1], g.e);
+    else busy.push([g.s, g.e]);
+  }
+  const gaps = [];
+  for (let k = 1; k < busy.length; k++) {
+    const s = busy[k - 1][1], e = busy[k][0];
+    if (e - s >= minGap && e - s <= breakSec) gaps.push([s, e]);
+  }
+  return { gaps, lastBusyEnd: busy.length ? busy[busy.length - 1][1] : null };
+}
+
+function fleetStats(segs, gaps, a, b, minActive, minBusy) {
+  let busyWall = 0, workSecs = 0, agentSecs = 0, multiSecs = 0, deadSecs = 0, peak = 0;
+  for (const g of segs) {
+    const s = Math.max(g.s, a), e = Math.min(g.e, b);
+    if (e <= s) continue;
+    const d = e - s, n = g.w + g.a;
+    if (n > 0) busyWall += d;
+    if (n >= 2) multiSecs += d;
+    workSecs += g.w * d;
+    agentSecs += g.a * d;
+    if (n > peak) peak = n;
+  }
+  for (const [gs, ge] of gaps) {
+    const s = Math.max(gs, a), e = Math.min(ge, b);
+    if (e > s) deadSecs += e - s;
+  }
+  const activeSecs = busyWall + deadSecs;
+  return {
+    busyWall, workSecs, agentSecs, multiSecs, deadSecs, activeSecs, peak,
+    agentHourSecs: workSecs + agentSecs,
+    idleShare:   activeSecs >= minActive ? deadSecs / activeSecs : null,
+    concShare:   busyWall >= minBusy ? multiSecs / busyWall : null,
+    parallelism: busyWall > 0 ? (workSecs + agentSecs) / busyWall : null,
+  };
+}
+
+// Average sessions per state per bin (fractional — a session busy for half a
+// bin adds 0.5) plus the fraction of each bin that was fleet-idle-on-you.
+function fleetBins(segs, gaps, cutoff, bins, binSec) {
+  const w = new Array(bins).fill(0), ag = new Array(bins).fill(0);
+  const inp = new Array(bins).fill(0), dead = new Array(bins).fill(0);
+  const add = (s0, e0, fn) => {
+    const s = Math.max(s0, cutoff), e = Math.min(e0, cutoff + bins * binSec);
+    if (e <= s) return;
+    for (let b = Math.floor((s - cutoff) / binSec); b <= Math.floor((e - cutoff - 1e-6) / binSec); b++) {
+      const bs = cutoff + b * binSec;
+      const slice = Math.min(e, bs + binSec) - Math.max(s, bs);
+      if (slice > 0) fn(b, slice / binSec);
+    }
+  };
+  for (const g of segs) add(g.s, g.e, (b, f) => { w[b] += g.w * f; ag[b] += g.a * f; inp[b] += g.i * f; });
+  for (const [s, e] of gaps) add(s, e, (b, f) => { dead[b] += f; });
+  return { w, ag, inp, dead };
+}
+
+// Y-axis ceiling for a 0–100 percent chart: just above the tallest bar, so a
+// chart of 5–20% bars isn't squashed under an empty 100% axis. Rounded to a
+// 10 up to 50%, to a 20 above that, so it always lands on a tick (step 10 or
+// 20) instead of a crowded off-step label. Never below 10, never above 100.
+function pctAxisMax(values) {
+  let m = 0;
+  for (const v of values) if (v != null && v > m) m = v;
+  const step = m * 1.1 > 50 ? 20 : 10;
+  return Math.min(100, Math.max(10, Math.ceil((m * 1.1) / step) * step));
+}
+
+// First 5-min bin worth showing on the 24h timeline: an hour before the
+// first bin with any fleet activity, so an empty overnight stretch doesn't
+// squeeze the day into the right-hand third of the chart.
+function firstShownBin(tl, leadBins) {
+  for (let b = 0; b < tl.w.length; b++) {
+    if (tl.w[b] + tl.ag[b] + tl.inp[b] + tl.dead[b] > 0) return Math.max(0, b - leadBins);
+  }
+  return 0;
+}
+// </fleetMetrics>
+
+// Bell metrics, state totals and right-now counts (per-session, 24h window).
+function compute(sessions, nowSec) {
+  const cutoff = windowCutoff(nowSec);
 
   const totals = { working: 0, input: 0, agents: 0, watching: 0, idle: 0 };
   const latencies = [];
   let started = 0;
   const latest = new Map();
 
-  // 5-min bin counters across the 24h window. Each bin tracks the SET of
-  // session_ids whose DOMINANT state was X during that bin — a session
-  // contributes to exactly one band per bin, by majority time. This
-  // makes the five states mutually exclusive per (session, bin) so the
-  // stacked total equals the number of distinct active sessions and can
-  // never exceed it.
+  // 5-min bin counters across the 24h window for the bell-stall metric. Each
+  // bin tracks the SET of session_ids whose DOMINANT state was X during that
+  // bin — a session contributes to exactly one state per bin, by majority
+  // time. Only working/input/agents are read; watching and idle are treated
+  // as non-engagement, so they're simply not recorded.
   const bins = Math.floor(WINDOW_SEC / BIN_SEC);
   const tlSets = {
     working:  Array.from({ length: bins }, () => new Set()),
     input:    Array.from({ length: bins }, () => new Set()),
     agents:   Array.from({ length: bins }, () => new Set()),
-    watching: Array.from({ length: bins }, () => new Set()),
-    idle:     Array.from({ length: bins }, () => new Set()),
   };
 
   for (const [sid, rawEvs] of sessions) {
@@ -418,7 +666,7 @@ function compute(events, nowSec) {
     const evs = stripStragglers(rawEvs);
     if (evs.length === 0) continue;
     if (evs[0].ts >= cutoff) started += 1;
-    latest.set(evs[evs.length - 1].session_id, evs[evs.length - 1]);
+    latest.set(sid, evs[evs.length - 1]);
 
     // Per-bin time-per-state for this session. Sparse: bin -> { state: secs }.
     const perBin = new Map();
@@ -435,9 +683,6 @@ function compute(events, nowSec) {
       // Time-in-state totals (clipped to window).
       totals[e.state] += en - s;
 
-      // Split this interval across the bins it touches and accumulate
-      // seconds-in-state per bin for this session. The dominant state per
-      // bin is decided after all of this session's intervals are walked.
       const startBin = Math.max(0, Math.floor((s - cutoff) / BIN_SEC));
       const endBin   = Math.min(bins - 1, Math.floor((en - cutoff - 1e-6) / BIN_SEC));
       for (let b = startBin; b <= endBin; b++) {
@@ -460,13 +705,11 @@ function compute(events, nowSec) {
       for (const st of STATES) {
         if (times[st] > bestTime) { bestTime = times[st]; bestState = st; }
       }
-      if (bestState && bestTime > 0) tlSets[bestState][b].add(sid);
+      if (bestState && bestTime > 0 && tlSets[bestState]) tlSets[bestState][b].add(sid);
     }
 
     // Latency: input → next event for same session. Attribute the bell to
-    // the day of the `input` event (matches the 30-day trend chart's
-    // attribution rule) and clip to the 24h window so the cards under
-    // "Your wait debt · last 24h" actually reflect 24h, not all-time.
+    // the time of the `input` event and clip to the 24h window.
     for (let i = 0; i < evs.length - 1; i++) {
       if (evs[i].state !== 'input') continue;
       if (evs[i].ts < cutoff) continue;
@@ -483,40 +726,14 @@ function compute(events, nowSec) {
     if (e.state in nowCounts) nowCounts[e.state] += 1;
   }
 
-  // Materialise the int-array timelines from the per-bin session-id sets.
-  const tlWorking  = tlSets.working.map(s => s.size);
-  const tlInput    = tlSets.input.map(s => s.size);
-  const tlAgents   = tlSets.agents.map(s => s.size);
-  const tlWatching = tlSets.watching.map(s => s.size);
-  const tlIdle     = tlSets.idle.map(s => s.size);
-
-  let peak = 0;
-  for (const v of tlWorking) if (v > peak) peak = v;
-
-  let workingBins = 0, multiWorkingBins = 0;
-  for (const v of tlWorking) {
-    if (v >= 1) workingBins += 1;
-    if (v >= 2) multiWorkingBins += 1;
-  }
-  const concurrentShare = workingBins > 0 ? multiWorkingBins / workingBins : null;
-
-  // Fleet-stall share: of your ON-THE-HOOK time (bins with ≥1 session awaiting
+  // Bell-stall share: of your ON-THE-HOOK time (bins with ≥1 session awaiting
   // input), the fraction STALLED ON YOU — a bell pending with zero sessions
-  // working AND zero sessions running a background agent. Watching counts as
-  // idle here: a parked session whose only activity is a background monitor
-  // isn't advancing the fleet's reasoning, so it neither buffers a pending
-  // bell nor counts as work. A background Agent/Task/Workflow is the opposite
-  // case — real work progressing outside the main loop — so it counts as
-  // engaged, same as working. This reads as "of the time I was on the hook,
-  // how much did I waste with no agent making progress" — the actionable
-  // lever. It's composition-invariant (trimming easy bells doesn't move it)
-  // and concurrency-correct (wall-clock bins, not summed-per-session), so it
-  // doesn't rise when you automate trivial bells or run more agents. The
-  // bell-pending denominator gives it a readable dynamic range, but it's noisy
-  // on thin days, so the card/chart gate on STALL_MIN_SAMPLE bell-pending bins.
+  // working AND zero sessions running a background agent. See the
+  // "Fleet stalled on bells" section of docs/ARCHITECTURE.md for why the
+  // denominator, the gate and the bin size are what they are.
   let bellPendingBins = 0, stalledBins = 0;
   for (let b = 0; b < bins; b++) {
-    const w = tlWorking[b], inp = tlInput[b], ag = tlAgents[b];
+    const w = tlSets.working[b].size, inp = tlSets.input[b].size, ag = tlSets.agents[b].size;
     if (inp > 0) bellPendingBins += 1;
     if (inp > 0 && w === 0 && ag === 0) stalledBins += 1;
   }
@@ -529,40 +746,27 @@ function compute(events, nowSec) {
   if (latencies.length >= P90_MIN_SAMPLE) p90Lat = percentile(latencies, 0.9);
   const bells = latencies.length;
 
-  return { totals, nowCounts, started, peak, medianLat, p90Lat, bells, concurrentShare, stallShare, tlWorking, tlInput, tlAgents, tlWatching, tlIdle, bins, totalEvents: events.length };
+  return { totals, nowCounts, started, medianLat, p90Lat, bells, stallShare };
 }
 
-// Daily fleet-stall share over the last TREND_DAYS days. For each day, share =
+// Daily bell-stall share over the last TREND_DAYS days. For each day, share =
 // fraction of BELL-PENDING bins (≥1 session awaiting input) that were STALLED
 // ON YOU (a bell pending, zero working, zero agents running). Watching counts
 // as idle. Days with fewer than STALL_MIN_SAMPLE bell-pending bins are gated
 // to null (no bar) so a near-idle day can't paint a misleading spike. Today's
 // bar is partial. Lower is better. Reuses the dominant-state-per-(session,bin)
-// rule from compute() so the chart matches the 24h "Fleet stalled on you" card.
-function computeDailyStallShare(events, nowSec) {
-  const today = new Date(nowSec * 1000);
-  today.setHours(0, 0, 0, 0);
-  const todayStart = today.getTime() / 1000;
-  const oldestStart = todayStart - (TREND_DAYS - 1) * 86400;
-  const windowEnd = todayStart + 86400;
+// rule from compute() so the chart matches the 24h card.
+function computeDailyStallShare(sessions, nowSec, days) {
+  const oldestStart = days.starts[0];
+  const windowEnd = days.starts[TREND_DAYS - 1] + 86400;
 
   const binsPerDay = Math.floor(86400 / BIN_SEC);
   const totalBins = binsPerDay * TREND_DAYS;
-  // Only working/input/agents are read by the stall metric; watching and idle
-  // are treated as non-engagement, so a session whose dominant state is
-  // either is simply not recorded (the `tl[bestState]` guard below skips it).
   const tl = {
     working:  Array.from({ length: totalBins }, () => new Set()),
     input:    Array.from({ length: totalBins }, () => new Set()),
     agents:   Array.from({ length: totalBins }, () => new Set()),
   };
-
-  const sessions = new Map();
-  for (const e of events) {
-    let arr = sessions.get(e.session_id);
-    if (!arr) { arr = []; sessions.set(e.session_id, arr); }
-    arr.push(e);
-  }
 
   for (const [sid, rawEvs] of sessions) {
     if (rawEvs.length === 0) continue;
@@ -600,11 +804,9 @@ function computeDailyStallShare(events, nowSec) {
     }
   }
 
-  const labels = new Array(TREND_DAYS);
   const values = new Array(TREND_DAYS);
   const counts = new Array(TREND_DAYS);
   for (let d = 0; d < TREND_DAYS; d++) {
-    labels[d] = new Date((oldestStart + d * 86400) * 1000);
     let bellPending = 0, stalled = 0;
     for (let b = d * binsPerDay; b < (d + 1) * binsPerDay; b++) {
       const w = tl.working[b].size, inp = tl.input[b].size, ag = tl.agents[b].size;
@@ -616,397 +818,368 @@ function computeDailyStallShare(events, nowSec) {
     values[d] = bellPending >= STALL_MIN_SAMPLE ? stalled / bellPending : null;
   }
 
-  return { labels, values, counts };
+  return { labels: days.labels, values, counts };
 }
 
-// Daily concurrent share over TREND_DAYS days. For each day, share = fraction
-// of working-bins where ≥2 sessions had 'working' as their dominant state.
-// Today's bar is partial. Higher is better — more parallel work, less serial
-// waiting. Reuses the dominant-state-per-(session,bin) rule from compute() so
-// the chart is consistent with the 24h "Concurrent share" card.
-function computeDailyConcurrentShare(events, nowSec) {
-  const today = new Date(nowSec * 1000);
-  today.setHours(0, 0, 0, 0);
-  const todayStart = today.getTime() / 1000;
-  const oldestStart = todayStart - (TREND_DAYS - 1) * 86400;
-  const windowEnd = todayStart + 86400;
-
-  const binsPerDay = Math.floor(86400 / BIN_SEC);
-  const totalBins = binsPerDay * TREND_DAYS;
-  const tlWorking = Array.from({ length: totalBins }, () => new Set());
-
-  const sessions = new Map();
-  for (const e of events) {
-    let arr = sessions.get(e.session_id);
-    if (!arr) { arr = []; sessions.set(e.session_id, arr); }
-    arr.push(e);
+// Local-midnight day boundaries for the trend window (DST-safe: each day is
+// built from the calendar, not by adding 86400).
+function trendDays(nowSec) {
+  const starts = [], labels = [];
+  for (let d = TREND_DAYS - 1; d >= 0; d--) {
+    const day = new Date(nowSec * 1000);
+    day.setHours(0, 0, 0, 0);
+    day.setDate(day.getDate() - d);
+    starts.push(day.getTime() / 1000);
+    labels.push(day);
   }
-
-  for (const [sid, rawEvs] of sessions) {
-    if (rawEvs.length === 0) continue;
-    const evs = stripStragglers(rawEvs);
-    const perBin = new Map();
-
-    for (let i = 0; i < evs.length; i++) {
-      const e = evs[i];
-      if (!STATES.includes(e.state)) continue;
-      const [spanStart, spanEnd] = spanFor(evs, i, nowSec);
-      const s = Math.max(spanStart, oldestStart);
-      const en = Math.min(spanEnd, windowEnd);
-      if (en <= s) continue;
-
-      const startBin = Math.max(0, Math.floor((s - oldestStart) / BIN_SEC));
-      const endBin   = Math.min(totalBins - 1, Math.floor((en - oldestStart - 1e-6) / BIN_SEC));
-      for (let b = startBin; b <= endBin; b++) {
-        const binStart = oldestStart + b * BIN_SEC;
-        const binEnd   = binStart + BIN_SEC;
-        const slice    = Math.min(en, binEnd) - Math.max(s, binStart);
-        if (slice <= 0) continue;
-        let entry = perBin.get(b);
-        if (!entry) { entry = { working: 0, input: 0, agents: 0, watching: 0, idle: 0 }; perBin.set(b, entry); }
-        entry[e.state] += slice;
-      }
-    }
-
-    for (const [b, times] of perBin) {
-      let bestState = null;
-      let bestTime  = -1;
-      for (const st of STATES) {
-        if (times[st] > bestTime) { bestTime = times[st]; bestState = st; }
-      }
-      if (bestState === 'working' && bestTime > 0) tlWorking[b].add(sid);
-    }
-  }
-
-  const labels = new Array(TREND_DAYS);
-  const values = new Array(TREND_DAYS);
-  const counts = new Array(TREND_DAYS);
-  for (let d = 0; d < TREND_DAYS; d++) {
-    labels[d] = new Date((oldestStart + d * 86400) * 1000);
-    let wb = 0, mwb = 0;
-    for (let b = d * binsPerDay; b < (d + 1) * binsPerDay; b++) {
-      const v = tlWorking[b].size;
-      if (v >= 1) wb += 1;
-      if (v >= 2) mwb += 1;
-    }
-    counts[d] = wb;
-    values[d] = wb > 0 ? mwb / wb : null;
-  }
-
-  return { labels, values, counts };
+  return { starts, labels };
 }
 
-function trendBarColors(trend) {
-  const css = getComputedStyle(document.documentElement);
-  const wait = css.getPropertyValue('--accent-wait').trim();
-  // Past days at reduced opacity; today (last bar) at full opacity so it
-  // visually pops as "in progress."
-  return trend.values.map((_, i) => i === trend.values.length - 1 ? wait : wait + '80');
-}
-
-function stallTooltipLabel(trend) {
-  return (c) => {
-    const pct = c.parsed.y;
-    const n = trend.counts[c.dataIndex];
-    // Gated days (pct null but n>0) read as "too few bells to score" rather
-    // than "no data" so the gap on the chart is explained, not mysterious.
-    if (n === 0) return 'No bells pending';
-    if (pct == null) return `Too few bells to score · ${fmtDuration(n * BIN_SEC)} on the hook`;
-    return `${Math.round(pct)}% stalled · ${fmtDuration(n * BIN_SEC)} on the hook`;
-  };
-}
-
-function buildTrendChart(trend) {
-  const ctx = document.getElementById('trend').getContext('2d');
-  const css = getComputedStyle(document.documentElement);
-  const wait = css.getPropertyValue('--accent-wait').trim();
-  const pctValues = trend.values.map(v => v == null ? null : v * 100);
-  return new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: trend.labels,
-      datasets: [
-        {
-          label: 'Fleet stalled on you',
-          data: pctValues,
-          backgroundColor: trendBarColors(trend),
-          borderWidth: 0,
-        },
-        {
-          label: 'Trend',
-          type: 'line',
-          data: trendlineData(pctValues),
-          borderColor: wait + '99',
-          borderWidth: 1.5,
-          borderDash: [5, 4],
-          pointRadius: 0,
-          fill: false,
-          tension: 0,
-        },
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      scales: {
-        x: {
-          type: 'time',
-          time: { unit: 'day', tooltipFormat: 'EEE MMM d', displayFormats: { day: 'MMM d' } },
-          grid: { display: false },
-          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
-        },
-        y: {
-          min: 0,
-          max: 100,
-          ticks: { callback: (v) => `${v}%` },
-          grid: { color: 'rgba(127,127,127,0.15)' }
-        }
-      },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          filter: (item) => item.datasetIndex === 0,
-          callbacks: { label: stallTooltipLabel(trend) },
-        }
-      }
-    }
-  });
-}
-
-function renderTrend(trend) {
-  if (!trendChart) { trendChart = buildTrendChart(trend); return; }
-  const pctValues = trend.values.map(v => v == null ? null : v * 100);
-  trendChart.data.labels = trend.labels;
-  trendChart.data.datasets[0].data = pctValues;
-  trendChart.data.datasets[0].backgroundColor = trendBarColors(trend);
-  trendChart.data.datasets[1].data = trendlineData(pctValues);
-  // Rebind counts closure so the tooltip reflects fresh data, not the array
-  // captured at first build.
-  trendChart.options.plugins.tooltip.callbacks.label = stallTooltipLabel(trend);
-  trendChart.update('none');
-}
-
-function concurrentTrendBarColors(trend) {
-  const css = getComputedStyle(document.documentElement);
-  const work = css.getPropertyValue('--accent-work').trim();
-  return trend.values.map((_, i) => i === trend.values.length - 1 ? work : work + '80');
-}
-
-function concurrentTooltipLabel(trend) {
-  return (c) => {
-    const pct = c.parsed.y;
-    const n = trend.counts[c.dataIndex];
-    if (pct == null || n === 0) return 'No working time';
-    return `${Math.round(pct)}% · ${fmtDuration(n * BIN_SEC)} working`;
-  };
-}
-
-function buildConcurrentTrendChart(trend) {
-  const ctx = document.getElementById('concurrent-trend').getContext('2d');
-  const css = getComputedStyle(document.documentElement);
-  const work = css.getPropertyValue('--accent-work').trim();
-  const pctValues = trend.values.map(v => v == null ? null : v * 100);
-  return new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: trend.labels,
-      datasets: [
-        {
-          label: 'Concurrent share',
-          data: pctValues,
-          backgroundColor: concurrentTrendBarColors(trend),
-          borderWidth: 0,
-        },
-        {
-          label: 'Trend',
-          type: 'line',
-          data: trendlineData(pctValues),
-          borderColor: work + '99',
-          borderWidth: 1.5,
-          borderDash: [5, 4],
-          pointRadius: 0,
-          fill: false,
-          tension: 0,
-        },
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      scales: {
-        x: {
-          type: 'time',
-          time: { unit: 'day', tooltipFormat: 'EEE MMM d', displayFormats: { day: 'MMM d' } },
-          grid: { display: false },
-          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
-        },
-        y: {
-          min: 0,
-          max: 100,
-          ticks: { callback: (v) => `${v}%` },
-          grid: { color: 'rgba(127,127,127,0.15)' }
-        }
-      },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          filter: (item) => item.datasetIndex === 0,
-          callbacks: { label: concurrentTooltipLabel(trend) },
-        }
-      }
-    }
-  });
-}
-
-function renderConcurrentTrend(trend) {
-  if (!concurrentTrendChart) { concurrentTrendChart = buildConcurrentTrendChart(trend); return; }
-  const pctValues = trend.values.map(v => v == null ? null : v * 100);
-  concurrentTrendChart.data.labels = trend.labels;
-  concurrentTrendChart.data.datasets[0].data = pctValues;
-  concurrentTrendChart.data.datasets[0].backgroundColor = concurrentTrendBarColors(trend);
-  concurrentTrendChart.data.datasets[1].data = trendlineData(pctValues);
-  // Rebind counts closure so the tooltip reflects fresh data, not the array
-  // captured at first build.
-  concurrentTrendChart.options.plugins.tooltip.callbacks.label = concurrentTooltipLabel(trend);
-  concurrentTrendChart.update('none');
-}
-
-function buildChart(labels, data) {
-  const ctx = document.getElementById('timeline').getContext('2d');
-  const css = getComputedStyle(document.documentElement);
-  const work   = css.getPropertyValue('--accent-work').trim();
-  const wait   = css.getPropertyValue('--accent-wait').trim();
-  const agents = css.getPropertyValue('--accent-agents').trim();
-  const watch  = css.getPropertyValue('--accent-watch').trim();
-  const idle   = css.getPropertyValue('--accent-idle').trim();
-  return new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        { label: 'Awaiting input', data: data.tlInput,    borderColor: wait,   backgroundColor: wait   + '66', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Idle',           data: data.tlIdle,     borderColor: idle,   backgroundColor: idle   + '33', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Working',        data: data.tlWorking,  borderColor: work,   backgroundColor: work   + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Agents running', data: data.tlAgents,   borderColor: agents, backgroundColor: agents + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-        { label: 'Watching',       data: data.tlWatching, borderColor: watch,  backgroundColor: watch  + '55', borderWidth: 1, fill: true, tension: 0.25, pointRadius: 0, stack: 'a' },
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: false,
-      interaction: { mode: 'index', intersect: false },
-      scales: {
-        x: {
-          type: 'time',
-          time: { unit: 'hour', tooltipFormat: 'HH:mm', displayFormats: { hour: 'HH:mm' } },
-          grid: { display: false },
-          ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
-        },
-        y: {
-          stacked: true,
-          beginAtZero: true,
-          ticks: { precision: 0, stepSize: 1 },
-          grid: { color: 'rgba(127,127,127,0.15)' }
-        }
-      },
-      plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10, usePointStyle: true } } }
-    }
-  });
-}
-
-function buildLabels(nowSec) {
+function computeFleet(sessions, nowSec) {
+  const days = trendDays(nowSec);
   const cutoff = windowCutoff(nowSec);
+  const since = Math.min(days.starts[0], cutoff);
+  const segs = fleetSegments(buildSpans(sessions, nowSec, since));
+  const { gaps, lastBusyEnd } = fleetGaps(segs, MIN_GAP_SEC, breakSec);
+
+  const daily = days.starts.map((s, i) => {
+    const e = i + 1 < days.starts.length ? days.starts[i + 1] : s + 86400;
+    return fleetStats(segs, gaps, s, e, ACTIVE_MIN_SEC, CONC_MIN_BUSY_SEC);
+  });
+  const last24 = fleetStats(segs, gaps, cutoff, nowSec, ACTIVE_MIN_SEC, CONC_MIN_BUSY_SEC);
   const bins = Math.floor(WINDOW_SEC / BIN_SEC);
-  const labels = new Array(bins);
-  for (let i = 0; i < bins; i++) {
-    labels[i] = new Date((cutoff + i * BIN_SEC) * 1000);
-  }
-  return labels;
+  const tl = fleetBins(segs, gaps, cutoff, bins, BIN_SEC);
+
+  // "Typical" = median over the previous BASELINE_DAYS days that scored
+  // (today excluded — it's partial and it's what's being compared).
+  const prev = daily.slice(0, -1).reverse();
+  const typical = (key) => {
+    const vals = prev.map(d => d[key]).filter(v => v != null && !(key === 'agentHourSecs' && v === 0));
+    return median(vals.slice(0, BASELINE_DAYS));
+  };
+  const base = {
+    idleShare: typical('idleShare'),
+    concShare: typical('concShare'),
+    agentHourSecs: typical('agentHourSecs'),
+  };
+
+  return { days, daily, last24, tl, base, lastBusyEnd, cutoff, bins };
 }
 
 // Pure branch-selection for the verdict banner. Given the live levers it picks
 // the ONE highest-leverage move and returns {kind, cls, icon}. Kept pure (no
 // DOM, no formatting) so the validator can assert precedence in isolation —
 // renderVerdict() below wraps it with the human copy. Order of precedence:
-// not enough signal → stall too high → low parallelism → all good. Stall
-// dominates concurrency because a stalled fleet is wasted wall-clock you
-// caused; low concurrency is only opportunity cost.
+// a bell problem (rare in auto mode, but a stalled fleet you can fix with one
+// allow rule) → not enough signal → fleet idle on you too high → low
+// parallelism → all good. Fleet-idle dominates concurrency because idle fleet
+// time is wall-clock you lost; low concurrency is only opportunity cost.
 // The markers below are load-bearing: tests/validate.sh slices this function
 // out by them to test it under Node. Keep them on their own lines.
 // <verdictFor>
-function verdictFor(stall, conc, workingSecs) {
-  // stall is null when gated (too few bell-pending bins); conc is null with no
-  // working time. workingSecs is total seconds working in the window.
-  if (stall == null) {
-    if (conc != null && conc < 0.25 && workingSecs > 1800) return { kind: 'gated-fanout', cls: '', icon: '·' };
-    return { kind: 'gated-quiet', cls: '', icon: '·' };
-  }
-  if (stall >= 0.5)  return { kind: 'stall-critical', cls: 'act',  icon: '▲' };
-  if (stall >= 0.25) return { kind: 'stall-high',     cls: 'act',  icon: '▲' };
-  if (conc != null && conc < 0.3) return { kind: 'fanout', cls: '', icon: '→' };
+function verdictFor(idle, conc, stall) {
+  // idle is null when gated (under ACTIVE_MIN_SEC active time); conc is null
+  // under CONC_MIN_BUSY_SEC busy time; stall is null under STALL_MIN_SAMPLE.
+  if (stall != null && stall >= 0.5) return { kind: 'bells',         cls: 'warn', icon: '🔔' };
+  if (idle == null)                  return { kind: 'quiet',         cls: '',     icon: '·' };
+  if (idle >= 0.5)                   return { kind: 'idle-critical', cls: 'act',  icon: '▲' };
+  if (idle >= 0.35)                  return { kind: 'idle-high',     cls: 'act',  icon: '▲' };
+  if (conc != null && conc < 0.3)    return { kind: 'fanout',        cls: '',     icon: '→' };
   return { kind: 'good', cls: 'good', icon: '✓' };
 }
 // </verdictFor>
 
+function typicalNote(cur, base, fmt, lowerIsBetter) {
+  if (cur == null || base == null) return '';
+  const better = lowerIsBetter ? cur < base : cur > base;
+  return ` (${better ? 'better than' : 'vs'} your typical ${fmt(base)})`;
+}
+
 // Turn the numbers into a single instruction. The whole point of the dashboard
 // is to name the ONE highest-leverage move right now, not to be admired.
-function renderVerdict(data) {
+function renderVerdict(fleet, data) {
   const el = document.getElementById('verdict');
   const icon = document.getElementById('verdict-icon');
   const txt = document.getElementById('verdict-text');
-  el.classList.remove('act', 'good');
+  el.classList.remove('act', 'warn', 'good');
 
-  const stall = data.stallShare;
-  const conc  = data.concurrentShare;
-  const med   = data.medianLat;
-  const v = verdictFor(stall, conc, data.totals.working);
+  const f = fleet.last24;
+  const idle = f.idleShare, conc = f.concShare;
+  const v = verdictFor(idle, conc, data.stallShare);
 
   if (v.cls) el.classList.add(v.cls);
   icon.textContent = v.icon;
 
+  const idleNote = typicalNote(idle, fleet.base.idleShare, fmtPct, true);
+  const concNote = typicalNote(conc, fleet.base.concShare, fmtPct, false);
   switch (v.kind) {
-    case 'gated-fanout':
-      txt.innerHTML = `Too few bells to score stall yet. Meanwhile <span class="lever">concurrent share is ${fmtPct(conc)}</span> — you're working mostly one agent at a time. Fan out: start a second task while the first runs.`;
+    case 'bells':
+      txt.innerHTML = `<b>Permission bells stalled the fleet ${fmtPct(data.stallShare)} of the time one was pending.</b> In auto mode that's usually one recurring prompt — find it (median wait <span class="lever">${fmtLatency(data.medianLat)}</span>) and add an allow rule.`;
       break;
-    case 'gated-quiet':
-      txt.innerHTML = `Not enough on-the-hook time in the last 24h to score stall — the metric stays quiet rather than show a noisy number. Keep going.`;
+    case 'quiet':
+      txt.innerHTML = `Under an hour of active time in the last 24h — not enough to score the fleet yet. Start something and this fills in.`;
       break;
-    case 'stall-critical':
-      txt.innerHTML = `<b>${fmtPct(stall)} of your on-the-hook time the whole fleet sat idle waiting on you.</b> This is the lever. Two ways to pull it down: answer bells faster (median is <span class="lever">${fmtLatency(med)}</span>), or keep an agent working while you decide — start or queue the next task <em>before</em> you sit with a 🔔.`;
+    case 'idle-critical':
+      txt.innerHTML = `<b>Your fleet sat idle ${fmtPct(idle)} of your active time</b>${idleNote} — <span class="lever">${fmtDuration(f.deadSecs)}</span> with nothing running while you reviewed or decided. Before you read a finished session's output, queue the next task in another so something is always running.`;
       break;
-    case 'stall-high':
-      txt.innerHTML = `<b>${fmtPct(stall)} of on-the-hook time was a full stall</b> — a bell pending with no agent working. Cut it by overlapping: when one session rings, have another already running so your thinking time isn't dead fleet time.`;
+    case 'idle-high':
+      txt.innerHTML = `<b>Fleet idle ${fmtPct(idle)} of active time</b>${idleNote} — <span class="lever">${fmtDuration(f.deadSecs)}</span> lost. Overlap your review time: keep a second session working while you read the first one's output.`;
       break;
     case 'fanout':
-      txt.innerHTML = `Stall is low at <span class="lever">${fmtPct(stall)}</span> — when you're on the hook, an agent is usually still working. Next gain is throughput: <span class="lever">concurrent share ${fmtPct(conc)}</span> means mostly serial work. Fan out a second or third task to get more done per hour.`;
+      txt.innerHTML = `The fleet rarely waits on you (idle <span class="lever">${fmtPct(idle)}</span>), but only <span class="lever">${fmtPct(conc)}</span> of busy time had ≥2 sessions going${concNote}. Next gain is throughput: fan out a second or third task.`;
       break;
     case 'good':
-      txt.innerHTML = `Both levers look good — stall <span class="lever">${fmtPct(stall)}</span>, concurrent share <span class="lever">${fmtPct(conc)}</span>. You're answering promptly and keeping agents busy in parallel. Hold the line.`;
+      txt.innerHTML = `Fleet idle <span class="lever">${fmtPct(idle)}</span>${idleNote}, concurrent share <span class="lever">${fmtPct(conc)}</span>, <span class="lever">${f.parallelism.toFixed(1)}</span> sessions busy on average. You're keeping agents busy in parallel — hold the line.`;
       break;
   }
 }
 
-function render(data, nowSec) {
-  const labels = buildLabels(nowSec);
-  if (!chart) chart = buildChart(labels, data);
-  else {
-    chart.data.labels = labels;
-    chart.data.datasets[2].data = data.tlWorking;
-    chart.data.datasets[0].data = data.tlInput;
-    chart.data.datasets[3].data = data.tlAgents;
-    chart.data.datasets[4].data = data.tlWatching;
-    chart.data.datasets[1].data = data.tlIdle;
-    chart.update('none');
-  }
+// "▼ 12pt better · typ. 54%" — colored by whether the move is good.
+function renderDelta(el, cur, base, { lowerIsBetter, fmt, diff }) {
+  if (cur == null || base == null) { el.textContent = base == null ? 'no baseline yet' : ''; return; }
+  const d = cur - base;
+  const better = lowerIsBetter ? d < 0 : d > 0;
+  const cls = Math.abs(d) < 1e-9 ? '' : better ? 'better' : 'worse';
+  const arrow = d > 0 ? '▲' : d < 0 ? '▼' : '=';
+  el.innerHTML = `<span class="${cls}">${arrow} ${diff(Math.abs(d))}</span> · typ. ${fmt(base)}`;
+}
 
-  document.getElementById('now-working').textContent  = data.nowCounts.working;
-  document.getElementById('now-input').textContent    = data.nowCounts.input;
-  document.getElementById('now-agents').textContent   = data.nowCounts.agents;
-  document.getElementById('now-watching').textContent = data.nowCounts.watching;
-  document.getElementById('now-idle').textContent     = data.nowCounts.idle;
+// Past days at reduced opacity; today (last bar) at full opacity so it reads
+// as "in progress".
+function barColors(n, color) {
+  return Array.from({ length: n }, (_, i) => i === n - 1 ? color : color + '80');
+}
+
+const DAY_X = {
+  type: 'time',
+  time: { unit: 'day', tooltipFormat: 'EEE MMM d', displayFormats: { day: 'MMM d' } },
+  grid: { display: false },
+  ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 6 },
+};
+const GRID_Y = { color: 'rgba(127,127,127,0.15)' };
+
+// A 30-day percent bar chart with a dashed linear trendline. Its y-axis is
+// re-fitted to the tallest bar on every update (pctAxisMax).
+function renderPctTrend(id, labels, fractions, color, tooltipLabel) {
+  const pct = fractions.map(v => v == null ? null : v * 100);
+  const yMax = pctAxisMax(pct);
+  let ch = charts[id];
+  if (!ch) {
+    ch = charts[id] = new Chart(document.getElementById(id).getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { data: pct, backgroundColor: barColors(pct.length, color), borderWidth: 0, borderRadius: 2 },
+          { type: 'line', data: trendlineData(pct), borderColor: color + '99', borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, fill: false, tension: 0 },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        scales: {
+          x: DAY_X,
+          y: { min: 0, max: yMax, ticks: { callback: (v) => `${v}%`, stepSize: yMax > 50 ? 20 : 10 }, grid: GRID_Y },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: { filter: (item) => item.datasetIndex === 0, callbacks: { label: tooltipLabel } },
+        },
+      },
+    });
+    return;
+  }
+  ch.data.labels = labels;
+  ch.data.datasets[0].data = pct;
+  ch.data.datasets[0].backgroundColor = barColors(pct.length, color);
+  ch.data.datasets[1].data = trendlineData(pct);
+  ch.options.scales.y.max = yMax;
+  ch.options.scales.y.ticks.stepSize = yMax > 50 ? 20 : 10;
+  // Rebind so the tooltip reads fresh data, not the arrays captured at build.
+  ch.options.plugins.tooltip.callbacks.label = tooltipLabel;
+  ch.update('none');
+}
+
+function renderHoursTrend(fleet) {
+  const id = 'c-hours';
+  const labels = fleet.days.labels;
+  const work = fleet.daily.map(d => d.workSecs / 3600);
+  const ag = fleet.daily.map(d => d.agentSecs / 3600);
+  const total = fleet.daily.map(d => d.agentHourSecs > 0 ? d.agentHourSecs / 3600 : null);
+  const workC = css('--accent-work'), agC = css('--accent-agents');
+  const tooltip = {
+    filter: (item) => item.datasetIndex < 2,
+    callbacks: {
+      label: (c) => `${c.dataset.label}: ${c.parsed.y.toFixed(1)}h`,
+      footer: (items) => {
+        const d = fleet.daily[items[0].dataIndex];
+        if (!d.busyWall) return 'No busy time';
+        return `${fmtHours(d.agentHourSecs)} in ${fmtDuration(d.busyWall)} busy · ${d.parallelism.toFixed(1)}× parallel`;
+      },
+    },
+  };
+  let ch = charts[id];
+  if (!ch) {
+    charts[id] = new Chart(document.getElementById(id).getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Working', data: work, backgroundColor: barColors(work.length, workC), borderWidth: 0, stack: 'h' },
+          { label: 'Background agents', data: ag, backgroundColor: barColors(ag.length, agC), borderWidth: 0, stack: 'h' },
+          { type: 'line', label: 'Trend', data: trendlineData(total), borderColor: workC + '99', borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, fill: false, tension: 0, stack: 'trend' },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { ...DAY_X, stacked: true },
+          y: { stacked: true, beginAtZero: true, ticks: { callback: (v) => `${v}h`, maxTicksLimit: 5 }, grid: GRID_Y },
+        },
+        plugins: { legend: { display: false }, tooltip },
+      },
+    });
+    return;
+  }
+  ch.data.labels = labels;
+  ch.data.datasets[0].data = work;
+  ch.data.datasets[1].data = ag;
+  ch.data.datasets[2].data = trendlineData(total);
+  ch.options.plugins.tooltip = tooltip;
+  ch.update('none');
+}
+
+function renderFleetTimeline(fleet, nowSec) {
+  const id = 'c-fleet';
+  const labels = Array.from({ length: fleet.bins }, (_, i) => new Date((fleet.cutoff + i * BIN_SEC) * 1000));
+  const { w, ag, inp, dead } = fleet.tl;
+  const par = fleet.last24.parallelism;
+  const parLine = labels.map(() => par);
+  const peak = Math.max(2, ...w.map((v, i) => v + ag[i] + inp[i]));
+  const xMin = labels[firstShownBin(fleet.tl, 12)].getTime();
+  const ds = [
+    { label: 'Working',           data: w,   backgroundColor: css('--accent-work') },
+    { label: 'Background agents', data: ag,  backgroundColor: css('--accent-agents') },
+    { label: 'Awaiting you 🔔',   data: inp, backgroundColor: css('--accent-wait') },
+  ];
+  let ch = charts[id];
+  if (!ch) {
+    charts[id] = new Chart(document.getElementById(id).getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          ...ds.map(d => ({ ...d, borderWidth: 0, barPercentage: 1, categoryPercentage: 1, stack: 'fleet', order: 1 })),
+          // Full-height wash behind the bars; height = share of the bin the
+          // fleet sat idle on you.
+          { label: 'Fleet idle on you', data: dead, yAxisID: 'y2', backgroundColor: css('--accent-dead') + '40', borderWidth: 0, barPercentage: 1, categoryPercentage: 1, stack: 'dead', grouped: false, order: 3 },
+          { type: 'line', label: 'Avg while busy', data: parLine, borderColor: css('--muted'), borderWidth: 1, borderDash: [4, 4], pointRadius: 0, fill: false, stack: 'ref', order: 0 },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: {
+            type: 'time', stacked: true, offset: false, min: xMin,
+            time: { unit: 'hour', tooltipFormat: 'HH:mm', displayFormats: { hour: 'HH:mm' } },
+            grid: { display: false },
+            ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 },
+          },
+          y: { stacked: true, beginAtZero: true, suggestedMax: Math.ceil(peak), ticks: { precision: 0 }, grid: GRID_Y, title: { display: true, text: 'sessions', color: css('--muted'), font: { size: 11 } } },
+          y2: { display: false, min: 0, max: 1 },
+        },
+        plugins: {
+          legend: {
+            position: 'bottom',
+            labels: { boxWidth: 10, boxHeight: 10, usePointStyle: true, filter: (item) => item.text !== 'Avg while busy' },
+          },
+          tooltip: {
+            filter: (item) => item.parsed.y > 0.005 && item.dataset.label !== 'Avg while busy',
+            callbacks: {
+              label: (c) => c.dataset.yAxisID === 'y2'
+                ? `Fleet idle on you: ${fmtDuration(c.parsed.y * BIN_SEC)} of 5m`
+                : `${c.dataset.label}: ${c.parsed.y.toFixed(1)}`,
+            },
+          },
+        },
+      },
+    });
+    return;
+  }
+  ch.data.labels = labels;
+  ch.data.datasets[0].data = w;
+  ch.data.datasets[1].data = ag;
+  ch.data.datasets[2].data = inp;
+  ch.data.datasets[3].data = dead;
+  ch.data.datasets[4].data = parLine;
+  ch.options.scales.y.suggestedMax = Math.ceil(peak);
+  ch.options.scales.x.min = xMin;
+  ch.update('none');
+}
+
+function renderFleet(fleet, data, nowSec) {
+  const f = fleet.last24, base = fleet.base;
+  const pctDiff = (x) => `${Math.round(x * 100)}pt`;
+
+  document.getElementById('k-idle').textContent = fmtPct(f.idleShare);
+  renderDelta(document.getElementById('d-idle'), f.idleShare, base.idleShare, { lowerIsBetter: true, fmt: fmtPct, diff: pctDiff });
+  document.getElementById('k-conc').textContent = fmtPct(f.concShare);
+  renderDelta(document.getElementById('d-conc'), f.concShare, base.concShare, { lowerIsBetter: false, fmt: fmtPct, diff: pctDiff });
+  document.getElementById('k-hours').textContent = fmtHours(f.agentHourSecs);
+  renderDelta(document.getElementById('d-hours'), f.agentHourSecs, base.agentHourSecs, { lowerIsBetter: false, fmt: fmtHours, diff: fmtHours });
+
+  document.getElementById('x-busy').textContent = fmtDuration(f.busyWall);
+  document.getElementById('x-dead').textContent = fmtDuration(f.deadSecs);
+  document.getElementById('x-par').textContent = f.parallelism == null ? '—' : `${f.parallelism.toFixed(1)} sessions`;
+  document.getElementById('x-peak').textContent = f.peak;
+
+  const days = fleet.days.labels, daily = fleet.daily;
+  renderPctTrend('c-idle', days, daily.map(d => d.idleShare), css('--accent-dead'), (c) => {
+    const d = daily[c.dataIndex];
+    if (!d.activeSecs) return 'No activity';
+    if (d.idleShare == null) return `Too little activity to score · ${fmtDuration(d.activeSecs)} active`;
+    return `${Math.round(c.parsed.y)}% idle · ${fmtDuration(d.deadSecs)} of ${fmtDuration(d.activeSecs)} active`;
+  });
+  renderPctTrend('c-conc', days, daily.map(d => d.concShare), css('--accent-work'), (c) => {
+    const d = daily[c.dataIndex];
+    if (!d.busyWall) return 'No busy time';
+    if (d.concShare == null) return `Too little busy time to score · ${fmtDuration(d.busyWall)}`;
+    return `${Math.round(c.parsed.y)}% with ≥2 busy · ${fmtDuration(d.busyWall)} busy · peak ${d.peak}`;
+  });
+  renderHoursTrend(fleet);
+  renderFleetTimeline(fleet, nowSec);
+
+  // Fleet pill: the live version of the north star. A fleet that went quiet
+  // moments ago is exactly the gap the red bars count once it closes.
+  const pill = document.getElementById('pill-fleet');
+  pill.classList.remove('busy', 'dead');
+  const busyNow = data.nowCounts.working + data.nowCounts.agents;
+  const quietFor = fleet.lastBusyEnd == null ? null : nowSec - fleet.lastBusyEnd;
+  if (busyNow > 0) {
+    pill.classList.add('busy');
+    pill.innerHTML = `⚡ <b>${busyNow}</b> busy now`;
+  } else if (quietFor != null && quietFor >= MIN_GAP_SEC && quietFor <= breakSec) {
+    pill.classList.add('dead');
+    pill.innerHTML = `⚠ fleet idle <b>${fmtDuration(quietFor)}</b> — queue something`;
+  } else {
+    pill.innerHTML = `fleet parked`;
+  }
+}
+
+function render(data) {
+  for (const st of ['input', 'working', 'agents', 'watching', 'idle']) {
+    const n = data.nowCounts[st];
+    document.getElementById(`now-${st}`).textContent = n;
+    document.getElementById(`pill-${st}`).classList.toggle('zero', n === 0);
+  }
+  document.getElementById('pill-input').classList.toggle('hot', data.nowCounts.input > 0);
 
   document.getElementById('t-working').textContent  = fmtDuration(data.totals.working);
   document.getElementById('t-input').textContent    = fmtDuration(data.totals.input);
@@ -1018,11 +1191,18 @@ function render(data, nowSec) {
   document.getElementById('t-latency').textContent  = fmtLatency(data.medianLat);
   document.getElementById('t-p90-latency').textContent = fmtLatency(data.p90Lat);
   document.getElementById('t-bells').textContent    = data.bells;
-  document.getElementById('t-peak').textContent     = data.peak;
-  document.getElementById('t-concurrent-share').textContent = fmtPct(data.concurrentShare);
   document.getElementById('t-stall-share').textContent = fmtPct(data.stallShare);
+}
 
-  renderVerdict(data);
+function stallTooltipLabel(trend) {
+  return (c) => {
+    const n = trend.counts[c.dataIndex];
+    // Gated days (pct null but n>0) read as "too few bells to score" rather
+    // than "no data" so the gap on the chart is explained, not mysterious.
+    if (n === 0) return 'No bells pending';
+    if (c.parsed.y == null) return `Too few bells to score · ${fmtDuration(n * BIN_SEC)} on the hook`;
+    return `${Math.round(c.parsed.y)}% stalled · ${fmtDuration(n * BIN_SEC)} on the hook`;
+  };
 }
 
 function showError(html, statusVariant) {
@@ -1052,13 +1232,19 @@ python3 -m http.server 8765</pre>
 
 async function tick() {
   try {
-    const text = await fetchEvents();
+    const [text, cfg] = await Promise.all([fetchEvents(), fetchConfig()]);
+    breakSec = breakSecFrom(cfg, DEFAULT_BREAK_MIN);
+    for (const el of document.querySelectorAll('.break-min')) el.textContent = breakSec / 60;
     const events = parseEvents(text);
     const nowSec = Date.now() / 1000;
-    const data = compute(events, nowSec);
-    render(data, nowSec);
-    renderTrend(computeDailyStallShare(events, nowSec));
-    renderConcurrentTrend(computeDailyConcurrentShare(events, nowSec));
+    const sessions = groupBySession(events);
+    const data = compute(sessions, nowSec);
+    const fleet = computeFleet(sessions, nowSec);
+    render(data);
+    renderFleet(fleet, data, nowSec);
+    renderVerdict(fleet, data);
+    const stall = computeDailyStallShare(sessions, nowSec, fleet.days);
+    renderPctTrend('trend', stall.labels, stall.values, css('--accent-wait'), stallTooltipLabel(stall));
     clearError();
   } catch (e) {
     const isFileScheme = location.protocol === 'file:';
@@ -1070,6 +1256,7 @@ async function tick() {
       variant = 'waiting';
     } else {
       msg = `<strong>Cannot fetch <code>events.jsonl</code></strong> (${e.message}). ${SERVE_HINT}`;
+      console.error(e);
     }
     showError(msg, variant);
   }

@@ -1,3 +1,4 @@
 {
-  "mode": "always-on"
+  "mode": "always-on",
+  "fleetBreakMin": 10
 }

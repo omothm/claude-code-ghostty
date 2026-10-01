@@ -24,7 +24,8 @@ environment variables, and the validator summary, see the root
   - [Sweep single-flight lock](#sweep-single-flight-lock)
   - [`end` is terminal until resume — dashboard straggler guard](#end-is-terminal-until-resume--dashboard-straggler-guard)
 - [Plugin display swap: ` | ` → ` — `](#plugin-display-swap----)
-- [Dashboard north-star metric: "Fleet stalled on you"](#dashboard-north-star-metric-fleet-stalled-on-you)
+- [Dashboard north-star metric: "Fleet idle on you"](#dashboard-north-star-metric-fleet-idle-on-you)
+- [Bell section metric: "Fleet stalled on bells"](#bell-section-metric-fleet-stalled-on-bells)
 
 ## Watching state
 
@@ -101,7 +102,7 @@ PID-based since there's no subagent PID to check.
 
 The `agents` state is a refinement of `idle` like `watching`: it's excluded
 from `notifs` mode's state file (only logged to `events.jsonl`), and it's
-**engaged, not stalled**, in the dashboard's fleet-stall metric — the
+**busy, not parked**, in the dashboard's fleet-idle and bell-stall metrics — the
 opposite of `watching`'s exclusion, since a background agent is genuinely
 advancing the work while a monitor is merely observing.
 
@@ -690,9 +691,95 @@ swaps to ` — ` in the visible display text. `param1=` strips the leading
 corollary](#askuserquestion-bell--tab-title-icon) for why the icon can't
 be included.
 
-## Dashboard north-star metric: "Fleet stalled on you"
+## Dashboard north-star metric: "Fleet idle on you"
 
-**Decision:** the dashboard's headline lever is **fleet-stall share**, not
+**Context:** most sessions now run in auto mode, so permission bells are
+rare and the old bell-centric north-star ("Fleet stalled on you", below)
+almost never has enough on-the-hook time to score. In auto mode the fleet
+waits on you at a different moment: a session *finishes* and nothing else is
+running while you review its output and decide the next prompt.
+
+**Decision:** the headline lever is **fleet-idle share** — wall-clock, not
+per-session. A session is *busy* when it is `working` or `agents` (same
+engaged/parked split as the bell metric: background agents are real
+progress, watching is not). The fleet is busy while ≥1 session is. Gaps
+between busy stretches are classified by length:
+
+- **< `MIN_GAP_SEC` (60 s)** — hook noise (the agents↔idle flicker, an
+  instant re-prompt). Neither busy nor idle. On real data these were ~31% of
+  all gap time; counting them would score flicker, not behavior.
+- **60 s – break threshold (`fleetBreakMin` in `config.json`, default 10
+  min)** — **fleet idle on you**: you came back and prompted within the
+  threshold, so you were around and nothing ran.
+- **> threshold** — a break, excluded from both numerator and denominator.
+
+Share = idle gaps ÷ *active time* (busy wall-clock + idle gaps), gated to
+`null` under `ACTIVE_MIN_SEC` (1 h) of active time. The open trailing gap
+(fleet quiet right now) isn't scored until it closes — it may still become a
+break — but the header's fleet pill shows it live ("fleet idle 6m — queue
+something") so it's actionable while it's happening.
+
+**Why this measure:** on 30 days of real data (10-min break) it ranges
+16–61% per day and tracks behavior — the two most parallel days (avg
+1.6–1.9 sessions busy) were the two lowest (16%, 19%). It is moderately
+sensitive to the break threshold (each step across 10/15/20/30 min shifts a
+typical day by ~3–8pt but keeps the day ranking), not to the bin size (there are
+no bins — it's computed on exact intervals via a sweep-line in
+`fleetSegments`).
+
+**Why the threshold is a setting (default 10 min):** gap lengths on real
+data taper smoothly (1–5 min ≫ 5–15 ≫ 15–30 ≫ 30–60) with no natural elbow
+separating review time from a break, so the cutoff is a judgment about your
+own working style, not a fact the data reveals. 10 min treats a longer
+pause as stepping away rather than charging it as idle. The dashboard
+re-reads `config.json` every tick (`breakSecFrom`; missing, non-numeric or
+< 1 min falls back to the default), so a change applies without a reload.
+The verdict thresholds (50% / 35%) still separate good days (16–33%) from
+typical ones (~45–60%) at 10 min. **Rejected alternative (prompt-to-prompt "active
+intervals"):** inferring presence from `idle→working` transitions fails
+because background-task completions also wake the main loop into `working`
+without a user prompt, and the event log can't tell them apart.
+
+**Companions (the payoff):** *concurrent share* — busy wall-clock with ≥2
+sessions busy ÷ busy wall-clock, now counting `agents` as busy (it used to
+count only `working`, under-reading delegated parallel work); gated under
+`CONC_MIN_BUSY_SEC` (30 min). *Agent-hours* — summed session-time in
+`working` + `agents` per day (throughput). Each 30-day panel's header shows
+the rolling-24h value and a delta against the median of the previous
+`BASELINE_DAYS` (7) days that scored, so "doing better/worse than usual" is
+explicit rather than read off bar heights.
+
+**Percent axes fit the data:** every 30-day percent chart sets its y-max via
+`pctAxisMax` — just above the tallest bar, on a 10 step up to 50% and a 20
+step above (so the top always lands on a tick) — instead of pinning 100%,
+which squashed low-share charts flat.
+
+**24h fleet-activity chart:** stacked bars of *average* sessions per 5-min
+bin (fractional, so a 2-min burst isn't erased the way the old
+dominant-state rule erased it) — working, background agents, bells — over a
+full-height red wash whose height is the share of the bin the fleet was idle
+on you, plus a dashed line at the average busy count. Leading empty hours
+are trimmed (`firstShownBin`, 1 h lead-in) so the working day fills the
+width. It replaced a five-band stacked area chart whose translucent fills
+overlapped and which showed state counts without saying where time was
+lost.
+
+**Verdict banner:** `verdictFor(idle, conc, stall)` is pure (sliced out by
+`// <verdictFor>` markers for the validator) with precedence: bells (bell
+stall ≥ 50% — rare, but one allow rule fixes it) → quiet (idle gated) →
+idle-critical (≥ 50%) → idle-high (≥ 35%) → fanout (concurrent share <
+30%) → good. **Fleet-idle dominates concurrency** for the same reason
+stall used to: idle fleet time is wall-clock you lost; low concurrency is
+only opportunity cost. The fleet helpers live between `// <fleetMetrics>`
+markers and are validator-tested on a synthetic fleet.
+
+## Bell section metric: "Fleet stalled on bells"
+
+Demoted from north-star to the dashboard's lower "Permission bells"
+section (it was the headline before auto mode). Its definition and the
+reasoning below are unchanged.
+
+**Decision:** the bell-stall metric is **fleet-stall share**, not
 a per-bell latency. Per 5-min bin: a bin is *stalled* when ≥1 session is
 awaiting input AND zero sessions are working. Share = stalled bins ÷
 **bell-pending bins** (bins with ≥1 session awaiting input). Reads as "of
@@ -758,15 +845,3 @@ fast bells entirely (a 4-min bell never dominates a 15-min bin →
 on-the-hook collapses to 0). Finer bins (2 min) capture sub-5-min bells
 more faithfully but cost chart smoothness; only switch if rewarding
 sub-5-min responsiveness becomes a goal.
-
-**Verdict banner:** the dashboard names the single highest-leverage action,
-not just a number. `verdictFor(stall, conc, workingSecs)` is a pure
-function (sliced out by `// <verdictFor>` markers for the validator) with
-precedence: gated → stall-critical (≥50%) → stall-high (≥25%) → fanout
-(stall healthy but concurrent share <30%) → good. **Stall dominates
-concurrency** because a stalled fleet is wasted wall-clock you caused,
-whereas low concurrency is only opportunity cost.
-
-**Companion metric:** concurrent share (push *up*) is the mirror of
-fleet-stall (pull *down*) — share of working-time bins with ≥2 sessions in
-parallel.

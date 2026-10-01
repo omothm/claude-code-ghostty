@@ -140,7 +140,7 @@ fi
 
 ## Optional: metrics dashboard
 
-The hooks log every state transition to `~/.claude/.ccg/events.jsonl`. A self-contained dashboard reads this log and shows live and last-24h metrics: sessions active, time in each state, average response latency, and peak concurrency.
+The hooks log every state transition to `~/.claude/.ccg/events.jsonl`. A self-contained dashboard reads this log and shows how well you keep your agents busy: how much of your active time the whole fleet sat idle waiting on you, how often ≥2 sessions ran in parallel, daily agent-hours (each with a 30-day trend and a comparison to your typical day), a 24h fleet-activity timeline, plus permission-bell latency and time in each state.
 
 If the SwiftBar plugin is installed, click **Open dashboard** in the menubar dropdown — it starts a local HTTP server and opens the dashboard automatically.
 
@@ -150,6 +150,12 @@ To open it manually:
 cd ~/.claude/.ccg
 python3 -m http.server 8765
 # then open http://localhost:8765/dashboard.html
+```
+
+A pause between busy stretches longer than 10 minutes counts as a break rather than time the fleet sat idle on you. Tune it in `~/.claude/.ccg/config.json` (the dashboard picks it up within a second):
+
+```json
+{ "fleetBreakMin": 15 }
 ```
 
 ## Why Ghostty

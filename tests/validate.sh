@@ -2074,25 +2074,25 @@ if command -v node >/dev/null 2>&1 && [ -f "$DASHBOARD_PATH" ]; then
       printf '%s\n' "$VERDICT_FN"
       cat <<'NODE'
 const cases = [
-  // [stall, conc, workingSecs, expectedKind]
-  [null, null,  0,    'gated-quiet'],     // no signal at all
-  [null, 0.10,  3600, 'gated-fanout'],    // gated but low conc + real work → nudge fan-out
-  [null, 0.10,  600,  'gated-quiet'],     // gated, low conc, but barely any work → stay quiet
-  [null, 0.50,  3600, 'gated-quiet'],     // gated, conc healthy → quiet
-  [0.80, 0.90,  3600, 'stall-critical'],  // high stall dominates even with great conc
-  [0.50, 0.90,  3600, 'stall-critical'],  // boundary: 0.5 is critical
-  [0.49, 0.90,  3600, 'stall-high'],      // just below critical
-  [0.25, 0.90,  3600, 'stall-high'],      // boundary: 0.25 is high
-  [0.24, 0.10,  3600, 'fanout'],          // stall healthy, conc low → fan out
-  [0.10, 0.29,  3600, 'fanout'],          // boundary: 0.29 still fan-out
-  [0.10, 0.30,  3600, 'good'],            // boundary: 0.30 is healthy
-  [0.05, 0.80,  3600, 'good'],            // both levers healthy
-  [0.05, null,  3600, 'good'],            // stall healthy, no conc data → good (not fanout)
+  // [fleetIdle, conc, bellStall, expectedKind]
+  [null, null, null, 'quiet'],          // no signal at all
+  [null, 0.10, null, 'quiet'],          // idle gated → quiet even with low conc
+  [null, null, 0.60, 'bells'],          // bell stall surfaces even when fleet is gated
+  [0.20, 0.80, 0.50, 'bells'],          // boundary: 0.5 bell stall dominates a good fleet
+  [0.20, 0.80, 0.49, 'good'],           // just below the bell threshold → ignored
+  [0.70, 0.80, null, 'idle-critical'],  // high fleet-idle dominates great conc
+  [0.50, 0.80, 0.10, 'idle-critical'],  // boundary: 0.5 is critical
+  [0.49, 0.80, null, 'idle-high'],      // just below critical
+  [0.35, 0.80, null, 'idle-high'],      // boundary: 0.35 is high
+  [0.34, 0.10, null, 'fanout'],         // idle healthy, conc low → fan out
+  [0.20, 0.29, null, 'fanout'],         // boundary: 0.29 still fan-out
+  [0.20, 0.30, null, 'good'],           // boundary: 0.30 is healthy
+  [0.20, null, null, 'good'],           // idle healthy, conc gated → good (not fanout)
 ];
 let bad = 0;
-for (const [s, c, w, want] of cases) {
-  const got = verdictFor(s, c, w).kind;
-  if (got !== want) { bad++; console.log(`FAIL stall=${s} conc=${c} work=${w}: want ${want}, got ${got}`); }
+for (const [i, c, s, want] of cases) {
+  const got = verdictFor(i, c, s).kind;
+  if (got !== want) { bad++; console.log(`FAIL idle=${i} conc=${c} stall=${s}: want ${want}, got ${got}`); }
 }
 process.exit(bad);
 NODE
@@ -2104,7 +2104,7 @@ NODE
     fi
     # Sanity: every branch kind the renderer switches on must be one verdictFor
     # can actually return — guards against a renamed kind drifting out of sync.
-    for kind in gated-fanout gated-quiet stall-critical stall-high fanout good; do
+    for kind in bells quiet idle-critical idle-high fanout good; do
       grep -q "case '$kind'" "$DASHBOARD_PATH" \
         && ok "renderVerdict handles '$kind'" \
         || ng "renderVerdict missing case for '$kind'"
@@ -2112,6 +2112,106 @@ NODE
   fi
 else
   skip "dashboard verdict logic (node or dashboard.html absent)"
+fi
+
+# ---------------------------------------------------------------------------
+section "dashboard fleet metrics"
+
+# The headline lever (fleet idle on you), concurrent share, agent-hours and
+# the 24h timeline all derive from the pure helpers between the
+# <fleetMetrics> markers. Exercise them on a synthetic two-session fleet.
+if command -v node >/dev/null 2>&1 && [ -f "$DASHBOARD_PATH" ]; then
+  FLEET_FN=$(awk '/\/\/ <fleetMetrics>/{f=1;next} /\/\/ <\/fleetMetrics>/{f=0} f' "$DASHBOARD_PATH")
+  if [ -z "$FLEET_FN" ]; then
+    ng "could not extract fleetMetrics from $DASHBOARD_PATH (markers missing?)"
+  else
+    FLEET_JS="$TMPROOT/fleet.js"
+    {
+      printf '%s\n' "$FLEET_FN"
+      cat <<'NODE'
+let bad = 0;
+const eq = (name, got, want) => {
+  const same = typeof want === 'number' ? Math.abs(got - want) < 1e-9 : JSON.stringify(got) === JSON.stringify(want);
+  if (!same) { bad++; console.log(`FAIL ${name}: want ${JSON.stringify(want)}, got ${JSON.stringify(got)}`); }
+};
+// Timeline (seconds):
+//   A working   0–600, agents 600–1200       (busy 0–1200)
+//   B working 300–900                         (overlap 300–900 → 2 busy)
+//   gap 1200–1500 (5 min)  → fleet idle on you
+//   A working 1500–1530; gap 1530–1560 (30 s) → hook noise, ignored
+//   A working 1560–2000; gap 2000–5000 (50 min) → a break, ignored
+//   B input   2100–2400 (a bell in the break — not busy)
+//   A working 5000–5600, then open (no later busy) → trailing gap unscored
+const spans = [
+  { state: 'working', s: 0,    e: 600 },
+  { state: 'agents',  s: 600,  e: 1200 },
+  { state: 'working', s: 300,  e: 900 },
+  { state: 'idle',    s: 1200, e: 1500 },
+  { state: 'working', s: 1500, e: 1530 },
+  { state: 'working', s: 1560, e: 2000 },
+  { state: 'input',   s: 2100, e: 2400 },
+  { state: 'watching', s: 2000, e: 5000 },
+  { state: 'working', s: 5000, e: 5600 },
+];
+const segs = fleetSegments(spans);
+const { gaps, lastBusyEnd } = fleetGaps(segs, 60, 1200);
+eq('only the MIN_GAP..break gap is fleet-idle', gaps, [[1200, 1500]]);
+eq('lastBusyEnd is the end of the final busy stretch', lastBusyEnd, 5600);
+const st = fleetStats(segs, gaps, 0, 6000, 0, 0);
+eq('busy wall-clock', st.busyWall, 1200 + 30 + 440 + 600);
+eq('dead secs', st.deadSecs, 300);
+eq('active = busy + dead', st.activeSecs, 2270 + 300);
+eq('idle share', st.idleShare, 300 / 2570);
+eq('concurrent share (≥2 busy)', st.multiSecs, 600);
+eq('agent-hour secs (working + agents)', st.agentHourSecs, 600 + 600 + 600 + 30 + 440 + 600);
+eq('peak', st.peak, 2);
+eq('parallelism', st.parallelism, 2870 / 2270);
+// Window clipping: [1300, 1600) holds 200 s of the gap + 70 s busy.
+const clip = fleetStats(segs, gaps, 1300, 1600, 0, 0);
+eq('clipped dead', clip.deadSecs, 200);
+eq('clipped busy', clip.busyWall, 70);
+// Gates: below minActive / minBusy the shares go null.
+const gated = fleetStats(segs, gaps, 0, 6000, 1e9, 1e9);
+eq('idle share gated', gated.idleShare, null);
+eq('conc share gated', gated.concShare, null);
+// Bins: 600-s bins over [0, 1800). Bin 0: A 600 + B 300 working → 1.5;
+// bin 1: B 300 working + A 600 agents → w 0.5, a 1; bin 2: 300 dead → 0.5.
+const tl = fleetBins(segs, gaps, 0, 3, 600);
+eq('bin working', tl.w.map(v => +v.toFixed(3)), [1.5, 0.5, 0.05 + 240 / 600]);
+eq('bin agents', tl.ag, [0, 1, 0]);
+eq('bin dead', tl.dead, [0, 0, 0.5]);
+// Percent axis fits the tallest bar instead of pinning to 100.
+eq('pctAxisMax small bars', pctAxisMax([5, null, 18, 12]), 20);
+eq('pctAxisMax never above 100', pctAxisMax([97]), 100);
+eq('pctAxisMax floor', pctAxisMax([null, 0, 2]), 10);
+eq('pctAxisMax lands on a 20-step above 50', pctAxisMax([58]), 80);
+eq('pctAxisMax 10-step at 50', pctAxisMax([45]), 50);
+// 24h timeline trims leading empty bins, keeping a lead-in.
+eq('firstShownBin lead-in', firstShownBin({ w: [0,0,0,0,1], ag: [0,0,0,0,0], inp: [0,0,0,0,0], dead: [0,0,0,0,0] }, 2), 2);
+eq('firstShownBin clamps at 0', firstShownBin({ w: [0,1], ag: [0,0], inp: [0,0], dead: [0,0] }, 5), 0);
+eq('firstShownBin empty', firstShownBin({ w: [0], ag: [0], inp: [0], dead: [0] }, 5), 0);
+// Break threshold comes from config.json's fleetBreakMin, else the default.
+eq('breakSecFrom default when absent', breakSecFrom({}, 10), 600);
+eq('breakSecFrom default on null config', breakSecFrom(null, 10), 600);
+eq('breakSecFrom honors setting', breakSecFrom({ fleetBreakMin: 15 }, 10), 900);
+eq('breakSecFrom fractional minutes', breakSecFrom({ fleetBreakMin: 2.5 }, 10), 150);
+eq('breakSecFrom rejects string', breakSecFrom({ fleetBreakMin: '15' }, 10), 600);
+eq('breakSecFrom rejects below 1-min floor', breakSecFrom({ fleetBreakMin: 0.5 }, 10), 600);
+eq('breakSecFrom rejects negative', breakSecFrom({ fleetBreakMin: -5 }, 10), 600);
+// A 15-min gap is idle under a 20-min break but a break under the 10-min default.
+eq('15-min gap idle at 20-min break', fleetGaps(fleetSegments([{ state: 'working', s: 0, e: 60 }, { state: 'working', s: 960, e: 1000 }]), 60, 1200).gaps, [[60, 960]]);
+eq('15-min gap is a break at 10-min break', fleetGaps(fleetSegments([{ state: 'working', s: 0, e: 60 }, { state: 'working', s: 960, e: 1000 }]), 60, 600).gaps, []);
+process.exit(bad);
+NODE
+    } > "$FLEET_JS"
+    if node_out=$(node "$FLEET_JS" 2>&1); then
+      ok "fleet metrics: idle gaps, clipping, gates, bins, percent axis, timeline trim, break setting"
+    else
+      ng "fleet metrics mismatch: $node_out"
+    fi
+  fi
+else
+  skip "dashboard fleet metrics (node or dashboard.html absent)"
 fi
 
 # ---------------------------------------------------------------------------

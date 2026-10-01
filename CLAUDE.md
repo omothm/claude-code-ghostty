@@ -22,7 +22,8 @@ state-transition logic in `tab-title.sh` or `sweep-bell-state.sh`.
   agents-running state (and stopped-agent records), pending-input set,
   deferred completion notification, refresh gating, event log dedup (and
   event timestamp ordering), stale-state cleanup (and the sweep lock), and
-  the dashboard north-star metric
+  the dashboard's fleet-idle north-star metric (and the demoted bell-stall
+  metric)
 
 ## Session start
 
@@ -55,9 +56,10 @@ After every change, verify the following in order:
 5. **README.md** — does the human-facing documentation still reflect the
    current install flow? (Architecture details don't belong there.)
 6. **Dashboard** — open `.ccg/dashboard.html` and inspect every place that
-   enumerates session states (the `STATES` constant, per-state arrays in
-   `compute()`, the "Right now" cards, the "Last 24 hours · totals"
-   cards, the chart datasets, the `render()` block). If the change adds
+   enumerates session states (the `STATES` constant, the per-state totals
+   and bell bins in `compute()`, the busy/parked split in `fleetSegments`,
+   the header's right-now pills, the "Time by state" cards, the 24h
+   fleet-activity datasets, the `render()` block). If the change adds
    or renames a state, every one of those must be updated; if it adds a
    new metric, decide whether the dashboard should surface it. **For
    any dashboard change, always (a) deploy the updated file to
@@ -155,7 +157,7 @@ pending-input set (and pre-bell state restore), the deferred completion
 notification, refresh gating, event log dedup (and per-session monotonic
 event timestamps), stale-state cleanup (and its dashboard-convergence,
 sweep-lock and straggler-guard subtleties), the plugin's
-` | ` → ` — ` display swap, and the dashboard's fleet-stall north-star
+` | ` → ` — ` display swap, and the dashboard's fleet-idle north-star
 metric — is documented with full decision/why/rejected-alternative
 rationale in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Read it before
 changing any of `tab-title.sh`'s state-upgrade logic, `sweep-bell-state.sh`'s
@@ -178,7 +180,7 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
 | `hooks/dashboard-server.sh` | Manages the metrics-dashboard HTTP server (`start`/`stop`/`status`/`toggle`); writes `~/.claude/.ccg/server.pid` and opens browser on start | SwiftBar dropdown entry click |
 | `swiftbar/ghostty-bells.30s.sh` | Reads state dir, emits dropdown (sessions + dashboard entry), dispatches sweep in background | SwiftBar 30 s poll + push-refresh URL |
 | `.ccg/dashboard.html` | Single-file metrics dashboard; fetches `events.jsonl` over HTTP every second | Served via `python3 -m http.server` from `~/.claude/.ccg/` |
-| `.ccg/config.json` | Mode config (`{"mode":"notifs|off|always-on"}`); shipped with `always-on` | Read by `tab-title.sh` and the SwiftBar plugin |
+| `.ccg/config.json` | Mode config (`{"mode":"notifs|off|always-on"}`); shipped with `always-on`. Also `fleetBreakMin` (minutes, default 10): gaps between busy stretches longer than this count as breaks, not fleet-idle time | Read by `tab-title.sh` and the SwiftBar plugin; the dashboard re-reads `fleetBreakMin` every tick |
 | `tests/validate.sh` | End-to-end validator; see below | Manual / CI |
 
 ## Environment variables
@@ -289,7 +291,13 @@ state at `agents`), `BELL_TRACE` toggle (off = 0
 bytes, on = populated), dashboard verdict logic (slices `verdictFor` from
 `dashboard.html` by its `// <verdictFor>` markers and runs it under Node
 across every branch + precedence boundary; asserts `renderVerdict` has a
-`case` for each kind), dashboard straggler handling (slices
+`case` for each kind), dashboard fleet metrics (slices the
+`// <fleetMetrics>` block and checks on a synthetic fleet that only gaps
+from 1 min up to the break threshold count as fleet-idle — sub-minute noise
+and breaks don't — plus window clipping, the active/busy gates,
+fractional per-bin averages, the fit-to-data percent axis, the 24h
+timeline's leading-gap trim, and `breakSecFrom`'s `fleetBreakMin` parsing
+(default 10 min; strings, negatives and sub-1-min values fall back)), dashboard straggler handling (slices
 `stripStragglers` by its `// <stripStragglers>` markers and runs it under
 Node: `end` is terminal so a post-`end` straggler or a tie-colliding synthetic
 `end` reads as ended, while a fresh `idle` reopens a resumed session; asserts
