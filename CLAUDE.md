@@ -180,7 +180,7 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
 | `hooks/dashboard-server.sh` | Manages the metrics-dashboard HTTP server (`start`/`stop`/`status`/`toggle`); writes `~/.claude/.ccg/server.pid` and opens browser on start | SwiftBar dropdown entry click |
 | `swiftbar/ghostty-bells.30s.sh` | Reads state dir, emits dropdown (sessions + dashboard entry), dispatches sweep in background | SwiftBar 30 s poll + push-refresh URL |
 | `.ccg/dashboard.html` | Single-file metrics dashboard; fetches `events.jsonl` over HTTP every second | Served via `python3 -m http.server` from `~/.claude/.ccg/` |
-| `.ccg/config.json` | Mode config (`{"mode":"notifs|off|always-on"}`); shipped with `always-on`. Also `fleetBreakMin` (minutes, default 10): gaps between busy stretches longer than this count as breaks, not fleet-idle time | Read by `tab-title.sh` and the SwiftBar plugin; the dashboard re-reads `fleetBreakMin` every tick |
+| `.ccg/config.json` | Mode config (`{"mode":"notifs|off|always-on"}`); shipped with `always-on`. Also `fleetBreakMin` (minutes, default 10): gaps between busy stretches longer than this count as breaks, not fleet-idle time. Also `idleHotkeyMods` (default `"ctrl+opt"`; `false`/`""` disables): modifier prefix for the per-row idle-focus hotkeys — the plugin appends SwiftBar `shortcut=<mods>+N` (1…9, then 0) to the first 10 Idle rows | Read by `tab-title.sh` and the SwiftBar plugin; the dashboard re-reads `fleetBreakMin` every tick |
 | `tests/validate.sh` | End-to-end validator; see below | Manual / CI |
 
 ## Environment variables
@@ -260,7 +260,7 @@ terminal hook environment introduced in Claude Code 2.1.139), refresh
 gating (fire vs skip), event-log dedup + JSON shape, `refresh-menubar.sh`
 gate paths, plugin output (SF Symbol + count, bell → idle → working
 header and section order, param1 preservation,
-` | ` → ` — ` swap, empty-dir hiding), dashboard-entry toggle (open/stop
+` | ` → ` — ` swap, empty-dir hiding, idle-row hotkeys — `shortcut=ctrl+opt+1…9,0` on the first 10 Idle rows in display order including demoted watching rows, none past the 10th or on other sections, `idleHotkeyMods` override and `false`/`""` disable), dashboard-entry toggle (open/stop
 based on PID file, stale-PID handling, position after sessions),
 `dashboard-server.sh status` modes, stale-file sweep (hard-age prune
 at 12 h, fresh files protected, PID-liveness prune for orphaned sessions,

@@ -59,8 +59,13 @@ if [ -f "$BELL_CONFIG" ]; then
   _c=""
   IFS= read -r _c < <(jq -r '.rateLimitsCacheFile // empty' "$BELL_CONFIG" 2>/dev/null)
   [ -n "$_c" ] && RATE_CACHE_FILE="${_c/#\~/$HOME}"
+  # .idleHotkeyMods: modifier prefix for the per-row idle-focus hotkeys (see
+  # the Idle section below). Absent = default; false/""/null = disabled.
+  IFS= read -r IDLE_HOTKEY_MODS < <(jq -r 'if has("idleHotkeyMods") then (.idleHotkeyMods // "" | tostring) else "ctrl+opt" end | gsub("\\s"; "")' "$BELL_CONFIG" 2>/dev/null) \
+    || IDLE_HOTKEY_MODS="ctrl+opt"
   unset _m _p _c
 fi
+IDLE_HOTKEY_MODS="${IDLE_HOTKEY_MODS-ctrl+opt}"
 __trace "mode=$BELL_MODE show5hPace=$SHOW_5H_PACE"
 
 # ─── 5h-limit pace indicator ─────────────────────────────────────────────────
@@ -595,7 +600,12 @@ fi
 if [ -n "$idle_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
   echo "Idle | size=11 color=#4a4a4a,#b0b0b0"
-  printf '%s' "$idle_entries" | _sort_by_mtime | cut -f2-
+  # Global hotkeys <mods>+1…9, then +0 for the 10th row: SwiftBar registers a
+  # `shortcut=` on any item and re-registers on every refresh, so <mods>+N
+  # always focuses whatever is the Nth idle row right now (same action as a
+  # click). Rows past the 10th get none.
+  printf '%s' "$idle_entries" | _sort_by_mtime | cut -f2- \
+    | awk -v m="$IDLE_HOTKEY_MODS" 'm != "" && NR <= 10 { $0 = $0 " shortcut=" m "+" (NR % 10) } { print }'
   need_sep=1
 fi
 if [ -n "$working_entries" ]; then

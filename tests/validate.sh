@@ -514,6 +514,63 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "Plugin output: idle-row focus hotkeys"
+
+# Every idle row gets `shortcut=<mods>+N` in display order (1…9, then 0 for
+# the 10th; none past it) so SwiftBar binds a global hotkey that runs the same
+# action as clicking that row. Rows in other sections never get one.
+if [ "$plugin" = "1" ]; then
+  printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+  for i in 01 02 03 04 05 06 07 08 09 10 11; do
+    printf 'Claude Code | hk-idle-%s (hk%s)\nidle\n' "$i" "$i" > "$BELL_STATE_DIR/hk$i"
+    age_file "$((12 - 10#$i)) minutes ago" "$BELL_STATE_DIR/hk$i"
+  done
+  # Ages stay under NO_PID_STALE_MIN (30 min) so the plugin's background sweep
+  # doesn't reap these no-PID files mid-test.
+  printf '⏳ Claude Code | hk-working (hkW)\nworking\n' > "$BELL_STATE_DIR/hkW"
+  # A stale watching file is demoted into Idle at render time and numbered
+  # with the rest: it's the newest file, so it lands 12th and gets no hotkey.
+  printf '👀 Claude Code | hk-stale-watch (hkSW)\nwatching\n' > "$BELL_STATE_DIR/hkSW"
+
+  out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  hk_ok=1
+  for i in 01 02 03 04 05 06 07 08 09 10; do
+    n=$((10#$i % 10))
+    echo "$out" | grep -q "hk-idle-$i.*param1=\"Claude Code | hk-idle-$i (hk$i)\".* shortcut=ctrl+opt+$n\$" || { hk_ok=0; ng "idle row $i lacks shortcut=ctrl+opt+$n: $(echo "$out" | grep "hk-idle-$i")"; }
+  done
+  [ "$hk_ok" = "1" ] && ok "idle rows 1–10 get ctrl+opt+1…9,0 in display order"
+  echo "$out" | grep 'hk-idle-11' | grep -q 'shortcut=' \
+    && ng "11th idle row got a hotkey" || ok "idle rows past the 10th get no hotkey"
+  echo "$out" | grep 'hk-stale-watch' | grep -q 'sfimage=zzz' \
+    && ! echo "$out" | grep 'hk-stale-watch' | grep -q 'shortcut=' \
+    && ok "demoted watching row is numbered within Idle (12th → none)" \
+    || ng "demoted watching row missing from Idle or got a hotkey: $(echo "$out" | grep 'hk-stale-watch')"
+  echo "$out" | grep 'hk-working' | grep -q 'shortcut=' \
+    && ng "working row got an idle hotkey" || ok "non-idle rows get no hotkey"
+
+  # Custom modifiers from config.
+  printf '{"mode":"always-on","idleHotkeyMods":"cmd+shift"}\n' > "$BELL_CONFIG"
+  out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out" | grep 'hk-idle-02' | grep -q ' shortcut=cmd+shift+2$' \
+    && ok "idleHotkeyMods overrides the modifier prefix" \
+    || ng "idleHotkeyMods not honored: $(echo "$out" | grep 'hk-idle-02')"
+
+  # Disabled via false and "".
+  for v in false '""'; do
+    printf '{"mode":"always-on","idleHotkeyMods":%s}\n' "$v" > "$BELL_CONFIG"
+    out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+    echo "$out" | grep -q 'shortcut=' \
+      && ng "idleHotkeyMods=$v still emits hotkeys" \
+      || ok "idleHotkeyMods=$v disables idle hotkeys"
+  done
+
+  rm -f "$BELL_STATE_DIR"/hk*
+  : > "$BELL_CONFIG"
+else
+  skip "plugin output: idle-row focus hotkeys"
+fi
+
+# ---------------------------------------------------------------------------
 section "dashboard entry in plugin output"
 
 if [ "$plugin" = "1" ]; then

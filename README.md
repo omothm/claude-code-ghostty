@@ -77,6 +77,18 @@ Change the mode by editing `~/.claude/.ccg/config.json`:
 { "mode": "notifs" }
 ```
 
+### Idle-session hotkeys
+
+In `always-on` mode, every row in the **Idle** section gets a global hotkey that focuses that tab, numbered top to bottom: ⌃⌥1 for the first (longest-idle) row through ⌃⌥9, then ⌃⌥0 for the 10th. The hotkey shows next to each row in the dropdown and follows the list as it changes, so ⌃⌥1 always means "the idle session I've neglected longest". Nothing to set up — SwiftBar registers them while it's running.
+
+Change the modifiers, or turn the hotkeys off, in `~/.claude/.ccg/config.json`:
+
+```json
+{ "idleHotkeyMods": "cmd+shift" }
+```
+
+Any `+`-joined mix of `ctrl`, `opt`, `cmd`, `shift` works; `false` or `""` disables them. If another app already owns a combo, that hotkey silently does nothing.
+
 ### 5h-limit pace indicator
 
 The menubar can show a live ahead/behind indicator for Anthropic's 5-hour rate limit — how far you are from the rate at which you'd need to consume to exhaust the window exactly at reset time.
