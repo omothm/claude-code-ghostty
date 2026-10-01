@@ -100,6 +100,29 @@ fi
 # mtime is still fresh means the work isn't actually done yet, even though the
 # main turn just paused. sweep-bell-state.sh's idle-refinement pass fires the
 # real "finished" notification once that transcript goes stale.
+#
+# A fresh transcript whose agent already fired SubagentStop (a stopped-agent
+# record under CCG_STOPPED_DIR, written by tab-title.sh) is NOT live: the
+# agent finished or paused a moment ago, and its mtime is just recent. Without
+# honoring the record, the Stop hook's "Task completed" would be swallowed
+# while tab-title.sh (which does honor it) settles the session to plain idle —
+# so no agents -> idle edge ever fires the deferred notification either.
+# Duplicated from tab-title.sh's _agent_stopped — keep in sync.
+_agent_stopped() {
+  local sid="$1" f="$2" agent rec cur recm last
+  agent=$(basename "$f" .jsonl); agent="${agent#agent-}"
+  rec="${CCG_STOPPED_DIR:-$HOME/.claude/.ccg/stopped}/$sid/$agent"
+  [ -f "$rec" ] || return 1
+  cur=$(stat -f %Fm "$f" 2>/dev/null)
+  recm=$(head -n1 "$rec" 2>/dev/null)
+  [ "$cur" = "$recm" ] && return 0
+  last=$(tail -n1 "$f" 2>/dev/null | jq -r 'if .type == "attachment" and .attachment.hookEvent == "SubagentStop" then "stop" else "live" end' 2>/dev/null)
+  case "$last" in
+    stop) printf '%s\n%s\n' "$cur" "$f" > "$rec" 2>/dev/null; return 0 ;;
+    live) rm -f "$rec" 2>/dev/null; return 1 ;;
+    *)    return 0 ;;
+  esac
+}
 if [ "$gate" = "agents" ]; then
   _fresh="${CCG_AGENTS_FRESH_SEC:-60}"
   _projects_dir="${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"
@@ -107,7 +130,7 @@ if [ "$gate" = "agents" ]; then
   for _f in "$_projects_dir"/*/"$session_id"/subagents/*.jsonl; do
     [ -f "$_f" ] || continue
     _age=$(( _now - $(stat -f %m "$_f" 2>/dev/null || echo 0) ))
-    if [ "$_age" -le "$_fresh" ]; then
+    if [ "$_age" -le "$_fresh" ] && ! _agent_stopped "$session_id" "$_f"; then
       __trace "early-exit reason=agents-live session_id=$session_id transcript=$_f age=${_age}s"
       __dbg "gate=agents suppressed notification: session_id=$session_id live transcript=$_f age=${_age}s"
       exit 0

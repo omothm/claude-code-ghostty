@@ -39,6 +39,49 @@ STATE_DIR="${BELL_STATE_DIR:-$HOME/.claude/bell-state}"
 HOOKS_DIR="$(dirname "$0")"
 SESSION_STATE_DIR="${CCG_SESSION_STATE_DIR:-$HOME/.claude/.ccg/sessions}"
 EVENT_LOG="${CCG_EVENT_LOG:-$HOME/.claude/.ccg/events.jsonl}"
+STOPPED_DIR="${CCG_STOPPED_DIR:-$HOME/.claude/.ccg/stopped}"
+
+# The SwiftBar plugin dispatches this script with SwiftBar's minimal PATH
+# (/usr/bin:/bin:/usr/sbin:/sbin), which lacks Homebrew — so gdate (event
+# timestamps) and terminal-notifier (deferred completion notification,
+# notification expiry) silently went missing. APPEND rather than prepend so a
+# caller's own PATH entries (e.g. the validator's terminal-notifier stubs)
+# still win.
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+
+# Sub-second wall clock for events.jsonl ts — duplicated from tab-title.sh
+# (keep in sync). Falls back to /usr/bin/perl (always on macOS) when gdate is
+# unavailable, and to integer seconds only as a last resort.
+_ccg_now_frac() {
+  gdate +%s.%3N 2>/dev/null && return 0
+  /usr/bin/perl -MTime::HiRes=time -e 'printf "%.3f\n", time' 2>/dev/null && return 0
+  date +%s
+}
+# Echo candidate ts $1, or $2 + 0.001 when $1 <= $2 ($2 = last ts logged for
+# the session, logical-state file line 3) — duplicated from tab-title.sh.
+_ccg_clamp_ts() {
+  awk -v t="$1" -v p="$2" 'BEGIN { if (p ~ /^[0-9]+(\.[0-9]+)?$/ && t + 0 <= p + 0) printf "%.3f\n", p + 0.001; else print t }'
+}
+
+# Stopped-agent record check — duplicated from tab-title.sh's _agent_stopped
+# (keep in sync; see the full rationale there). Returns 0 when transcript $2
+# of session $1 belongs to an agent whose SubagentStop was recorded and that
+# hasn't resumed since.
+_agent_stopped() {
+  local sid="$1" f="$2" agent rec cur recm last
+  agent=$(basename "$f" .jsonl); agent="${agent#agent-}"
+  rec="$STOPPED_DIR/$sid/$agent"
+  [ -f "$rec" ] || return 1
+  cur=$(stat -f %Fm "$f" 2>/dev/null)
+  recm=$(head -n1 "$rec" 2>/dev/null)
+  [ "$cur" = "$recm" ] && return 0
+  last=$(tail -n1 "$f" 2>/dev/null | jq -r 'if .type == "attachment" and .attachment.hookEvent == "SubagentStop" then "stop" else "live" end' 2>/dev/null)
+  case "$last" in
+    stop) printf '%s\n%s\n' "$cur" "$f" > "$rec" 2>/dev/null; return 0 ;;
+    live) rm -f "$rec" 2>/dev/null; return 1 ;;
+    *)    return 0 ;;
+  esac
+}
 
 # Staleness cap (minutes) for state files that carry NO claude PID. Under the
 # current hooks every live session writes its ancestor claude PID (bell-state
@@ -59,6 +102,56 @@ NO_PID_STALE_MIN="${CCG_NO_PID_STALE_MIN:-30}"
 [ -d "$STATE_DIR" ] || [ -d "$SESSION_STATE_DIR" ] || exit 0
 
 __trace "entry"
+
+# Single-flight lock. The plugin dispatches one sweep per run (30 s poll plus
+# every push refresh, including the one this script fires after pruning), so
+# sweeps routinely overlap. Two overlapping sweeps both read the same
+# logical-state file, both derive the same correction, and both append it —
+# duplicate events.jsonl lines. mkdir is atomic, so it's the lock primitive
+# (no flock(1) on macOS). A contending sweep WAITS (up to
+# CCG_SWEEP_LOCK_WAIT seconds, default 10) rather than exiting, so it still
+# runs — after the holder's rewrites, which it then sees as already-correct —
+# instead of skipping a cycle. A lock whose owner PID is dead, or that is older
+# than 60 s (a sweep normally takes ~1 s), is broken so a crashed sweep can't
+# wedge future ones. The default path sits next to the logical-state dir so
+# the validator's CCG_SESSION_STATE_DIR sandbox covers it.
+SWEEP_LOCK="${CCG_SWEEP_LOCK:-$(dirname "$SESSION_STATE_DIR")/sweep.lock}"
+_lock_wait="${CCG_SWEEP_LOCK_WAIT:-10}"
+_lock_tries=$((_lock_wait * 10))
+_lock_owned=0
+_release_lock() {
+  # Only remove a lock we own — if ours was broken as stale and re-taken by
+  # another sweep, leave theirs alone.
+  [ "$_lock_owned" = "1" ] && [ "$(cat "$SWEEP_LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$SWEEP_LOCK"
+}
+mkdir -p "$(dirname "$SWEEP_LOCK")" 2>/dev/null
+while :; do
+  if mkdir "$SWEEP_LOCK" 2>/dev/null; then
+    printf '%s\n' "$$" > "$SWEEP_LOCK/pid"
+    _lock_owned=1
+    break
+  fi
+  _lpid=$(cat "$SWEEP_LOCK/pid" 2>/dev/null)
+  _lage=$(( $(date +%s) - $(stat -f %m "$SWEEP_LOCK" 2>/dev/null || date +%s) ))
+  # Empty pid = holder is between mkdir and writing its pid; give it a moment
+  # (the age check still breaks it if the holder died right there).
+  if { [ -n "$_lpid" ] && ! kill -0 "$_lpid" 2>/dev/null; } || [ "$_lage" -gt 60 ]; then
+    __trace "lock: breaking stale lock (pid=${_lpid:-<none>} age=${_lage}s)"
+    rm -rf "$SWEEP_LOCK"
+    continue
+  fi
+  _lock_tries=$((_lock_tries - 1))
+  if [ "$_lock_tries" -le 0 ]; then
+    __trace "lock: held by pid=${_lpid:-<none>} for >${_lock_wait}s, giving up"
+    exit 0
+  fi
+  sleep 0.1
+done
+unset _lpid _lage _lock_tries
+trap '_release_lock' EXIT
+trap 'exit 1' INT TERM HUP
+__trace "lock: acquired $SWEEP_LOCK"
+
 pruned=0
 
 # Hard age cap (12h): delete any state file older than this unconditionally.
@@ -114,18 +207,20 @@ done < <(find "$STATE_DIR" -type f 2>/dev/null)
 # trailing-span cap (TRAILING_CAP_SEC in spanFor) — emitting at `now` would
 # retroactively inflate the dead session's working-time, so it must not be used.
 _now=$(date +%s)
-# Fractional-second variant for events.jsonl appends, matching tab-title.sh's
-# own timestamp precision (gdate +%s.%3N). A same-second correction stamped
-# with a bare integer would sort BEFORE the fractional event it's correcting
-# in the dashboard's numeric ts sort, inverting the true order and making the
-# stale state look current. Falls back to the integer _now (no fractional
-# part) if gdate is unavailable, same as tab-title.sh.
-_now_frac=$(gdate +%s.%3N 2>/dev/null || echo "$_now")
+# Live-correction events (refinement pass below) are stamped at APPEND time via
+# _ccg_now_frac, not with a value captured here at script start: the sweep can
+# run for a second or more, and a hook may log a fractional-second event in
+# the meantime. A start-of-script (and, without gdate, integer) stamp then
+# sorted BEFORE that hook event in the dashboard's numeric ts sort even though
+# it was written after it — inverting the true order and making the stale
+# state look current. Every sweep-appended event is additionally clamped
+# strictly above the session's last logged ts (logical-state line 3).
 if [ -d "$SESSION_STATE_DIR" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     state=$(sed -n '1p' "$f" 2>/dev/null | tr -d ' ')
     spid=$(sed -n '2p' "$f" 2>/dev/null | tr -d ' ')
+    last_ts=$(sed -n '3p' "$f" 2>/dev/null | tr -d ' ')
     [ -n "$state" ] || continue                       # empty/partial; skip
     [ "$state" = "end" ] && continue                  # already ended (defensive)
 
@@ -141,9 +236,14 @@ if [ -d "$SESSION_STATE_DIR" ]; then
     [ "$dead" = "1" ] || continue
 
     # Synthetic `end` at last-transition + cap (not now). mtime == last logged ts.
+    # The monotonic clamp is a no-op on the uncapped path (mtime + 1800 is far
+    # above the last ts, which ~= mtime), so the trailing-cap semantics are
+    # unchanged; it only matters on the `now` path, where `now` could otherwise
+    # tie or undercut a clamped/later-clocked last event.
     mtime=$(stat -f %m "$f" 2>/dev/null || echo "$_now")
     ts=$((mtime + 1800))
-    [ "$ts" -gt "$_now" ] && ts="$_now_frac"
+    [ "$ts" -gt "$_now" ] && ts=$(_ccg_now_frac)
+    ts=$(_ccg_clamp_ts "$ts" "$last_ts")
 
     # Title/cwd carry no span for an `end` event and aren't displayed for ended
     # sessions; a placeholder is sufficient. Use the bell-state title if one
@@ -156,6 +256,8 @@ if [ -d "$SESSION_STATE_DIR" ]; then
       '{ts: ($ts|tonumber), session_id: $sid, state: "end", title: $title, cwd: ""}' \
       >> "$EVENT_LOG" 2>/dev/null
     rm -f "$f" && pruned=$((pruned + 1))
+    # Mirror tab-title.sh's `end` cleanup of the session's stopped-agent records.
+    rm -rf "$STOPPED_DIR/$sid" 2>/dev/null
     __trace "logical-reconcile: emitted end for $sid (pid=${spid:-<none>} ts=$ts)"
   done < <(find "$SESSION_STATE_DIR" -type f 2>/dev/null)
 fi
@@ -194,7 +296,14 @@ _sweep_count_live_agents() {
   for f in "$projects_dir"/*/"$sid"/subagents/*.jsonl; do
     [ -f "$f" ] || continue
     age=$(( now - $(stat -f %m "$f" 2>/dev/null || echo 0) ))
-    [ "$age" -le "$fresh" ] && n=$((n + 1))
+    [ "$age" -le "$fresh" ] || continue
+    # Honor tab-title.sh's SubagentStop exclusion. Without this the sweep
+    # counted a just-stopped agent's still-fresh transcript as live and
+    # flipped the session the hook had just settled to `idle` back to
+    # `agents` for up to CCG_AGENTS_FRESH_SEC (phantom ☕️, delayed
+    # completion notification, and an `agents` event the hook then dedup'd).
+    _agent_stopped "$sid" "$f" && continue
+    n=$((n + 1))
   done
   echo "$n"
 }
@@ -280,7 +389,7 @@ fi
 # the tab title/menubar have self-corrected. Mirrors the bell-state pass:
 # only touches live-PID idle-family sessions, appends a new events.jsonl line
 # when the re-derived state differs from the logged one, and rewrites the
-# 2-line logical-state file so subsequent dedup keys off the corrected value.
+# 3-line logical-state file so subsequent dedup keys off the corrected value.
 if [ -d "$SESSION_STATE_DIR" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
@@ -290,6 +399,7 @@ if [ -d "$SESSION_STATE_DIR" ]; then
       *) continue ;;
     esac
     spid=$(sed -n '2p' "$f" 2>/dev/null | tr -d ' ')
+    stored_ts=$(sed -n '3p' "$f" 2>/dev/null | tr -d ' ')
     [ -z "$spid" ] && continue
     kill -0 "$spid" 2>/dev/null || continue             # dead; the end-reconcile pass above handles it
 
@@ -304,14 +414,26 @@ if [ -d "$SESSION_STATE_DIR" ]; then
 
     [ "$new_st" = "$stored_st" ] && continue
 
+    # Re-read right before appending: a hook may have logged a transition
+    # while we were counting transcripts. Appending our (now stale) correction
+    # on top would clobber it, so bail and let the next sweep re-evaluate.
+    cur_st=$(sed -n '1p' "$f" 2>/dev/null | tr -d ' ')
+    cur_ts=$(sed -n '3p' "$f" 2>/dev/null | tr -d ' ')
+    if [ "$cur_st" != "$stored_st" ] || [ "$cur_ts" != "$stored_ts" ]; then
+      __trace "logical-refinement-skip: sid=$sid changed under us ($stored_st -> ${cur_st:-<none>})"
+      continue
+    fi
+    ev_ts=$(_ccg_clamp_ts "$(_ccg_now_frac)" "$cur_ts")
+
     title="(reconciled)"
     [ -f "$STATE_DIR/$sid" ] && title=$(sed -n '1p' "$STATE_DIR/$sid" 2>/dev/null)
-    jq -nc --arg ts "$_now_frac" --arg sid "$sid" --arg state "$new_st" --arg title "$title" \
+    jq -nc --arg ts "$ev_ts" --arg sid "$sid" --arg state "$new_st" --arg title "$title" \
       '{ts: ($ts|tonumber), session_id: $sid, state: $state, title: $title, cwd: ""}' \
       >> "$EVENT_LOG" 2>/dev/null
-    printf '%s\n%s\n' "$new_st" "$spid" > "$f"
+    # Same 3-line shape tab-title.sh writes (state, pid, last logged ts).
+    printf '%s\n%s\n%s\n' "$new_st" "$spid" "$ev_ts" > "$f"
     pruned=$((pruned + 1))
-    __trace "logical-refinement-correct: sid=$sid $stored_st->$new_st (pid=$spid)"
+    __trace "logical-refinement-correct: sid=$sid $stored_st->$new_st (pid=$spid ts=$ev_ts)"
 
     # agents -> idle specifically means a backgrounded Agent/Task/Workflow that
     # was still live when the main turn's Stop hook fired (and suppressed its
@@ -361,6 +483,19 @@ if [ -d "$PENDING_DIR" ]; then
   done < <(find "$PENDING_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.prebell' -mmin +720 2>/dev/null)
 fi
 
+# Stopped-agent record cleanup. tab-title.sh drops ~/.claude/.ccg/stopped/<sid>
+# on `end` (and the reconcile pass above on a synthetic end), but leaks it if
+# neither runs. A record only matters while its transcript is still fresh
+# (~CCG_AGENTS_FRESH_SEC after the stop), so a dir with no record created for
+# 12h is dead weight — same hard-age cap as the pending dirs. Tidy-up only.
+if [ -d "$STOPPED_DIR" ]; then
+  while IFS= read -r d; do
+    [ -z "$d" ] && continue
+    rm -rf "$d"
+    __trace "stopped hard-expire: $d"
+  done < <(find "$STOPPED_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +720 2>/dev/null)
+fi
+
 # Notification expiry pass: clear any ccg-* notification older than the
 # configured threshold (default 24h). terminal-notifier -list ALL returns
 # tab-separated columns (GroupID, Title, Subtitle, Message, Delivered At),
@@ -377,10 +512,10 @@ if [ "${NOTIF_EXPIRY_HOURS}" -gt 0 ] 2>/dev/null; then
   while IFS=$'\t' read -r grp delivered_at; do
     epoch=$(date -j -f "%Y-%m-%d %H:%M:%S %z" "$delivered_at" "+%s" 2>/dev/null) || continue
     [ "$epoch" -gt "$_notif_cutoff" ] && continue
-    terminal-notifier -remove "$grp" 2>/dev/null
+    terminal-notifier -remove "$grp" < /dev/null 2>/dev/null
     __trace "notif-expire: group=$grp delivered=$delivered_at epoch=$epoch cutoff=$_notif_cutoff"
   done < <(terminal-notifier -list ALL 2>/dev/null | awk -F'\t' '
-    /^ccg-/ { grp = $1 }
+    /^ccg-/ && NF >= 4 { grp = $1 }
     grp != "" && $NF ~ /^20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] [+-][0-9]/ {
       print grp "\t" $NF; grp = ""
     }

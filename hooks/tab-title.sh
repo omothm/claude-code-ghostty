@@ -158,9 +158,77 @@ _count_live_agents() {
       [ "$base" = "agent-$exclude" ] && continue
     fi
     age=$((now - $(stat -f %m "$f" 2>/dev/null || echo 0)))
-    [ "$age" -le "$fresh" ] && n=$((n + 1))
+    [ "$age" -le "$fresh" ] || continue
+    # A fresh transcript whose agent already fired SubagentStop is not live.
+    _agent_stopped "$sid" "$f" && continue
+    n=$((n + 1))
   done
   echo "$n"
+}
+
+# Stopped-agent records: ~/.claude/.ccg/stopped/<sid>/<agent_id>, written on
+# a subagent's SubagentStop (see _record_agent_stop). Line 1 = the transcript's
+# mtime (stat %Fm, sub-second) at that moment; line 2 = transcript path (info
+# only). A fresh-mtime transcript can't tell "still writing" from "wrote its
+# last byte a second ago", so every live-agent counter (this one, the sweep's,
+# the plugin's, notify.sh's agents gate) consults the record and skips a
+# stopped agent's transcript. Without the record only THIS hook invocation
+# could exclude it, and the sweep/plugin would count it live for up to
+# CCG_AGENTS_FRESH_SEC and flip the session back to `agents`.
+#
+# Returns 0 (stopped, skip it) or 1 (no record, or the agent resumed).
+# Resume detection: Claude Code appends a `hook_success` attachment with
+# hookEvent=SubagentStop to the transcript ~0.1-1 s AFTER the hook runs, so a
+# changed mtime alone doesn't mean "resumed". The agent has resumed only if
+# the transcript's last line is something else (a resumed agent appends a
+# `user` "The coordinator sent a message..." entry, then assistant turns).
+# The duplicated copies in sweep-bell-state.sh, notify.sh and the plugin must
+# stay in sync with this one.
+_agent_stopped() {
+  local sid="$1" f="$2" agent rec cur recm last
+  agent=$(basename "$f" .jsonl); agent="${agent#agent-}"
+  rec="${CCG_STOPPED_DIR:-$HOME/.claude/.ccg/stopped}/$sid/$agent"
+  [ -f "$rec" ] || return 1
+  cur=$(stat -f %Fm "$f" 2>/dev/null)
+  recm=$(head -n1 "$rec" 2>/dev/null)
+  [ "$cur" = "$recm" ] && return 0
+  last=$(tail -n1 "$f" 2>/dev/null | jq -r 'if .type == "attachment" and .attachment.hookEvent == "SubagentStop" then "stop" else "live" end' 2>/dev/null)
+  case "$last" in
+    stop) printf '%s\n%s\n' "$cur" "$f" > "$rec" 2>/dev/null; return 0 ;;  # post-stop hook attachment
+    live) rm -f "$rec" 2>/dev/null; return 1 ;;                             # resumed
+    *)    return 0 ;;   # last line unparseable (mid-write): keep excluded, re-check next time
+  esac
+}
+
+# Write the stopped-agent record for subagent $2 of session $1 (see above).
+_record_agent_stop() {
+  local sid="$1" agent="$2" f dir
+  dir="${CCG_STOPPED_DIR:-$HOME/.claude/.ccg/stopped}/$sid"
+  for f in "${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"/*/"$sid"/subagents/agent-"$agent".jsonl; do
+    [ -f "$f" ] || continue
+    mkdir -p "$dir" 2>/dev/null
+    printf '%s\n%s\n' "$(stat -f %Fm "$f" 2>/dev/null)" "$f" > "$dir/$agent" 2>/dev/null
+    __trace "stopped-record agent=$agent transcript=$f"
+  done
+}
+
+# Sub-second wall clock for events.jsonl ts. gdate (coreutils) is the usual
+# source, but it lives in /opt/homebrew/bin; /usr/bin/perl always ships with
+# macOS and has Time::HiRes. Integer seconds only as a last resort — an
+# integer ts sorts BEFORE a same-second fractional one even when written
+# later. Duplicated in sweep-bell-state.sh.
+_ccg_now_frac() {
+  gdate +%s.%3N 2>/dev/null && return 0
+  /usr/bin/perl -MTime::HiRes=time -e 'printf "%.3f\n", time' 2>/dev/null && return 0
+  date +%s
+}
+
+# Echo candidate ts $1, or $2 + 0.001 when $1 <= $2 ($2 = last ts logged for
+# this session, logical-state file line 3). Keeps each session's events
+# strictly increasing in ts whichever writer (this hook or the sweep) stamped
+# the previous one. Duplicated in sweep-bell-state.sh.
+_ccg_clamp_ts() {
+  awk -v t="$1" -v p="$2" 'BEGIN { if (p ~ /^[0-9]+(\.[0-9]+)?$/ && t + 0 <= p + 0) printf "%.3f\n", p + 0.001; else print t }'
 }
 
 # Resolve idle's refinement from LIVE signals: agents (background Agent/Task/
@@ -254,6 +322,15 @@ session_state_file="$SESSION_STATE_DIR/$session_id"
 # defaulted to `working`, so a resolved bell would show ⏳ even though the
 # main session was still just idling on a live background agent.
 prebell_file="$PENDING_BASE/${session_id}.prebell"
+# A subagent's SubagentStop is authoritative proof that agent has stopped
+# (finished, or paused awaiting SendMessage). Record it BEFORE any live-agent
+# re-derive below so every counter — here and in the sweep/plugin/notify.sh —
+# skips its still-fresh transcript until it actually resumes. Recorded in
+# every branch (held bell, prebell restore, mid-turn, settled), not just the
+# stray-working guard: the agent has stopped regardless of which branch runs.
+if [ "$status" = "working" ] && [ "${hook_event:-}" = "SubagentStop" ] && [ "$actor" != "__main__" ]; then
+  _record_agent_stop "$session_id" "$actor"
+fi
 case "$status" in
   input)
     if ! _pending_nonempty; then
@@ -289,9 +366,9 @@ case "$status" in
       # permission request was just granted usually CONTINUES running, so its
       # transcript is genuinely fresh — excluding it would wrongly downgrade
       # `agents` to idle/watching on every granted-permission tool call. The
-      # narrow case this misses (denied permission -> subagent stops
-      # immediately, no other live agents) self-corrects via the sweep's
-      # idle-refinement pass within ~30s.
+      # narrow case that needs it (denied permission -> subagent stops
+      # immediately) arrives as a SubagentStop, whose stopped-agent record
+      # (written above) already excludes that transcript from the count.
       # Only watching/agents are worth restoring: a bell that interrupted
       # PLAIN idle (no live background agent or monitor) legitimately means
       # new work is starting once it's answered, so that case still falls
@@ -384,6 +461,9 @@ case "$status" in
   idle|end)
     rm -rf "$pending_dir" 2>/dev/null
     rm -f "$prebell_file" 2>/dev/null
+    # Stopped-agent records outlive idle on purpose (a background agent that
+    # stopped while the session idles must stay excluded); only `end` drops them.
+    [ "$status" = "end" ] && rm -rf "${CCG_STOPPED_DIR:-$HOME/.claude/.ccg/stopped}/$session_id" 2>/dev/null
     __trace "pending cleared (status=$status)"
     ;;
 esac
@@ -522,19 +602,26 @@ case "$effective_status" in
     EVENT_LOG="${CCG_EVENT_LOG:-$HOME/.claude/.ccg/events.jsonl}"
     # SESSION_STATE_DIR / session_state_file hoisted above (near the pending set).
     prev_state=""
-    [ -f "$session_state_file" ] && prev_state=$(head -n1 "$session_state_file" 2>/dev/null)
+    prev_ts=""
+    if [ -f "$session_state_file" ]; then
+      prev_state=$(head -n1 "$session_state_file" 2>/dev/null)
+      prev_ts=$(sed -n '3p' "$session_state_file" 2>/dev/null | tr -d ' ')
+    fi
     if [ "$effective_status" != "$prev_state" ]; then
       # End event only meaningful if there was a prior state to end.
       if [ "$effective_status" = "end" ] && [ -z "$prev_state" ]; then
         __trace "event-log skip (end with no prior state)"
       else
         mkdir -p "$(dirname "$EVENT_LOG")" "$SESSION_STATE_DIR"
-        ts=$(gdate +%s.%3N 2>/dev/null || date +%s)
+        # Never stamp at or below the session's last logged ts: the sweep may
+        # have logged a correction with a slightly later clock reading (or a
+        # clamped one) than ours.
+        ts=$(_ccg_clamp_ts "$(_ccg_now_frac)" "$prev_ts")
         jq -nc --arg ts "$ts" --arg sid "$session_id" --arg state "$effective_status" \
               --arg title "$base_title" --arg cwd "${CLAUDE_PROJECT_DIR:-$PWD}" \
           '{ts: ($ts|tonumber), session_id: $sid, state: $state, title: $title, cwd: $cwd}' \
           >> "$EVENT_LOG" 2>/dev/null
-        __trace "event-log append state=$effective_status prev=${prev_state:-<none>}"
+        __trace "event-log append state=$effective_status prev=${prev_state:-<none>} ts=$ts"
         if [ "$effective_status" = "end" ]; then
           rm -f "$session_state_file"
         else
@@ -547,7 +634,24 @@ case "$effective_status" in
           # a PID itself, so this server-side backstop is the only thing that
           # keeps its "right now" count honest about sessions that died without
           # firing the SessionEnd hook (crash, kill, closed tab, reboot).
-          printf '%s\n%s\n' "$effective_status" "$claude_pid" > "$session_state_file"
+          # Line 3: the ts just logged, so the next writer (this hook or the
+          # sweep) can clamp its own ts strictly above it without scanning
+          # events.jsonl.
+          printf '%s\n%s\n%s\n' "$effective_status" "$claude_pid" "$ts" > "$session_state_file"
+        fi
+        # agents -> idle: the last background Agent/Task/Workflow just stopped
+        # while the session sat idle (typically this very SubagentStop). The
+        # Stop hook's "Task completed" was suppressed by notify.sh's agents
+        # gate when the session settled to `agents`, so this is where the
+        # user learns the background work finished. The sweep's logical-state
+        # pass fires the same notification on the same edge when it observes
+        # it first (transcript aged out with no SubagentStop); only one of the
+        # two can see the edge, since whichever logs `idle` first moves the
+        # logical state off `agents`.
+        if [ "$prev_state" = "agents" ] && [ "$effective_status" = "idle" ]; then
+          jq -nc --arg sid "$session_id" --arg cwd "${CLAUDE_PROJECT_DIR:-$PWD}" '{session_id: $sid, cwd: $cwd}' \
+            | "$(dirname "$0")/notify.sh" '✅' 'Background task completed' > /dev/null 2>&1
+          __trace "agents-finished-notify: sid=$session_id"
         fi
       fi
     else

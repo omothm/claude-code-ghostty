@@ -314,7 +314,10 @@ _emit_dashboard_entry() {
 # last CCG_AGENTS_FRESH_SEC seconds. Mirrors _count_live_agents in
 # tab-title.sh — background Agent/Task/Workflow runs live in-process with no
 # child PID to check, so freshness of the on-disk transcript is the only
-# externally-visible liveness signal.
+# externally-visible liveness signal. Skips a fresh transcript whose agent
+# already fired SubagentStop (stopped-agent record, see _agent_stopped) so the
+# menubar doesn't show a phantom ☕️ for up to CCG_AGENTS_FRESH_SEC after the
+# agent stopped.
 _count_live_agents() {
   local sid="$1" fresh="${CCG_AGENTS_FRESH_SEC:-60}" n=0 f age
   local now projects_dir
@@ -323,9 +326,30 @@ _count_live_agents() {
   for f in "$projects_dir"/*/"$sid"/subagents/*.jsonl; do
     [ -f "$f" ] || continue
     age=$(( now - $(stat -f %m "$f" 2>/dev/null || echo 0) ))
-    [ "$age" -le "$fresh" ] && n=$((n + 1))
+    [ "$age" -le "$fresh" ] || continue
+    _agent_stopped "$sid" "$f" && continue
+    n=$((n + 1))
   done
   echo "$n"
+}
+
+# Stopped-agent record check — duplicated from tab-title.sh's _agent_stopped
+# (keep in sync; full rationale there). Self-contained rather than sourced
+# from $HOOKS_DIR, like the rest of this plugin's liveness checks.
+_agent_stopped() {
+  local sid="$1" f="$2" agent rec cur recm last
+  agent=$(basename "$f" .jsonl); agent="${agent#agent-}"
+  rec="${CCG_STOPPED_DIR:-$HOME/.claude/.ccg/stopped}/$sid/$agent"
+  [ -f "$rec" ] || return 1
+  cur=$(stat -f %Fm "$f" 2>/dev/null)
+  recm=$(head -n1 "$rec" 2>/dev/null)
+  [ "$cur" = "$recm" ] && return 0
+  last=$(tail -n1 "$f" 2>/dev/null | jq -r 'if .type == "attachment" and .attachment.hookEvent == "SubagentStop" then "stop" else "live" end' 2>/dev/null)
+  case "$last" in
+    stop) printf '%s\n%s\n' "$cur" "$f" > "$rec" 2>/dev/null; return 0 ;;
+    live) rm -f "$rec" 2>/dev/null; return 1 ;;
+    *)    return 0 ;;
+  esac
 }
 
 # Returns status for a state file, or empty string if the file is not a

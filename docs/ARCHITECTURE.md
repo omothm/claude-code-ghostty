@@ -11,14 +11,17 @@ environment variables, and the validator summary, see the root
 
 - [Watching state](#watching-state)
 - [Agents-running state](#agents-running-state)
+  - [Stopped-agent records (SubagentStop exclusion that sticks)](#stopped-agent-records-subagentstop-exclusion-that-sticks)
 - [Pending-input set (parallel-subagent bell hold)](#pending-input-set-parallel-subagent-bell-hold)
   - [Pre-bell state restore](#pre-bell-state-restore)
   - [AskUserQuestion bell (❓ tab-title icon)](#askuserquestion-bell--tab-title-icon)
 - [Deferred completion notification (agents-gated Stop notification)](#deferred-completion-notification-agents-gated-stop-notification)
 - [Refresh gating](#refresh-gating)
 - [Event log dedup](#event-log-dedup)
+  - [Event timestamp ordering](#event-timestamp-ordering)
 - [Stale-state cleanup](#stale-state-cleanup)
   - [Logical-state reconciliation (dashboard ↔ menubar convergence)](#logical-state-reconciliation-dashboard--menubar-convergence)
+  - [Sweep single-flight lock](#sweep-single-flight-lock)
   - [`end` is terminal until resume — dashboard straggler guard](#end-is-terminal-until-resume--dashboard-straggler-guard)
 - [Plugin display swap: ` | ` → ` — `](#plugin-display-swap----)
 - [Dashboard north-star metric: "Fleet stalled on you"](#dashboard-north-star-metric-fleet-stalled-on-you)
@@ -149,6 +152,80 @@ subagent's transcript is untouched by the exclusion (only the
 `agent-<id>.jsonl` matching the specific actor is skipped), so the state
 correctly stays at `agents` when other background work is still running.
 
+### Stopped-agent records (SubagentStop exclusion that sticks)
+
+**Problem:** the exclude parameter above only lives for the one
+`tab-title.sh` invocation that handles the `SubagentStop`. Every *other*
+live-agent counter — the sweep's `_sweep_count_live_agents`, the plugin's
+`_count_live_agents`, `notify.sh`'s agents gate, and `tab-title.sh`'s own
+idle upgrade on a later hook — kept counting the just-stopped agent's
+transcript as live for up to `CCG_AGENTS_FRESH_SEC` (60 s). So the hook
+wrote `idle`, and the next sweep (≤30 s later) flipped the session straight
+back to `agents`: a phantom ☕️ on the tab and menubar for up to a minute,
+the "Background task completed" notification delayed by the same minute,
+and — combined with the [timestamp bug](#event-timestamp-ordering) — a
+dashboard that read the session as idle while the logical-state file said
+`agents`. `SubagentStop` fires often: not only when a background agent
+finishes, but whenever it merely pauses (hands back, or waits for a
+`SendMessage`), and it may resume later.
+
+**Decision:** on a subagent's `SubagentStop` (any branch of the `working`
+handler — held bell, pre-bell restore, mid-turn or settled), `tab-title.sh`
+writes a per-agent record **before** any liveness re-derive:
+
+```
+~/.claude/.ccg/stopped/<session_id>/<agent_id>     (override: CCG_STOPPED_DIR)
+  line 1: transcript mtime at that moment (stat -f %Fm, sub-second)
+  line 2: transcript path (informational)
+```
+
+Every counter skips a fresh transcript whose record says it is stopped
+(`_agent_stopped`, duplicated in all four scripts — the plugin lives in
+`~/swiftbar` and the validator points its `GHOSTTY_HOOKS_DIR` at an empty
+dir, so a shared sourced library was rejected). The record check runs only
+for transcripts that already passed the freshness test, so the common path
+is one extra `[ -f ]`.
+
+**Resume detection:** a record stops applying once the agent resumes.
+Verified empirically on real transcripts: a resumed agent appends to the
+*same* `agent-<id>.jsonl` (first a `user` entry, "The coordinator sent a
+message while you were working: …", then assistant turns), so its mtime
+advances. The check is: mtime unchanged → stopped; mtime changed → look at
+the transcript's last line — still a `SubagentStop` hook attachment →
+stopped (refresh the recorded mtime); anything else → resumed (delete the
+record, count it); unparseable (mid-write) → stay excluded and re-check on
+the next call.
+
+**Rejected alternative (any mtime advance = resumed):** Claude Code
+appends a `{"type":"attachment","attachment":{"type":"hook_success",
+"hookEvent":"SubagentStop"}}` line to the subagent transcript *after* the
+`SubagentStop` hooks run — measured ~0.1–0.6 s after the hook's event ts on
+real data, and all 296 finished transcripts sampled end with exactly that
+line. A pure mtime comparison would therefore read every stop as an
+immediate resume and reintroduce the phantom.
+
+**Rejected alternative (age grace: "resumed only if mtime advanced by >N
+s"):** works for the attachment write, but the right N depends on how long
+the slowest `SubagentStop` hook takes (users may install their own), and a
+resume within N seconds of the stop would be missed until a later write.
+The last-line check has no tuning knob.
+
+**Cleanup:** records deliberately survive `idle` (a background agent that
+stopped while the session idles must stay excluded). `tab-title.sh end`
+removes `stopped/<sid>/`; the sweep removes it alongside a synthetic `end`
+and hard-expires any `stopped/<sid>/` dir with no record created for 12 h
+(mirrors the pending-dir cap — a record only matters while its transcript
+is still fresh).
+
+**Corollary — the completion notification moves into the hook:** with the
+sweep no longer flipping back to `agents`, it never sees an `agents → idle`
+edge for an agent that stopped via `SubagentStop`, so the "Background task
+completed" notification would have silently disappeared. `tab-title.sh`
+now fires it itself on a logical `agents → idle` transition (see
+[Deferred completion notification](#deferred-completion-notification-agents-gated-stop-notification)),
+and `notify.sh`'s agents gate honors records so the Stop hook's "Task
+completed" isn't swallowed by a stopped-but-fresh transcript.
+
 ## Pending-input set (parallel-subagent bell hold)
 
 **Problem:** Subagents (`Agent`/`Task` tool) share the parent's
@@ -268,10 +345,9 @@ exclude parameter — a subagent whose permission request was just *granted*
 usually keeps running, so its transcript is genuinely fresh, and excluding
 it would wrongly downgrade `agents` on every granted-permission tool call.
 The narrow miss — a *denied* permission causing that subagent to stop
-immediately with no other live agents — self-corrects via the sweep's
-idle-refinement pass within ~30s (see [Agents-running
-state](#agents-running-state)), the same backstop that already exists for
-the fully-quiet-session gap.
+immediately — arrives as a `SubagentStop`, whose [stopped-agent
+record](#stopped-agent-records-subagentstop-exclusion-that-sticks) is
+written before this re-derive, so that transcript is already excluded.
 
 `sweep-bell-state.sh`'s pending-dir hard-age pass globs `-type d`, which
 doesn't match this flat file, so it separately globs `-type f -name
@@ -346,6 +422,22 @@ poller. `cwd` for the notification's subtitle is looked up from the most
 recent non-empty `cwd` field logged for that session in `events.jsonl`,
 since the logical-state file itself carries no cwd.
 
+**Second edge-watcher — `tab-title.sh`:** the common way a background agent
+ends is its own `SubagentStop`, which `tab-title.sh` resolves straight to
+`idle` (and, via the [stopped-agent
+record](#stopped-agent-records-subagentstop-exclusion-that-sticks), keeps
+there). The sweep then never observes `agents`, so `tab-title.sh` fires the
+same `notify.sh '✅' 'Background task completed'` itself whenever it logs a
+logical `agents → idle` transition. The two can't double-fire: whichever
+logs `idle` first moves the logical state off `agents`, and the other sees
+no edge. The sweep remains the watcher for the no-`SubagentStop` path (the
+transcript simply ages out). Before this, the notification only arrived
+because the sweep wrongly re-counted the stopped agent as live and then saw
+it age out ~60 s later. The `notify.sh` agents gate also honors stopped-agent
+records — otherwise the Stop hook's "Task completed" would be suppressed by
+a stopped-but-fresh transcript while `tab-title.sh` settles to plain `idle`,
+and the user would get neither notification.
+
 ## Refresh gating
 
 **Decision:** `tab-title.sh` compares the desired state file against the
@@ -367,13 +459,17 @@ the log.
 
 **Decision:** `tab-title.sh` keeps a per-session "logical state" file at
 `~/.claude/.ccg/sessions/<sid>` and only appends to `events.jsonl` when the
-new state differs from that file. The file is two lines: **line 1 the
+new state differs from that file. The file is three lines: **line 1 the
 state name, line 2 the ancestor claude PID** (the same PID stored on line 3
-of bell-state files). Line 2 lets `sweep-bell-state.sh` reconcile dead
-sessions back into the event log — see [Stale-state
-cleanup](#stale-state-cleanup). All readers (`head -n1` dedup here, the
-stray-subagent guard) take only line 1, so the added PID line is
-transparent to them. On `end`, the per-session file is removed so a future
+of bell-state files), **line 3 the ts of the last event logged for the
+session** (see [Event timestamp ordering](#event-timestamp-ordering)). Line
+2 lets `sweep-bell-state.sh` reconcile dead sessions back into the event
+log — see [Stale-state cleanup](#stale-state-cleanup). All readers
+(`head -n1` dedup here, the stray-subagent guard, the sweep's `sed -n 2p`)
+take only the lines they need, so the added lines are transparent to them,
+and a legacy 2-line file simply means "no clamp" until the next transition
+rewrites it. The sweep writes the same 3-line shape when it logs a
+correction. On `end`, the per-session file is removed so a future
 `SessionStart` for the same `session_id` would re-emit `idle`. A pure
 `end` with no prior state is dropped to avoid zombie entries from stray
 hook invocations.
@@ -382,6 +478,58 @@ This layer is intentionally independent of bell mode: in `notifs` mode the
 bell-state file isn't written for `idle`/`working`, but the event log still
 gets every transition. Sandbox via `CCG_EVENT_LOG` and
 `CCG_SESSION_STATE_DIR` env vars (the validator does this).
+
+### Event timestamp ordering
+
+**Problem:** the dashboard under-reported `agents` time (~48% of the real
+value over 24 h). The dashboard orders events by `ts`, then file-append
+order (`parseEvents`). `tab-title.sh` stamps with `gdate +%s.%3N`
+(fractional; the hook PATH has Homebrew). But the SwiftBar plugin launches
+`sweep-bell-state.sh` with SwiftBar's PATH (`/usr/bin:/bin:/usr/sbin:/sbin`
+— no `gdate`), and the sweep's `gdate … || echo "$_now"` silently fell back
+to an **integer captured at script start**. Its correction (`agents` at
+`…067`) was written *after* a hook's `idle` at `…067.430` yet sorted
+*before* it, so the session read as idle. Worse, the logical-state file now
+said `agents`, so `tab-title.sh`'s dedup suppressed every later `agents`
+event — the session stayed "idle" on the dashboard until it changed state.
+(The [stopped-agent records](#stopped-agent-records-subagentstop-exclusion-that-sticks)
+fix removed the main source of these same-second corrections; this fixes
+the ordering for the corrections that legitimately remain.)
+
+**Decision:**
+
+- **Robust sub-second clock** (`_ccg_now_frac`, in both writers): `gdate`,
+  else `/usr/bin/perl -MTime::HiRes=time` (ships with macOS), integer only
+  as a last resort. The sweep also appends `/opt/homebrew/bin:/usr/local/bin`
+  to its PATH, which additionally makes `terminal-notifier` reachable for
+  the deferred notification and notification expiry under SwiftBar.
+  *Appended*, not prepended, so a caller's PATH (the validator's stubs) wins.
+- **Stamp at append time:** the sweep calls the clock for each event it
+  appends, not once at startup — a sweep can run for a second or more while
+  hooks keep logging.
+- **Per-session monotonic clamp** (`_ccg_clamp_ts`): every appended event,
+  from either writer, gets `ts = max(now, last + 0.001)` where `last` is
+  logical-state line 3. Write order and ts order then agree for a session
+  even across a clock fallback or a clamped predecessor.
+- **Re-read before append:** the sweep's correction pass re-reads the
+  logical-state file just before appending and skips the session if a hook
+  changed it while the sweep was counting transcripts, rather than stacking
+  a stale correction on top.
+- **Synthetic `end` keeps its trailing-cap semantics:** `min(now, mtime +
+  30 min)` is unchanged; the clamp is applied on top but is a no-op on the
+  `mtime + 30 min` path (the last ts ≈ mtime, far below the cap). It only
+  matters on the `now` path.
+
+**Rejected alternative (fix it in the dashboard):** the two ts values
+genuinely differ (`…067` < `…067.430`), so no secondary sort key can
+recover the write order; the dashboard can't know which writer's clock to
+trust. The writers have to emit sortable timestamps.
+
+**Rejected alternative (read the last ts from `events.jsonl`):** a
+`tail`/scan of a 100k-line shared log on every transition (PostToolUse can
+fire several times a second) is far more expensive than one extra line in
+a file we already read, and the log's last line belongs to *some* session,
+not necessarily this one.
 
 ## Stale-state cleanup
 
@@ -467,7 +615,41 @@ right-now phantom disappears. Emitting at `now` would retroactively
 inflate the dead session's working-time. This pass runs even in `notifs`
 mode (where no bell-state file exists for working/idle), which is why it
 keys off the logical-state file, not the bell-state file. Sandbox via
-`CCG_SESSION_STATE_DIR` and `CCG_EVENT_LOG`.
+`CCG_SESSION_STATE_DIR` and `CCG_EVENT_LOG`. (The `ts` is also clamped above
+the session's last logged ts — a no-op on the cap path; see [Event
+timestamp ordering](#event-timestamp-ordering).)
+
+### Sweep single-flight lock
+
+**Problem:** the plugin dispatches one background sweep per run — the 30 s
+poll plus every push refresh, including the one the sweep itself fires
+after pruning — with no coordination. Overlapping sweeps read the same
+logical-state file, derive the same correction, and both append it, so
+`events.jsonl` got duplicate lines (and duplicate deferred notifications).
+
+**Decision:** an `mkdir`-based lock (`mkdir` is atomic; macOS has no
+`flock(1)`) at `$(dirname "$CCG_SESSION_STATE_DIR")/sweep.lock` —
+`~/.claude/.ccg/sweep.lock` in production, inside the validator's sandbox
+automatically (override: `CCG_SWEEP_LOCK`). The holder writes its PID to
+`sweep.lock/pid` and removes the lock from an `EXIT` trap (INT/TERM/HUP are
+routed through `exit` so the trap fires), and only if the pid file is still
+its own. A contending sweep **waits** (polling every 0.1 s, up to
+`CCG_SWEEP_LOCK_WAIT` s, default 10) and then runs — after the holder's
+rewrites, which it now sees as already-correct — rather than skipping its
+cycle; if the wait runs out it exits quietly (the next poll comes within
+30 s). A lock whose owner PID is dead, or that is older than 60 s (a sweep
+normally takes about a second), is broken so a crashed sweep can't wedge
+future ones.
+
+**Rejected alternative (exit immediately on contention):** simpler, but a
+push-refresh sweep that lands while the 30 s sweep is running would be
+dropped, delaying its corrections by up to a full poll interval.
+
+**Known gap:** two sweeps that both find the *same* stale lock at the same
+instant can both break it and both run. Stale locks only exist after a
+crash, and the correction pass's re-read-before-append (see [Event
+timestamp ordering](#event-timestamp-ordering)) makes a duplicate append
+unlikely even then.
 
 ### `end` is terminal until resume — dashboard straggler guard
 
