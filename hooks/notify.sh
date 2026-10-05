@@ -123,6 +123,21 @@ _agent_stopped() {
     *)    return 0 ;;
   esac
 }
+# In-flight Workflow runs (run dir present, result file not yet written,
+# touched within CCG_WORKFLOW_STALE_SEC). Duplicated from tab-title.sh's
+# _count_live_workflows — keep in sync; full rationale there.
+_count_live_workflows() {
+  local sid="$1" stale="${CCG_WORKFLOW_STALE_SEC:-1800}" n=0 d newest now
+  now=$(date +%s)
+  for d in "${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"/*/"$sid"/subagents/workflows/wf_*; do
+    [ -d "$d" ] || continue
+    [ -f "${d%/subagents/workflows/*}/workflows/${d##*/}.json" ] && continue
+    newest=$(stat -f %m "$d"/* 2>/dev/null | sort -n | tail -n1)
+    [ $((now - ${newest:-0})) -le "$stale" ] || continue
+    n=$((n + 1))
+  done
+  echo "$n"
+}
 if [ "$gate" = "agents" ]; then
   _fresh="${CCG_AGENTS_FRESH_SEC:-60}"
   _projects_dir="${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"
@@ -136,6 +151,11 @@ if [ "$gate" = "agents" ]; then
       exit 0
     fi
   done
+  if [ "$(_count_live_workflows "$session_id")" -gt 0 ]; then
+    __trace "early-exit reason=workflow-live session_id=$session_id"
+    __dbg "gate=agents suppressed notification: session_id=$session_id in-flight workflow run"
+    exit 0
+  fi
   unset _fresh _projects_dir _now _f _age
 fi
 message=$(echo "$input" | jq -r --arg def "$default_message" '

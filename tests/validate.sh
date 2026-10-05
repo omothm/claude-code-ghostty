@@ -2544,6 +2544,119 @@ rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EV
 : > "$BELL_CONFIG"
 
 # ---------------------------------------------------------------------------
+section "workflow runs (run-level liveness: result file absent = in flight)"
+
+# A Workflow's agents write transcripts one level deeper than plain background
+# agents (<sid>/subagents/workflows/wf_<runId>/agent-<hex>.jsonl, next to the
+# run's journal.jsonl), so the subagents/*.jsonl glob never saw them and a
+# session whose only background work was a workflow never reached `agents`.
+# Liveness is per run, not per transcript: between stages no agent is
+# running, yet the run is still in flight until Claude Code writes the result
+# file <sid>/workflows/wf_<runId>.json.
+export CCG_PROJECTS_DIR="$TMPROOT/wf-projects"
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+WF_BIN="$TMPROOT/bin-wf-notify"
+WF_ARGS="$TMPROOT/tn-args-wf.txt"
+mkdir -p "$WF_BIN"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$WF_ARGS" > "$WF_BIN/terminal-notifier"
+chmod +x "$WF_BIN/terminal-notifier"
+_saved_path_wf="$PATH"
+export PATH="$WF_BIN:$PATH"
+: > "$CCG_EVENT_LOG"; : > "$WF_ARGS"
+
+WSID="wfW-$$"; WA="wfagent$$"; WRUN="wf_run$$"
+WSESS="$CCG_PROJECTS_DIR/fake-project/$WSID"
+WRD="$WSESS/subagents/workflows/$WRUN"
+WRF="$WSESS/workflows/$WRUN.json"
+mkdir -p "$WRD"
+printf '{"type":"launched"}\n{"type":"started"}\n' > "$WRD/journal.jsonl"
+printf '{"type":"assistant"}\n' > "$WRD/agent-$WA.jsonl"
+_w_state() { sed -n '2p' "$BELL_STATE_DIR/$WSID" 2>/dev/null; }
+_w_logical() { sed -n '1p' "$CCG_SESSION_STATE_DIR/$WSID" 2>/dev/null; }
+_w_completed() { grep -cF -- '-message Background task completed' "$WF_ARGS" 2>/dev/null; }
+_w_plugin() {
+  BELL_STATE_DIR="$BELL_STATE_DIR" BELL_CONFIG="$BELL_CONFIG" CCG_PROJECTS_DIR="$CCG_PROJECTS_DIR" \
+    GHOSTTY_HOOKS_DIR="$TMPROOT" bash "$PLUGIN_PATH" 2>&1 | grep -F "($(printf '%s' "$WSID" | cut -c1-8))"
+}
+
+# 1. Main Stop right after launching the workflow -> agents.
+printf '{"session_id":"%s"}\n' "$WSID" | CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+[ "$(_w_state)" = "agents" ] && ok "workflow: in-flight run (nested transcript, no result file) upgrades idle to agents" \
+  || ng "workflow: in-flight run not counted (got '$(_w_state)')"
+
+# 2. Between stages: the stage's only agent has stopped (SubagentStop, its
+#    transcript and the journal both past CCG_AGENTS_FRESH_SEC) but the run
+#    has not written its result file -> still agents, no premature
+#    completion notification.
+age_file "5 minutes ago" "$WRD/agent-$WA.jsonl"
+age_file "2 minutes ago" "$WRD/journal.jsonl"
+printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}\n' "$WSID" "$WA" \
+  | CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+[ "$(_w_state)" = "agents" ] && ok "workflow: stage agent's SubagentStop mid-run keeps agents" \
+  || ng "workflow: SubagentStop mid-run dropped agents (got '$(_w_state)')"
+[ "$(_w_completed)" = "0" ] && ok "workflow: no 'Background task completed' between stages" \
+  || ng "workflow: premature completion notification (got: $(cat "$WF_ARGS"))"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_w_state)" = "agents" ] && [ "$(_w_logical)" = "agents" ] && ok "workflow: sweep keeps an in-flight run at agents" \
+  || ng "workflow: sweep dropped in-flight run (bell=$(_w_state) logical=$(_w_logical))"
+if [ "$plugin" = "1" ]; then
+  _w_plugin | grep -q 'sfimage=cup.and.heat.waves.fill' && ok "workflow: plugin counts an in-flight run" \
+    || ng "workflow: plugin did not count in-flight run: $(_w_plugin)"
+else
+  skip "workflow: plugin counter (in flight)"
+fi
+printf '{"session_id":"%s"}\n' "$WSID" | "$HOOKS_DIR/notify.sh" '✅' 'Task completed' '' '' agents > /dev/null 2>&1
+grep -qF -- "-message Task completed" "$WF_ARGS" && ng "workflow: notify.sh agents gate let 'Task completed' through mid-run" \
+  || ok "workflow: notify.sh agents gate suppresses 'Task completed' while the run is in flight"
+
+# 3. The run ends (result file written) -> the sweep settles to idle and fires
+#    the deferred completion notification once; every counter sees it done.
+mkdir -p "$(dirname "$WRF")"
+printf '{"runId":"%s","status":"completed"}\n' "$WRUN" > "$WRF"
+if [ "$plugin" = "1" ]; then
+  _w_plugin | grep -q 'sfimage=zzz' && ok "workflow: plugin downgrades a finished run's agents file to idle" \
+    || ng "workflow: plugin still counts finished run: $(_w_plugin)"
+else
+  skip "workflow: plugin counter (finished)"
+fi
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(_w_state)" = "idle" ] && [ "$(_w_logical)" = "idle" ] && ok "workflow: result file written -> sweep settles to idle" \
+  || ng "workflow: finished run still agents (bell=$(_w_state) logical=$(_w_logical))"
+[ "$(_w_completed)" = "1" ] && ok "workflow: run end fires 'Background task completed' once" \
+  || ng "workflow: completion notification count wrong (got: $(cat "$WF_ARGS"))"
+: > "$WF_ARGS"
+printf '{"session_id":"%s"}\n' "$WSID" | "$HOOKS_DIR/notify.sh" '✅' 'Task completed' '' '' agents > /dev/null 2>&1
+grep -qF -- "-message Task completed" "$WF_ARGS" && ok "workflow: notify.sh agents gate passes once the run has its result file" \
+  || ng "workflow: notify.sh gate still suppressed after the run ended"
+printf '{"session_id":"%s"}\n' "$WSID" | CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+[ "$(_w_state)" = "idle" ] && ok "workflow: tab-title.sh idle upgrade ignores a finished run" \
+  || ng "workflow: tab-title.sh upgraded on finished run (got '$(_w_state)')"
+
+# 4. Orphan: no result file, but nothing in the run dir touched for longer
+#    than CCG_WORKFLOW_STALE_SEC (claude died mid-run, session resumed later)
+#    -> not live; raising the cap past its age counts it again.
+OSID="wfO-$$"; ORD="$CCG_PROJECTS_DIR/fake-project/$OSID/subagents/workflows/wf_orphan$$"
+mkdir -p "$ORD"
+printf '{"type":"launched"}\n' > "$ORD/journal.jsonl"
+printf '{"type":"assistant"}\n' > "$ORD/agent-orphan$$.jsonl"
+age_file "40 minutes ago" "$ORD/journal.jsonl"
+age_file "40 minutes ago" "$ORD/agent-orphan$$.jsonl"
+printf '{"session_id":"%s"}\n' "$OSID" | CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$OSID" 2>/dev/null)" = "idle" ] \
+  && ok "workflow: orphaned run (untouched past CCG_WORKFLOW_STALE_SEC, default 30 min) is not live" \
+  || ng "workflow: orphaned run counted live (got '$(sed -n '2p' "$BELL_STATE_DIR/$OSID" 2>/dev/null)')"
+printf '{"session_id":"%s"}\n' "$OSID" | CCG_WORKFLOW_STALE_SEC=3600 CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$OSID" 2>/dev/null)" = "agents" ] \
+  && ok "workflow: CCG_WORKFLOW_STALE_SEC override counts the same run live" \
+  || ng "workflow: CCG_WORKFLOW_STALE_SEC override ignored (got '$(sed -n '2p' "$BELL_STATE_DIR/$OSID" 2>/dev/null)')"
+
+export PATH="$_saved_path_wf"
+rm -rf "$CCG_PROJECTS_DIR" "$CCG_STOPPED_DIR"; unset CCG_PROJECTS_DIR
+rm -f "$BELL_STATE_DIR/$WSID" "$BELL_STATE_DIR/$OSID"
+rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
+: > "$BELL_CONFIG"
+
+# ---------------------------------------------------------------------------
 section "sweep single-flight lock"
 
 # One sweep is dispatched per plugin run (30 s poll + every push refresh), so

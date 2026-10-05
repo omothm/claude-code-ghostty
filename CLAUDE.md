@@ -19,8 +19,9 @@ state-transition logic in `tab-title.sh` or `sweep-bell-state.sh`.
 - [Picking SF Symbols](#picking-sf-symbols)
 - [Gotchas](#gotchas)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — watching state,
-  agents-running state (and stopped-agent records), pending-input set,
-  deferred completion notification, refresh gating, event log dedup (and
+  agents-running state (and stopped-agent records and workflow runs),
+  pending-input set, deferred completion notification, refresh gating,
+  event log dedup (and
   event timestamp ordering), stale-state cleanup (and the sweep lock), and
   the dashboard's fleet-idle north-star metric (and the demoted bell-stall
   metric)
@@ -171,8 +172,8 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
 
 | Script | Purpose | Triggered by |
 |--------|---------|--------------|
-| `hooks/tab-title.sh` | Sets the terminal tab title via `terminalSequence` JSON output (Claude Code 2.1.141+) with a direct `/dev/tty` write as fallback; writes/removes `~/.claude/bell-state/<session_id>`; upgrades idle to `watching`/`agents` when a live monitor or background Agent/Task/Workflow is detected; on a subagent's `SubagentStop` writes a stopped-agent record (`~/.claude/.ccg/stopped/<sid>/<agent_id>`) so every live-agent counter skips its still-fresh transcript until it resumes; appends real state transitions to `~/.claude/.ccg/events.jsonl` with a sub-second ts clamped above the session's last logged ts (logical-state line 3); fires the "Background task completed" notification on a logical `agents → idle` edge; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SubagentStop`, `notify.sh` (for `input`) |
-| `hooks/notify.sh` | Sends `terminal-notifier`; skips if user is already on that tab; routes to `tab-title.sh` for title updates; optional `gate=agents` 5th arg suppresses the notification while a background Agent/Task/Workflow subagent is still live for the session (stopped-agent records don't count as live) | `Notification`, `Stop`, `tab-title.sh` / `sweep-bell-state.sh` (deferred completion) |
+| `hooks/tab-title.sh` | Sets the terminal tab title via `terminalSequence` JSON output (Claude Code 2.1.141+) with a direct `/dev/tty` write as fallback; writes/removes `~/.claude/bell-state/<session_id>`; upgrades idle to `watching`/`agents` when a live monitor or background Agent/Task/Workflow is detected (a Workflow counts per run: run dir under `subagents/workflows/wf_<runId>/` present, result file `workflows/wf_<runId>.json` not yet written); on a subagent's `SubagentStop` writes a stopped-agent record (`~/.claude/.ccg/stopped/<sid>/<agent_id>`) so every live-agent counter skips its still-fresh transcript until it resumes; appends real state transitions to `~/.claude/.ccg/events.jsonl` with a sub-second ts clamped above the session's last logged ts (logical-state line 3); fires the "Background task completed" notification on a logical `agents → idle` edge; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SubagentStop`, `notify.sh` (for `input`) |
+| `hooks/notify.sh` | Sends `terminal-notifier`; skips if user is already on that tab; routes to `tab-title.sh` for title updates; optional `gate=agents` 5th arg suppresses the notification while a background Agent/Task/Workflow subagent is still live for the session or a Workflow run is still in flight (stopped-agent records don't count as live) | `Notification`, `Stop`, `tab-title.sh` / `sweep-bell-state.sh` (deferred completion) |
 | `hooks/focus-ghostty-tab.sh` | AppleScript to focus a Ghostty tab by title-contains match; works across windows and single-tab windows | Notification `-execute`, SwiftBar dropdown |
 | `hooks/refresh-menubar.sh` | `open -g swiftbar://refreshallplugins`; silent no-op if SwiftBar isn't installed | `tab-title.sh` on state change; `sweep-bell-state.sh` after pruning |
 | `hooks/sweep-bell-state.sh` | Prunes bell-state files (dead PID, or >12 h); reconciles dead-but-unended sessions into `events.jsonl` via synthetic `end` events so the dashboard matches the menubar; corrects drifted `agents`/`watching`/`idle` states (honoring stopped-agent records), stamping corrections at append time and clamped above the session's last logged ts; fires a deferred "Background task completed" notification via `notify.sh` on the `agents → idle` logical-state edge; single-flight via an `mkdir` lock (`~/.claude/.ccg/sweep.lock`, stale-lock breaking); appends Homebrew to SwiftBar's minimal PATH | Background job dispatched by the SwiftBar plugin after each run |
@@ -236,6 +237,10 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
 - **`CCG_AGENTS_FRESH_SEC`** — freshness window in seconds (default `60`) for
   a background-agent transcript's mtime before `_count_live_agents` no longer
   counts it as live. See "Agents-running state".
+- **`CCG_WORKFLOW_STALE_SEC`** — orphan cap in seconds (default `1800`) for
+  a Workflow run with no result file: a run dir with no file touched for
+  this long is not counted live by `_count_live_workflows` (claude died
+  mid-run). See "Workflow runs" in `docs/ARCHITECTURE.md`.
 - **`CCG_STOPPED_DIR`** — override the stopped-agent record directory
   (default `~/.claude/.ccg/stopped`). One subdir per session, one file per
   subagent whose `SubagentStop` fired (line 1 = transcript mtime via
@@ -333,7 +338,14 @@ the hook fires `Background task completed` once; Claude Code's post-hook
 still-fresh transcript; a live sibling still counts; appending a non-stop
 entry to X (a resume) makes every counter count it again and drops the
 record, including when only the sweep observes it; `end`, a synthetic `end`,
-and the 12 h hard-age cap clean records up), the sweep single-flight lock
+and the 12 h hard-age cap clean records up), workflow runs (a run whose
+agents' transcripts are nested under `subagents/workflows/wf_<runId>/` and
+that has no result file upgrades idle to `agents`; a stage agent's
+`SubagentStop` mid-run keeps `agents` with no premature completion
+notification; the sweep, the plugin and `notify.sh`'s agents gate all count
+it; writing the result file settles the sweep to `idle` and fires
+`Background task completed` once; a run untouched past
+`CCG_WORKFLOW_STALE_SEC` is an orphan, not live), the sweep single-flight lock
 (6 concurrent sweeps append a correction exactly once and release the lock;
 a dead-owner lock and a >60 s-old lock are broken; a live fresh lock is
 respected without removing it), the AskUserQuestion ❓ tab-title

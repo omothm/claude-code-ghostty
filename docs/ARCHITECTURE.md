@@ -12,6 +12,7 @@ environment variables, and the validator summary, see the root
 - [Watching state](#watching-state)
 - [Agents-running state](#agents-running-state)
   - [Stopped-agent records (SubagentStop exclusion that sticks)](#stopped-agent-records-subagentstop-exclusion-that-sticks)
+  - [Workflow runs (run-level liveness)](#workflow-runs-run-level-liveness)
 - [Pending-input set (parallel-subagent bell hold)](#pending-input-set-parallel-subagent-bell-hold)
   - [Pre-bell state restore](#pre-bell-state-restore)
   - [AskUserQuestion bell (❓ tab-title icon)](#askuserquestion-bell--tab-title-icon)
@@ -66,10 +67,12 @@ main session, which is the common case.
 ## Agents-running state
 
 **Decision:** A session in `idle` state is upgraded to `agents` when it has
-a background `Agent`/`Task` invocation (or a `Workflow`, which spawns
-subagents internally) still running. Precedence is `agents > watching >
-idle` — if a session somehow has both (e.g. a background agent that itself
-launched a monitored Bash command), `agents` wins.
+a background `Agent`/`Task` invocation (or a `Workflow` run, which spawns
+subagents internally and is counted per run — see [Workflow
+runs](#workflow-runs-run-level-liveness)) still running. Precedence is
+`agents > watching > idle` — if a session somehow has both (e.g. a
+background agent that itself launched a monitored Bash command), `agents`
+wins.
 
 **Why:** This is distinct from `watching`: a background agent is *real
 progress* delegated by the session, whereas watching is a live monitor
@@ -226,6 +229,67 @@ now fires it itself on a logical `agents → idle` transition (see
 [Deferred completion notification](#deferred-completion-notification-agents-gated-stop-notification)),
 and `notify.sh`'s agents gate honors records so the Stop hook's "Task
 completed" isn't swallowed by a stopped-but-fresh transcript.
+
+### Workflow runs (run-level liveness)
+
+**Problem:** a `Workflow`'s agents don't write where plain background
+agents do. Their transcripts land one level deeper, at
+`<session_id>/subagents/workflows/wf_<runId>/agent-<hex>.jsonl`, next to
+the run's `journal.jsonl` (`launched`, then one `started`/`result` pair
+per agent). The `subagents/*.jsonl` glob never reached them, so a
+session whose only background work was a workflow settled to plain
+`idle`. The Stop hook's "Task completed" also went out while the run
+was still going. Claude Code's own docs don't give workflows a
+separate session status either: agent view's supervisor section says
+"a running subagent, workflow, or monitor counts as working".
+
+**Decision:** count workflows **per run**, not per agent transcript. A
+run is in flight while its run dir exists and its result file
+`<session_id>/workflows/wf_<runId>.json` doesn't. Claude Code writes
+that file (`status` = `completed`/`failed`, plus `durationMs`,
+`agentCount`, …) only when the run ends. Its birth time equals its
+mtime, which equals the run's end time, while the run dir and journal
+date from launch (checked on disk across 33 local runs). A dir that
+has gone without a result file and with no file touched for
+`CCG_WORKFLOW_STALE_SEC` (default 1800 s) is treated as an orphan,
+not a live run. That's the case where claude died mid-run and the
+session was later resumed with the same id. All four live-agent
+counters add `_count_live_workflows` to their per-transcript count, and
+`notify.sh`'s agents gate checks it too.
+
+**Why per run:** stage gaps. In a multi-stage workflow (a `pipeline`,
+or a `parallel` barrier followed by more agents), there are moments
+when no agent is running. The last agent of a stage has fired
+`SubagentStop` and the next stage hasn't spawned yet. Per-transcript
+counting would read that gap as "all done". It would flip the session
+to `idle`, fire "Background task completed" mid-run, and then flip
+back to `agents` once the next stage's first transcript appeared. The
+result file is the run's own end-of-run signal. On the main side it
+coincides with the task-notification turn, and the sweep fires the
+deferred notification on that `agents → idle` edge.
+
+**Rejected alternative (extend the per-transcript glob to
+`subagents/workflows/wf_*/agent-*.jsonl`):** this is the smallest diff,
+but it reproduces the stage-gap false completion above. It would also
+make every counter depend on `SubagentStop` stopped-agent records for
+workflow agents.
+That firing is seen on disk (`hook_success` `SubagentStop` attachments in
+workflow transcripts), but the hooks docs don't promise it.
+
+**Rejected alternative (Stop/SubagentStop `background_tasks[]`, `type ==
+"workflow"`):** this signal is documented, but it only exists inside
+a hook payload. The sweep and the plugin run with no payload, and a
+workflow finishing isn't itself a main-session hook event. They'd
+still need an on-disk signal, and then the payload would just be a
+second source that could disagree with it.
+
+**Rejected alternative (no staleness cap):** an orphaned run (no result
+file ever written) would pin the session at ☕️ indefinitely once the
+session is resumed. It would also suppress every gated "Task
+completed" notification. The cap is generous because the result file,
+not mtime, is the authoritative "done" signal. A workflow agent inside
+one long tool call writes nothing to its transcript until the call
+returns.
 
 ## Pending-input set (parallel-subagent bell hold)
 

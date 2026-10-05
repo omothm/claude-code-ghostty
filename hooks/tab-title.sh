@@ -136,7 +136,8 @@ _count_live_monitors() {
 # ~/.claude/projects/<project>/<session_id>/subagents/agent-<hex>.jsonl, whose
 # mtime advances continuously while the subagent is working and freezes the
 # moment it finishes. "Fresh mtime" is therefore the liveness check, playing
-# the same role the PID kill -0 check plays for `watching`.
+# the same role the PID kill -0 check plays for `watching`. Workflow runs are
+# counted per run, not per transcript — see _count_live_workflows.
 #
 # Optional $2 excludes one agent's own transcript (basename "agent-<id>",
 # without .jsonl) from the count. Needed by the stray-working guard: a
@@ -161,6 +162,33 @@ _count_live_agents() {
     [ "$age" -le "$fresh" ] || continue
     # A fresh transcript whose agent already fired SubagentStop is not live.
     _agent_stopped "$sid" "$f" && continue
+    n=$((n + 1))
+  done
+  echo "$((n + $(_count_live_workflows "$sid")))"
+}
+
+# Count Workflow runs still in flight for session $1. A workflow's agents
+# write their transcripts one level deeper than plain background agents —
+# <session_id>/subagents/workflows/wf_<runId>/agent-<hex>.jsonl, next to the
+# run's journal.jsonl — so the subagents/*.jsonl glob above never sees them.
+# Per-agent freshness is the wrong grain for a run anyway: between stages no
+# agent is running, so the last agent of a stage stopping would read as "all
+# done" mid-run (and fire a premature "Background task completed"). The run
+# is the unit instead: Claude Code writes its result file
+# <session_id>/workflows/wf_<runId>.json (status completed/failed) only when
+# the run ends, so "run dir present, result file absent" means in flight.
+# CCG_WORKFLOW_STALE_SEC (default 1800) caps that: a run dir with no file
+# touched for that long is an orphan (claude died mid-run and the session was
+# later resumed), not a live run. The duplicated copies in
+# sweep-bell-state.sh, notify.sh and the plugin must stay in sync with this one.
+_count_live_workflows() {
+  local sid="$1" stale="${CCG_WORKFLOW_STALE_SEC:-1800}" n=0 d newest now
+  now=$(date +%s)
+  for d in "${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"/*/"$sid"/subagents/workflows/wf_*; do
+    [ -d "$d" ] || continue
+    [ -f "${d%/subagents/workflows/*}/workflows/${d##*/}.json" ] && continue
+    newest=$(stat -f %m "$d"/* 2>/dev/null | sort -n | tail -n1)
+    [ $((now - ${newest:-0})) -le "$stale" ] || continue
     n=$((n + 1))
   done
   echo "$n"

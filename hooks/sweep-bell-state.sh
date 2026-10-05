@@ -305,6 +305,22 @@ _sweep_count_live_agents() {
     _agent_stopped "$sid" "$f" && continue
     n=$((n + 1))
   done
+  echo "$((n + $(_sweep_count_live_workflows "$sid")))"
+}
+
+# In-flight Workflow runs (run dir present, result file not yet written,
+# touched within CCG_WORKFLOW_STALE_SEC). Duplicated from tab-title.sh's
+# _count_live_workflows — keep in sync; full rationale there.
+_sweep_count_live_workflows() {
+  local sid="$1" stale="${CCG_WORKFLOW_STALE_SEC:-1800}" n=0 d newest now
+  now=$(date +%s)
+  for d in "${CCG_PROJECTS_DIR:-$HOME/.claude/projects}"/*/"$sid"/subagents/workflows/wf_*; do
+    [ -d "$d" ] || continue
+    [ -f "${d%/subagents/workflows/*}/workflows/${d##*/}.json" ] && continue
+    newest=$(stat -f %m "$d"/* 2>/dev/null | sort -n | tail -n1)
+    [ $((now - ${newest:-0})) -le "$stale" ] || continue
+    n=$((n + 1))
+  done
   echo "$n"
 }
 
@@ -454,7 +470,7 @@ if [ -d "$SESSION_STATE_DIR" ]; then
   done < <(find "$SESSION_STATE_DIR" -type f 2>/dev/null)
 fi
 
-unset -f _sweep_count_live_agents _sweep_count_live_monitors
+unset -f _sweep_count_live_agents _sweep_count_live_workflows _sweep_count_live_monitors
 
 __trace "exit pruned=$pruned"
 
