@@ -271,7 +271,7 @@ h2 .h2-sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 
 <div class="panel">
   <div class="panel-head">
-    <div><div class="label">Fleet activity · last 24h</div><div class="hint">sessions busy per 5 min · red = you were active but nothing ran · leading quiet hours trimmed</div></div>
+    <div><div class="label">Fleet activity · last 16h</div><div class="hint">sessions busy per 5 min · red = you were active but nothing ran · leading quiet hours trimmed</div></div>
     <div class="chips">
       <span>busy <b id="x-busy">—</b></span>
       <span class="dead">idle on you <b id="x-dead">—</b></span>
@@ -317,6 +317,7 @@ h2 .h2-sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 const REFRESH_MS = 1000;
 const WINDOW_SEC = 24 * 3600;
 const BIN_SEC = 5 * 60;            // 5-min bins → 288 points across 24h
+const TIMELINE_SEC = 16 * 3600;    // fleet-activity chart shows only the latest 16h of that window
 const TRAILING_CAP_SEC = 30 * 60;  // cap open-ended trailing spans at 30 min
 const NOW_RECENT_SEC = 12 * 3600;  // a session counts as "right now" if its last event is ≤ 12 h old (matches sweep interval)
 const STATES = ['working', 'input', 'agents', 'watching', 'idle'];
@@ -1077,8 +1078,9 @@ function renderFleetTimeline(fleet, nowSec) {
   const { w, ag, inp, dead } = fleet.tl;
   const par = fleet.last24.parallelism;
   const parLine = labels.map(() => par);
-  const peak = Math.max(2, ...w.map((v, i) => v + ag[i] + inp[i]));
-  const xMin = labels[firstShownBin(fleet.tl, 12)].getTime();
+  const startBin = Math.max(firstShownBin(fleet.tl, 12), fleet.bins - Math.floor(TIMELINE_SEC / BIN_SEC));
+  const peak = Math.max(2, ...w.map((v, i) => i < startBin ? 0 : v + ag[i] + inp[i]));
+  const xMin = labels[startBin].getTime();
   const ds = [
     { label: 'Working',           data: w,   backgroundColor: css('--accent-work') },
     { label: 'Background agents', data: ag,  backgroundColor: css('--accent-agents') },
