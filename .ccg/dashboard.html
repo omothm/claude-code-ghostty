@@ -245,6 +245,8 @@ h2 .h2-sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 
 <div class="verdict" id="verdict"><span class="verdict-icon" id="verdict-icon">→</span><span id="verdict-text">reading your last 24h…</span></div>
 
+<div class="verdict tip" id="stuck-tip" style="display:none;"><span class="verdict-icon">💡</span><span><b>Stuck?</b> Just ask the agent to explain.</span></div>
+
 <div class="grid3">
   <div class="panel">
     <div class="panel-head">
@@ -282,8 +284,7 @@ h2 .h2-sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
   <div class="chart-box tall"><canvas id="c-fleet"></canvas></div>
 </div>
 <p class="caption">
-  <b>Fleet idle on you</b> is the north star: of your <em>active time</em> (busy stretches plus the 1–<span class="break-min">10</span> min gaps between them), the share when no session was working and no background agent was running — you were reviewing, deciding or away for a moment and the whole fleet waited. Gaps over <span class="break-min">10</span> min count as breaks, not idle (set <code>fleetBreakMin</code> in <code>config.json</code> to change it). Close the red gaps by queuing the next task in another session <em>before</em> you sit down to review a finished one.
-  <b>Concurrent share</b> and <b>agent-hours</b> are the payoff: more of your busy time with ≥2 sessions running, and more total session-time worked per day. Deltas compare the last 24h to the median of your previous 7 active days. Background agents (☕️) count as busy; watching (👀) and idle don't.
+  <b>Fleet idle on you</b> is the north star: of your <em>active time</em> (busy stretches plus the 1–<span class="break-min">10</span> min gaps between them), the share when no session was working and no background agent was running — you were reviewing, deciding or away for a moment and the whole fleet waited. Gaps over <span class="break-min">10</span> min count as breaks, not idle (set <code>fleetBreakMin</code> in <code>config.json</code> to change it). Close the red gaps by queuing the next task in another session <em>before</em> you sit down to review a finished one.  <b>Concurrent share</b> and <b>agent-hours</b> are the payoff: more of your busy time with ≥2 sessions running, and more total session-time worked per day. Deltas compare the last 24h to the median of your previous 7 active days. Background agents (☕️) count as busy; watching (👀) and idle don't.
 </p>
 
 <h2>Permission bells <span class="h2-sub">· rare in auto mode, but each one can stall the fleet</span></h2>
@@ -474,6 +475,16 @@ function stripStragglers(evs) {
   return out;
 }
 // </stripStragglers>
+
+// The "Stuck?" tip shows once the longest-idle session has been idle 5+ min,
+// the same rule as the menubar plugin's Idle header. tests/validate.sh slices
+// this out to run it under Node; keep the markers on their own lines.
+// <stuckTip>
+const STUCK_TIP_SEC = 300;
+function stuckTipVisible(oldestIdleTs, nowSec) {
+  return oldestIdleTs != null && nowSec - oldestIdleTs >= STUCK_TIP_SEC;
+}
+// </stuckTip>
 
 // Compute the [start, end] timestamp span (in seconds) for the i-th event of
 // a session, capping open trailing spans for stale sessions.
@@ -721,10 +732,12 @@ function compute(sessions, nowSec) {
   // Right-now counters: latest non-end event per session, within recent window.
   const nowCounts = { working: 0, input: 0, agents: 0, watching: 0, idle: 0 };
   const nowCutoff = nowSec - NOW_RECENT_SEC;
+  let oldestIdleTs = null;
   for (const e of latest.values()) {
     if (e.state === 'end') continue;
     if (e.ts < nowCutoff) continue;
     if (e.state in nowCounts) nowCounts[e.state] += 1;
+    if (e.state === 'idle' && (oldestIdleTs == null || e.ts < oldestIdleTs)) oldestIdleTs = e.ts;
   }
 
   // Bell-stall share: of your ON-THE-HOOK time (bins with ≥1 session awaiting
@@ -747,7 +760,9 @@ function compute(sessions, nowSec) {
   if (latencies.length >= P90_MIN_SAMPLE) p90Lat = percentile(latencies, 0.9);
   const bells = latencies.length;
 
-  return { totals, nowCounts, started, medianLat, p90Lat, bells, stallShare };
+  const stuckTip = stuckTipVisible(oldestIdleTs, nowSec);
+
+  return { totals, nowCounts, started, medianLat, p90Lat, bells, stallShare, stuckTip };
 }
 
 // Daily bell-stall share over the last TREND_DAYS days. For each day, share =
@@ -1200,6 +1215,7 @@ function render(data) {
     document.getElementById(`pill-${st}`).classList.toggle('zero', n === 0);
   }
   document.getElementById('pill-input').classList.toggle('hot', data.nowCounts.input > 0);
+  document.getElementById('stuck-tip').style.display = data.stuckTip ? '' : 'none';
 
   document.getElementById('t-working').textContent  = fmtDuration(data.totals.working);
   document.getElementById('t-input').textContent    = fmtDuration(data.totals.input);

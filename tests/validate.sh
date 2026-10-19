@@ -571,6 +571,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "Plugin output: idle-section stuck tip"
+
+# The Idle header gains the "ask for explanation" tip once the OLDEST idle
+# session has been idle 5+ min; a younger oldest row keeps the plain header.
+if [ "$plugin" = "1" ]; then
+  printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+  printf 'Claude Code | tip-young (tipY)\nidle\n' > "$BELL_STATE_DIR/tipY"
+  age_file "4 minutes ago" "$BELL_STATE_DIR/tipY"
+  out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out" | grep -q '^Idle | size=11' \
+    && ok "idle header is plain when the oldest idle session is under 5 min" \
+    || ng "idle header wrong for a 4-min-old idle session: $(echo "$out" | grep '^Idle')"
+
+  printf 'Claude Code | tip-old (tipO)\nidle\n' > "$BELL_STATE_DIR/tipO"
+  age_file "6 minutes ago" "$BELL_STATE_DIR/tipO"
+  out=$(BELL_CONFIG="$BELL_CONFIG" bash "$PLUGIN_PATH" 2>&1)
+  echo "$out" | grep -q '^Idle · If stuck, just ask for explanation | size=11' \
+    && ok "idle header shows the tip once the oldest idle session is 5+ min" \
+    || ng "idle header missing the tip for a 6-min-old idle session: $(echo "$out" | grep '^Idle')"
+
+  rm -f "$BELL_STATE_DIR"/tip*
+  : > "$BELL_CONFIG"
+else
+  skip "plugin output: idle-section stuck tip"
+fi
+
+# ---------------------------------------------------------------------------
 section "dashboard entry in plugin output"
 
 if [ "$plugin" = "1" ]; then
@@ -2864,6 +2891,51 @@ NODE
   fi
 else
   skip "dashboard straggler handling (node or dashboard.html absent)"
+fi
+
+# ---------------------------------------------------------------------------
+section "dashboard stuck tip (same 5-min rule as the menubar Idle header)"
+
+# stuckTipVisible lives between <stuckTip> markers; the banner is hidden by
+# default and render() toggles it from compute()'s stuckTip.
+if command -v node >/dev/null 2>&1 && [ -f "$DASHBOARD_PATH" ]; then
+  TIP_FN=$(awk '/\/\/ <stuckTip>/{f=1;next} /\/\/ <\/stuckTip>/{f=0} f' "$DASHBOARD_PATH")
+  if [ -z "$TIP_FN" ]; then
+    ng "could not extract stuckTipVisible from $DASHBOARD_PATH (markers missing?)"
+  else
+    TIP_JS="$TMPROOT/tip.js"
+    {
+      printf '%s\n' "$TIP_FN"
+      cat <<'NODE'
+const now = 10000;
+const cases = [
+  ['no idle session', null, false],
+  ['idle 4m59s', now - 299, false],
+  ['idle exactly 5m', now - 300, true],
+  ['idle 6m', now - 360, true],
+];
+let bad = 0;
+for (const [label, ts, want] of cases) {
+  const got = stuckTipVisible(ts, now);
+  if (got !== want) { bad++; console.log(`FAIL ${label}: want ${want}, got ${got}`); }
+}
+process.exit(bad);
+NODE
+    } > "$TIP_JS"
+    if node_out=$(node "$TIP_JS" 2>&1); then
+      ok "stuckTipVisible: shows only once the oldest idle session is 5+ min"
+    else
+      ng "stuckTipVisible mismatch: $node_out"
+    fi
+    grep -q 'id="stuck-tip" style="display:none;"' "$DASHBOARD_PATH" \
+      && ok "stuck-tip banner is hidden by default" \
+      || ng "stuck-tip banner missing or not hidden by default"
+    grep -q "getElementById('stuck-tip').style.display = data.stuckTip" "$DASHBOARD_PATH" \
+      && ok "render() toggles the stuck-tip banner from data.stuckTip" \
+      || ng "render() does not toggle the stuck-tip banner"
+  fi
+else
+  skip "dashboard stuck tip (node or dashboard.html absent)"
 fi
 
 # ---------------------------------------------------------------------------

@@ -615,7 +615,14 @@ if [ -n "$input_entries" ]; then
 fi
 if [ -n "$idle_entries" ]; then
   [ "$need_sep" = "1" ] && echo "---"
-  echo "Idle | size=11 color=#4a4a4a,#b0b0b0"
+  # Nudge once the longest-idle session (first row, oldest-first) has waited 5+
+  # min: asking the agent to explain beats the user puzzling it out alone.
+  idle_label="Idle"
+  oldest_idle=$(printf '%s' "$idle_entries" | _sort_by_mtime | head -n1 | cut -f1)
+  if [ "${oldest_idle:-0}" -gt 0 ] && [ $(( $(date +%s) - oldest_idle )) -ge 300 ]; then
+    idle_label="Idle · If stuck, just ask for explanation"
+  fi
+  echo "$idle_label | size=11 color=#4a4a4a,#b0b0b0"
   # Global hotkeys <mods>+1…9, then +0 for the 10th row: SwiftBar registers a
   # `shortcut=` on any item and re-registers on every refresh, so <mods>+N
   # always focuses whatever is the Nth idle row right now (same action as a
