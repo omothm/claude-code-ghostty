@@ -1,2 +1,3 @@
+*.local.*
 .ccg/events.jsonl
 .ccg/sessions/
