@@ -56,6 +56,10 @@ export CCG_EVENT_LOG="$TMPROOT/events.jsonl"
 export CCG_SESSION_STATE_DIR="$TMPROOT/sessions"
 export CCG_PENDING_DIR="$TMPROOT/pending"
 export CCG_STOPPED_DIR="$TMPROOT/stopped"
+# Deferred "Background task completed" ping: sandboxed marker dir and a short
+# delay so the suite only waits ~1 s per check (see _bg_wait).
+export CCG_BG_NOTIFY_DIR="$TMPROOT/bgnotify"
+export CCG_BG_NOTIFY_DELAY_SEC=1
 # The validator typically runs INSIDE a live Claude Code session, whose
 # claude process has live Monitor descendants. Without an override, every
 # `idle` test would walk up the process tree, find that claude, and upgrade
@@ -106,6 +110,23 @@ for a in "$@"; do case "$a" in swiftbar://*) exit 0 ;; esac; done
 exec /usr/bin/open "$@"
 STUB
 chmod +x "$GLOBAL_NOTIFY_BIN/open"
+# Global `osascript` stub for notify.sh's focus check, so the suite never reads
+# the real Ghostty: frontmost app = $FAKE_FRONT_APP (default Finder, i.e. never
+# focused); the tab probe reports the tab selected when its script contains
+# $FAKE_FOCUSED_TAB. Every other osascript call passes through.
+cat > "$GLOBAL_NOTIFY_BIN/osascript" <<'STUB'
+#!/bin/bash
+case "$*" in
+  *"frontmost is true"*) echo "${FAKE_FRONT_APP:-Finder}"; exit 0 ;;
+  *'tab group "tab bar"'*)
+    if [ -n "$FAKE_FOCUSED_TAB" ]; then
+      case "$*" in *"$FAKE_FOCUSED_TAB"*) echo 1; exit 0 ;; esac
+    fi
+    echo 0; exit 0 ;;
+esac
+exec /usr/bin/osascript "$@"
+STUB
+chmod +x "$GLOBAL_NOTIFY_BIN/osascript"
 export PATH="$GLOBAL_NOTIFY_BIN:$PATH"
 
 if [ -t 1 ]; then
@@ -131,13 +152,24 @@ cleanup() {
   done
   rm -rf "$TMPROOT"
   unset BELL_STATE_DIR BELL_TRACE BELL_TRACE_LOG BELL_CONFIG GHOSTTY_HOOKS_DIR \
-        CCG_EVENT_LOG CCG_SESSION_STATE_DIR CCG_CLAUDE_PID CCG_PENDING_DIR CCG_STOPPED_DIR
+        CCG_EVENT_LOG CCG_SESSION_STATE_DIR CCG_CLAUDE_PID CCG_PENDING_DIR CCG_STOPPED_DIR \
+        CCG_BG_NOTIFY_DIR CCG_BG_NOTIFY_DELAY_SEC
 }
 trap cleanup EXIT
 
 # Helpers.
 now_ms()     { gdate +%s%3N 2>/dev/null || echo 0; }
 trace_reset() { : > "$BELL_TRACE_LOG"; }
+# Wait (bounded, 10 s) until no deferred-ping checker for session $1 is still
+# pending, so a check sees the ping it sent (or didn't).
+_bg_wait() {
+  local i=0
+  while pgrep -f "bg-notify.sh fire $1 " > /dev/null 2>&1; do
+    i=$((i + 1)); [ "$i" -ge 100 ] && { echo "TIMED OUT: bg-notify checker for $1" >&2; return 0; }
+    sleep 0.1
+  done
+  return 0
+}
 age_file()   { touch -t "$(gdate -d "$1" +%Y%m%d%H%M.%S)" "$2"; }
 sf_exists()  { [ -f "$BELL_STATE_DIR/$1" ]; }
 write_sf()   { printf '%s\n' "$2" > "$BELL_STATE_DIR/$1"; }
@@ -959,6 +991,7 @@ age_file "5 minutes ago" "$CCG_PROJECTS_DIR/fake-project/$IRSID6/subagents/agent
 printf 'agents\n%s\n' "$$" > "$CCG_SESSION_STATE_DIR/$IRSID6"
 : > "$IRNOTIFY_ARGS"
 CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+_bg_wait "$IRSID6"
 grep -qF -- "-message Background task completed" "$IRNOTIFY_ARGS" 2>/dev/null \
   && ok "sweep idle-refinement: agents->idle fires 'Background task completed' notification" \
   || ng "sweep idle-refinement: no completion notification fired (got: $(cat "$IRNOTIFY_ARGS" 2>/dev/null))"
@@ -2460,8 +2493,10 @@ printf '{"session_id":"%s"}\n' "$XSID" | CCG_CLAUDE_PID="$$" "$HOOKS_DIR/tab-tit
   || ng "stopped: did not settle to agents (got '$(_x_state)')"
 
 # 2. X's SubagentStop -> idle, record written with the transcript's mtime, and
-#    the deferred "Background task completed" notification fires right away.
+#    the deferred "Background task completed" notification fires once the
+#    CCG_BG_NOTIFY_DELAY_SEC deferral elapses with the session still idle.
 _x_subagent_stop "$XA"
+_bg_wait "$XSID"
 [ "$(_x_state)" = "idle" ] && [ "$(_x_logical)" = "idle" ] && ok "stopped: X's SubagentStop settles to idle" \
   || ng "stopped: SubagentStop did not settle to idle (bell=$(_x_state) logical=$(_x_logical))"
 if [ -f "$XREC" ] && [ "$(head -n1 "$XREC")" = "$(stat -f %Fm "$XF")" ]; then
@@ -2649,6 +2684,7 @@ fi
 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
 [ "$(_w_state)" = "idle" ] && [ "$(_w_logical)" = "idle" ] && ok "workflow: result file written -> sweep settles to idle" \
   || ng "workflow: finished run still agents (bell=$(_w_state) logical=$(_w_logical))"
+_bg_wait "$WSID"
 [ "$(_w_completed)" = "1" ] && ok "workflow: run end fires 'Background task completed' once" \
   || ng "workflow: completion notification count wrong (got: $(cat "$WF_ARGS"))"
 : > "$WF_ARGS"
@@ -2681,6 +2717,161 @@ export PATH="$_saved_path_wf"
 rm -rf "$CCG_PROJECTS_DIR" "$CCG_STOPPED_DIR"; unset CCG_PROJECTS_DIR
 rm -f "$BELL_STATE_DIR/$WSID" "$BELL_STATE_DIR/$OSID"
 rm -rf "$CCG_SESSION_STATE_DIR"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
+: > "$BELL_CONFIG"
+
+# ---------------------------------------------------------------------------
+section "deferred 'Background task completed' (bg-notify.sh)"
+
+# The agents -> idle edge arms a delayed checker instead of pinging at once:
+# a subagent's result often wakes the main agent, whose Stop "Task completed"
+# would double the ping, and idle/agents flapping fired one ping per edge.
+export CCG_PROJECTS_DIR="$TMPROOT/bg-projects"
+printf '{"mode":"always-on"}\n' > "$BELL_CONFIG"
+BG_BIN="$TMPROOT/bin-bg-notify"
+BG_ARGS="$TMPROOT/tn-args-bg.txt"
+mkdir -p "$BG_BIN" "$CCG_PROJECTS_DIR"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$BG_ARGS" > "$BG_BIN/terminal-notifier"
+chmod +x "$BG_BIN/terminal-notifier"
+_saved_path_bg="$PATH"
+export PATH="$BG_BIN:$PATH"
+: > "$CCG_EVENT_LOG"; : > "$BG_ARGS"
+
+_bg_pings() { grep -F -- "-group ccg-$1" "$BG_ARGS" 2>/dev/null | grep -cF -- "-message ${2:-Background task completed}"; }
+_bg_idle()  { printf '{"session_id":"%s"}\n' "$1" | "$HOOKS_DIR/tab-title.sh" idle > /dev/null 2>&1; }
+# Seed a logged `agents` state, then the hook's idle resolves to idle: an edge.
+_bg_edge_tt() {
+  printf 'agents\n999999\n1000.000\n' > "$CCG_SESSION_STATE_DIR/$1"
+  _bg_idle "$1"
+}
+_bg_agent_live() { mkdir -p "$CCG_PROJECTS_DIR/p/$1/subagents"; : > "$CCG_PROJECTS_DIR/p/$1/subagents/agent-a$$.jsonl"; }
+_bg_agent_gone() { rm -f "${CCG_PROJECTS_DIR:?}/p/${1:?}/subagents/agent-a$$.jsonl"; }
+
+# All scenarios arm first and share one wait, so the delay is paid once.
+export CCG_BG_NOTIFY_DELAY_SEC=3
+
+# 1. tab-title.sh path: no ping on the edge itself, and the hook returns without
+#    waiting for the checker (its stdout is captured here, so a checker holding
+#    the fd would block for the whole delay).
+B1="bgStay-$$"
+printf 'agents\n999999\n1000.000\n' > "$CCG_SESSION_STATE_DIR/$B1"
+_t0=$(now_ms)
+_out=$(printf '{"session_id":"%s"}\n' "$B1" | "$HOOKS_DIR/tab-title.sh" idle 2>&1)
+_t1=$(now_ms)
+[ $((_t1 - _t0)) -lt 2000 ] && ok "bg-notify: hook returns at once; the detached checker holds no stdio ($((_t1 - _t0)) ms)" \
+  || ng "bg-notify: hook blocked on the checker ($((_t1 - _t0)) ms)"
+[ "$(_bg_pings "$B1")" = "0" ] && ok "bg-notify: tab-title.sh agents -> idle edge does not ping immediately" \
+  || ng "bg-notify: tab-title.sh edge pinged immediately"
+[ -f "$CCG_BG_NOTIFY_DIR/$B1" ] && ok "bg-notify: edge writes the per-session marker under \$CCG_BG_NOTIFY_DIR" \
+  || ng "bg-notify: no marker written"
+
+# 2. The Stop hook's "Task completed" within the delay supersedes the ping.
+B2="bgStop-$$"
+_bg_edge_tt "$B2"
+printf '{"session_id":"%s"}\n' "$B2" | "$HOOKS_DIR/notify.sh" '✅' 'Task completed' '' '' agents > /dev/null 2>&1
+
+# 3. Back to agents within the delay.
+B3="bgAgents-$$"
+_bg_edge_tt "$B3"
+_bg_agent_live "$B3"; _bg_idle "$B3"
+
+# 4. Back to working (new turn) within the delay.
+B4="bgWorking-$$"
+_bg_edge_tt "$B4"
+printf '{"session_id":"%s","hook_event_name":"UserPromptSubmit"}\n' "$B4" | "$HOOKS_DIR/tab-title.sh" working > /dev/null 2>&1
+
+# 5. Flapping idle -> agents -> idle -> agents -> idle: three edges.
+B5="bgFlap-$$"
+_bg_edge_tt "$B5"
+_bg_agent_live "$B5"; _bg_idle "$B5"; _bg_agent_gone "$B5"; _bg_idle "$B5"
+_bg_agent_live "$B5"; _bg_idle "$B5"; _bg_agent_gone "$B5"; _bg_idle "$B5"
+_edges=$(jq -r --arg s "$B5" 'select(.session_id == $s and .state == "idle") | .state' "$CCG_EVENT_LOG" | grep -c .)
+
+# 6. Sweep path: agents -> idle on an aged-out transcript. Own session dir, so
+#    this sweep doesn't synthetic-end the dead-PID sessions above.
+B6="bgSweep-$$"; B6DIR="$TMPROOT/bg-sweep-sessions"
+mkdir -p "$CCG_PROJECTS_DIR/p/$B6/subagents" "$B6DIR"
+: > "$CCG_PROJECTS_DIR/p/$B6/subagents/agent-s$$.jsonl"
+age_file "5 minutes ago" "$CCG_PROJECTS_DIR/p/$B6/subagents/agent-s$$.jsonl"
+printf 'agents\n%s\n1000.000\n' "$$" > "$B6DIR/$B6"
+CCG_SESSION_STATE_DIR="$B6DIR" CCG_AGENTS_FRESH_SEC=5 "$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ "$(sed -n '1p' "$B6DIR/$B6")" = "idle" ] && [ "$(_bg_pings "$B6")" = "0" ] && [ -f "$CCG_BG_NOTIFY_DIR/$B6" ] \
+  && ok "bg-notify: sweep agents -> idle edge arms the marker without pinging immediately" \
+  || ng "bg-notify: sweep edge not deferred (state=$(sed -n '1p' "$B6DIR/$B6") pings=$(_bg_pings "$B6"))"
+
+# 7. `end` within the delay drops the marker.
+B7="bgEnd-$$"
+_bg_edge_tt "$B7"
+[ -f "$CCG_BG_NOTIFY_DIR/$B7" ] || ng "bg-notify: precondition — marker missing before end"
+printf '{"session_id":"%s"}\n' "$B7" | "$HOOKS_DIR/tab-title.sh" end > /dev/null 2>&1
+[ ! -f "$CCG_BG_NOTIFY_DIR/$B7" ] && ok "bg-notify: end removes the session's marker" || ng "bg-notify: end left the marker"
+
+for _b in "$B1" "$B2" "$B3" "$B4" "$B5" "$B6" "$B7"; do _bg_wait "$_b"; done
+export CCG_BG_NOTIFY_DELAY_SEC=1
+
+[ "$(_bg_pings "$B1")" = "1" ] && ok "bg-notify: one ping after the delay when the session stays idle" \
+  || ng "bg-notify: expected 1 ping after the delay (got $(_bg_pings "$B1"))"
+[ ! -f "$CCG_BG_NOTIFY_DIR/$B1" ] && ok "bg-notify: marker consumed by the ping" || ng "bg-notify: marker left after the ping"
+[ "$(_bg_pings "$B2")" = "0" ] && [ "$(_bg_pings "$B2" 'Task completed')" = "1" ] \
+  && ok "bg-notify: Stop 'Task completed' within the delay suppresses the Background ping" \
+  || ng "bg-notify: double ping (background=$(_bg_pings "$B2") task=$(_bg_pings "$B2" 'Task completed'))"
+[ "$(sed -n '1p' "$CCG_SESSION_STATE_DIR/$B3")" = "agents" ] && [ "$(_bg_pings "$B3")" = "0" ] \
+  && ok "bg-notify: no ping when the state returns to agents within the delay" \
+  || ng "bg-notify: pinged after returning to agents (state=$(sed -n '1p' "$CCG_SESSION_STATE_DIR/$B3") pings=$(_bg_pings "$B3"))"
+_bg_agent_gone "$B3"
+[ "$(sed -n '1p' "$CCG_SESSION_STATE_DIR/$B4")" = "working" ] && [ "$(_bg_pings "$B4")" = "0" ] \
+  && ok "bg-notify: no ping when the state returns to working within the delay" \
+  || ng "bg-notify: pinged after returning to working (state=$(sed -n '1p' "$CCG_SESSION_STATE_DIR/$B4") pings=$(_bg_pings "$B4"))"
+[ "$_edges" = "3" ] && [ "$(_bg_pings "$B5")" = "1" ] && ok "bg-notify: flapping (3 agents -> idle edges) collapses to exactly one ping" \
+  || ng "bg-notify: flapping not collapsed (idle edges=$_edges pings=$(_bg_pings "$B5"))"
+[ "$(_bg_pings "$B6")" = "1" ] && ok "bg-notify: sweep-armed ping fires once after the delay" \
+  || ng "bg-notify: sweep-armed ping count wrong (got $(_bg_pings "$B6"))"
+[ "$(_bg_pings "$B7")" = "0" ] && ok "bg-notify: no ping after end" || ng "bg-notify: pinged after end"
+
+# 8. The sweep's synthetic end and 12 h hard-age pass also drop markers.
+B8="bgDead-$$"
+printf 'idle\n999999\n1000.000\n' > "$CCG_SESSION_STATE_DIR/$B8"
+printf 'tok\n1000.000\n\n' > "$CCG_BG_NOTIFY_DIR/$B8"
+printf 'tok\n1\n\n' > "$CCG_BG_NOTIFY_DIR/bgOld-$$"; age_file "13 hours ago" "$CCG_BG_NOTIFY_DIR/bgOld-$$"
+printf 'tok\n1\n\n' > "$CCG_BG_NOTIFY_DIR/bgFresh-$$"
+"$HOOKS_DIR/sweep-bell-state.sh" > /dev/null 2>&1
+[ ! -f "$CCG_BG_NOTIFY_DIR/$B8" ] && ok "bg-notify: sweep's synthetic end removes the session's marker" \
+  || ng "bg-notify: synthetic end left the marker"
+[ ! -f "$CCG_BG_NOTIFY_DIR/bgOld-$$" ] && [ -f "$CCG_BG_NOTIFY_DIR/bgFresh-$$" ] \
+  && ok "bg-notify: sweep hard-expires markers older than 12 h, keeps fresh ones" \
+  || ng "bg-notify: marker hard-age pass wrong"
+
+# ---------------------------------------------------------------------------
+section "notify.sh focused-tab skip (send skipped, state still updated)"
+
+# Removed earlier because fast tab switching left sessions waiting; re-added
+# with the bug fixed: the old early exit also skipped the tab-title update, so
+# an input bell on the focused tab never set the bell state.
+F1="fcsOn-$$"; F1K=$(printf '%s' "$F1" | cut -c1-8)
+: > "$BG_ARGS"
+printf 'tok\n1\n\n' > "$CCG_BG_NOTIFY_DIR/$F1"
+printf '{"session_id":"%s"}\n' "$F1" | FAKE_FRONT_APP=ghostty FAKE_FOCUSED_TAB="$F1K" \
+  "$HOOKS_DIR/notify.sh" '🔔' 'Needs your input' input > /dev/null 2>&1
+[ ! -s "$BG_ARGS" ] && ok "focus skip: no send when Ghostty is frontmost on this session's tab" \
+  || ng "focus skip: sent on the focused tab ($(cat "$BG_ARGS"))"
+[ "$(sed -n '2p' "$BELL_STATE_DIR/$F1" 2>/dev/null)" = "input" ] && ok "focus skip: input bell state still written on the focused tab" \
+  || ng "focus skip: bell state not updated (got '$(sed -n '2p' "$BELL_STATE_DIR/$F1" 2>/dev/null)')"
+[ ! -f "$CCG_BG_NOTIFY_DIR/$F1" ] && ok "focus skip: a skipped send clears the deferred Background-ping marker" \
+  || ng "focus skip: marker survived the skipped send"
+F2="fcsOff-$$"
+printf '{"session_id":"%s"}\n' "$F2" | FAKE_FRONT_APP=ghostty FAKE_FOCUSED_TAB="someOtherTab" \
+  "$HOOKS_DIR/notify.sh" '🔔' 'Needs your input' input > /dev/null 2>&1
+[ "$(_bg_pings "$F2" 'Needs your input')" = "1" ] && ok "focus skip: sends when a different Ghostty tab is selected" \
+  || ng "focus skip: no send for an unfocused tab"
+F3="fcsApp-$$"; F3K=$(printf '%s' "$F3" | cut -c1-8)
+printf '{"session_id":"%s"}\n' "$F3" | FAKE_FRONT_APP=Safari FAKE_FOCUSED_TAB="$F3K" \
+  "$HOOKS_DIR/notify.sh" '🔔' 'Needs your input' input > /dev/null 2>&1
+[ "$(_bg_pings "$F3" 'Needs your input')" = "1" ] && ok "focus skip: sends when another app is frontmost" \
+  || ng "focus skip: no send with a non-Ghostty frontmost app"
+
+export PATH="$_saved_path_bg"
+rm -rf "${CCG_PROJECTS_DIR:?}" "${CCG_BG_NOTIFY_DIR:?}"; unset CCG_PROJECTS_DIR
+rm -f "${BELL_STATE_DIR:?}/${F1:?}" "${BELL_STATE_DIR:?}/${F2:?}" "${BELL_STATE_DIR:?}/${F3:?}"
+rm -rf "${CCG_SESSION_STATE_DIR:?}"; mkdir -p "$CCG_SESSION_STATE_DIR"; : > "$CCG_EVENT_LOG"
 : > "$BELL_CONFIG"
 
 # ---------------------------------------------------------------------------

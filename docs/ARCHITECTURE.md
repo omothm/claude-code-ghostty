@@ -17,6 +17,8 @@ environment variables, and the validator summary, see the root
   - [Pre-bell state restore](#pre-bell-state-restore)
   - [AskUserQuestion bell (❓ tab-title icon)](#askuserquestion-bell--tab-title-icon)
 - [Deferred completion notification (agents-gated Stop notification)](#deferred-completion-notification-agents-gated-stop-notification)
+  - [Delayed send (bg-notify.sh)](#delayed-send-bg-notifysh)
+  - [Focused-tab skip](#focused-tab-skip)
 - [Refresh gating](#refresh-gating)
 - [Event log dedup](#event-log-dedup)
   - [Event timestamp ordering](#event-timestamp-ordering)
@@ -225,7 +227,7 @@ is still fresh).
 sweep no longer flipping back to `agents`, it never sees an `agents → idle`
 edge for an agent that stopped via `SubagentStop`, so the "Background task
 completed" notification would have silently disappeared. `tab-title.sh`
-now fires it itself on a logical `agents → idle` transition (see
+now arms it itself on a logical `agents → idle` transition (see
 [Deferred completion notification](#deferred-completion-notification-agents-gated-stop-notification)),
 and `notify.sh`'s agents gate honors records so the Stop hook's "Task
 completed" isn't swallowed by a stopped-but-fresh transcript.
@@ -478,9 +480,10 @@ was watching for the background agent to actually finish. The counterpart
 lives in `sweep-bell-state.sh`'s existing logical-state idle-refinement
 pass (see [Agents-running state](#agents-running-state)) — the same pass
 that already rewrites a session's logical state from `agents` to `idle`
-once the subagent transcript goes stale now also calls `notify.sh '✅'
-'Background task completed'` on that specific `agents → idle` edge (not
-`watching → idle`, not `idle → idle` no-ops). This pass already runs every
+once the subagent transcript goes stale now also arms `bg-notify.sh` for a
+'Background task completed' notification on that specific `agents → idle`
+edge (not `watching → idle`, not `idle → idle` no-ops; see [Delayed
+send](#delayed-send-bg-notifysh)). This pass already runs every
 ~30s via the SwiftBar plugin regardless of bell mode, so it's the natural
 place to catch "background work just finished" without adding a new
 poller. `cwd` for the notification's subtitle is looked up from the most
@@ -491,9 +494,9 @@ since the logical-state file itself carries no cwd.
 ends is its own `SubagentStop`, which `tab-title.sh` resolves straight to
 `idle` (and, via the [stopped-agent
 record](#stopped-agent-records-subagentstop-exclusion-that-sticks), keeps
-there). The sweep then never observes `agents`, so `tab-title.sh` fires the
-same `notify.sh '✅' 'Background task completed'` itself whenever it logs a
-logical `agents → idle` transition. The two can't double-fire: whichever
+there). The sweep then never observes `agents`, so `tab-title.sh` arms the
+same deferred 'Background task completed' itself whenever it logs a
+logical `agents → idle` transition. The two can't double-arm: whichever
 logs `idle` first moves the logical state off `agents`, and the other sees
 no edge. The sweep remains the watcher for the no-`SubagentStop` path (the
 transcript simply ages out). Before this, the notification only arrived
@@ -502,6 +505,78 @@ it age out ~60 s later. The `notify.sh` agents gate also honors stopped-agent
 records — otherwise the Stop hook's "Task completed" would be suppressed by
 a stopped-but-fresh transcript while `tab-title.sh` settles to plain `idle`,
 and the user would get neither notification.
+
+### Delayed send (bg-notify.sh)
+
+**Problem:** sending the ping on the edge itself double-pinged and flapped.
+Measured on `events.jsonl` and transcripts since Oct 20: of 751 `agents →
+idle` edges, 231 were followed 5–30 s later by the Stop hook's own "Task
+completed" (the last subagent's `SubagentStop` fires the ping mid-turn, the
+subagent's message wakes the main agent, and that turn's Stop pings again),
+and 226 went `idle → agents` again within 2 s, each edge with its own ping.
+In 42% of edges no Stop followed, so the Background ping is often the only
+completion signal and must stay.
+
+**Decision:** both edge-watchers call `bg-notify.sh arm <sid> <edge_ts>
+[cwd]` instead of `notify.sh`. It writes `~/.claude/.ccg/bgnotify/<sid>`
+(override `CCG_BG_NOTIFY_DIR`; line 1 token, line 2 the edge's logical-state
+ts, line 3 cwd) via write-then-rename, and spawns `bg-notify.sh fire <sid>
+<token>` under `nohup` with stdin/stdout/stderr all redirected, so the hook
+returns at once and Claude Code isn't left waiting on its pipes. After
+`CCG_BG_NOTIFY_DELAY_SEC` (default 30) the checker sends only if:
+
+1. the marker still holds its token — a newer edge overwrote it (flapping
+   collapses to the last edge's checker), or `notify.sh` removed it because
+   it sent, or focus-skipped, another notification for the session (the
+   Stop hook's "Task completed" supersedes the ping); and
+2. the logical-state file still reads `idle` **with the edge's line-3 ts**.
+
+`end`, the sweep's synthetic `end` and its 12 h hard-age pass remove
+markers. The "only one watcher sees the edge" property is untouched: arming
+happens exactly where the send used to.
+
+**Why the ts check, not just "line 1 is idle":** any transition at all
+since the edge (e.g. `idle → working → idle` for a quick turn, or `idle →
+watching → idle`) rewrites line 3. Each of those means the user or the main
+agent has moved on, and the turn's own Stop covers completion, so a stale
+ping 30 s later would be noise. It costs nothing extra: line 3 is already
+written on every transition.
+
+**Why 30 s:** 231 Stop pings landed 5–30 s after the edge; a shorter delay
+would still double-ping most of them. The cost is that a background-only
+finish is reported 30 s late.
+
+**Rejected alternative (cancel on the next hook instead of a timer):**
+nothing is guaranteed to fire after a quiet background finish (42% of
+edges), so the cancel-only shape would need a poller anyway. The sweep runs
+every ~30 s but only while SwiftBar is running, and would add up to 30 s of
+jitter.
+
+**Rejected alternative (send from the sweep after N s of `idle`):** same
+SwiftBar dependency, and the sweep has no record of which idle sessions had
+an `agents` edge without the marker anyway.
+
+**Rejected alternative (notify.sh writes a "last sent" stamp the checker
+compares against the edge ts):** it covers a send that lands *before* the
+arm, which a marker clear cannot. But the Stop hook's `tab-title.sh idle`
+and `notify.sh` run in parallel and Stop's previous logical state is
+`working`, not `agents`, so Stop never produces the edge itself; the race
+would need slack-tuned timestamps for no observed case.
+
+### Focused-tab skip
+
+`notify.sh` skips the `terminal-notifier` send when Ghostty is the
+frontmost app and its selected tab-bar radio button's name contains the
+session's `match_key`. It was removed in 718c304: with fast tab switching,
+being on a tab when the bell fired no longer meant you'd see it, and
+sessions were left waiting. It is back by user decision, with one fix:
+the old version exited before the tab-title update, so an input bell on the
+focused tab never set the bell state. Now only the send is skipped; the
+tab-title/state update always runs first. A skip counts as "the user saw
+it", so it clears the session's deferred-ping marker exactly like a send.
+The deferred ping itself goes through `notify.sh`, so it re-checks focus at
+send time. The validator stubs `osascript` (`FAKE_FRONT_APP`,
+`FAKE_FOCUSED_TAB`) so it never reads the real Ghostty.
 
 ## Refresh gating
 

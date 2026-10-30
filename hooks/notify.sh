@@ -18,10 +18,14 @@
 #                    `agents` state uses). Used by the Stop hook's "Task
 #                    completed" notification — the main turn paused, but the
 #                    work isn't actually done while a subagent is still
-#                    running. sweep-bell-state.sh's idle-refinement pass fires
-#                    the real completion notification once that subagent's
-#                    transcript goes stale. Not used by PermissionRequest or
+#                    running. The agents -> idle edge (tab-title.sh or the
+#                    sweep) later sends the deferred "Background task
+#                    completed" via bg-notify.sh. Not used by PermissionRequest or
 #                    StopFailure notifications, which must never be suppressed.
+#
+# Focus skip: when Ghostty is frontmost with this session's tab selected, the
+# terminal-notifier send is skipped (tab-title/state updates still run). A
+# send or a skip clears the session's deferred Background-ping marker.
 #
 # Debug: set BELL_TRACE=1 to append diagnostics to $BELL_TRACE_LOG
 # (defaults to /tmp/bell-trace.log).
@@ -98,8 +102,8 @@ fi
 # _count_live_agents — a per-subagent transcript at
 # ~/.claude/projects/<project>/<session_id>/subagents/agent-<hex>.jsonl whose
 # mtime is still fresh means the work isn't actually done yet, even though the
-# main turn just paused. sweep-bell-state.sh's idle-refinement pass fires the
-# real "finished" notification once that transcript goes stale.
+# main turn just paused. The agents -> idle edge later sends the deferred
+# "Background task completed" via bg-notify.sh.
 #
 # A fresh transcript whose agent already fired SubagentStop (a stopped-agent
 # record under CCG_STOPPED_DIR, written by tab-title.sh) is NOT live: the
@@ -276,6 +280,44 @@ fi
 execute_cmd="$HOME/.claude/hooks/focus-ghostty-tab.sh '$match_key'"
 if [ -n "$error_log" ]; then
   execute_cmd="$execute_cmd; open -t '$error_log'"
+fi
+
+# Skip only the send when the user is already looking at this exact tab; the
+# tab-title/state update above must still run (an early exit before it once
+# left an input bell on the focused tab with no bell state at all).
+_user_on_this_tab() {
+  local app on
+  app=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)
+  app=$(printf '%s' "$app" | tr '[:upper:]' '[:lower:]')
+  if [ "$app" != "ghostty" ]; then
+    __trace "active-app=$app (not ghostty) — proceeding"
+    return 1
+  fi
+  on=$(osascript -e '
+    tell application "System Events"
+      tell process "Ghostty"
+        set tabButtons to every radio button of tab group "tab bar" of front window
+        repeat with btn in tabButtons
+          if name of btn contains "'"$match_key"'" and value of btn is true then
+            return 1
+          end if
+        end repeat
+      end tell
+    end tell
+    return 0' 2>/dev/null)
+  __trace "active-app=$app this_tab_active=$on match_key=$match_key"
+  [ "$on" = "1" ]
+}
+
+# Any notification for the session (sent, or skipped because the user is on
+# the tab) supersedes a pending deferred "Background task completed" ping.
+[ "$session_id" != "unknown" ] && rm -f "${CCG_BG_NOTIFY_DIR:-$HOME/.claude/.ccg/bgnotify}/$session_id" 2>/dev/null
+
+if _user_on_this_tab; then
+  __trace "skip-send reason=user-on-this-tab"
+  __dbg "skipped send: user on this tab (match_key=[$match_key])"
+  __trace "exit"
+  exit 0
 fi
 
 # Send notification - clicking will activate Ghostty and focus the correct tab

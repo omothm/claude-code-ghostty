@@ -40,6 +40,7 @@ HOOKS_DIR="$(dirname "$0")"
 SESSION_STATE_DIR="${CCG_SESSION_STATE_DIR:-$HOME/.claude/.ccg/sessions}"
 EVENT_LOG="${CCG_EVENT_LOG:-$HOME/.claude/.ccg/events.jsonl}"
 STOPPED_DIR="${CCG_STOPPED_DIR:-$HOME/.claude/.ccg/stopped}"
+BG_NOTIFY_DIR="${CCG_BG_NOTIFY_DIR:-$HOME/.claude/.ccg/bgnotify}"
 
 # The SwiftBar plugin dispatches this script with SwiftBar's minimal PATH
 # (/usr/bin:/bin:/usr/sbin:/sbin), which lacks Homebrew — so gdate (event
@@ -256,8 +257,9 @@ if [ -d "$SESSION_STATE_DIR" ]; then
       '{ts: ($ts|tonumber), session_id: $sid, state: "end", title: $title, cwd: ""}' \
       >> "$EVENT_LOG" 2>/dev/null
     rm -f "$f" && pruned=$((pruned + 1))
-    # Mirror tab-title.sh's `end` cleanup of the session's stopped-agent records.
+    # Mirror tab-title.sh's `end` cleanup (stopped-agent records, deferred-ping marker).
     rm -rf "$STOPPED_DIR/$sid" 2>/dev/null
+    rm -f "$BG_NOTIFY_DIR/$sid" 2>/dev/null
     __trace "logical-reconcile: emitted end for $sid (pid=${spid:-<none>} ts=$ts)"
   done < <(find "$SESSION_STATE_DIR" -type f 2>/dev/null)
 fi
@@ -451,20 +453,17 @@ if [ -d "$SESSION_STATE_DIR" ]; then
     pruned=$((pruned + 1))
     __trace "logical-refinement-correct: sid=$sid $stored_st->$new_st (pid=$spid ts=$ev_ts)"
 
-    # agents -> idle specifically means a backgrounded Agent/Task/Workflow that
-    # was still live when the main turn's Stop hook fired (and suppressed its
-    # own "Task completed" notification via notify.sh's agents gate — see
-    # notify.sh) has now actually finished. This is the only place that fires
-    # the deferred completion notification: nothing else re-checks a quiet
-    # `agents` session, so without this the user would never be told the
-    # background work wrapped up. Fires unconditionally of BELL_MODE, since
-    # this pass (unlike the bell-state pass above) already runs mode-independent.
+    # agents -> idle: a backgrounded Agent/Task/Workflow whose transcript aged
+    # out with no SubagentStop (or whose Workflow run wrote its result file)
+    # has finished. Nothing else re-checks a quiet `agents` session, so this
+    # is where its "Background task completed" ping gets armed — deferred via
+    # bg-notify.sh, same as tab-title.sh's edge. Mode-independent, like this
+    # whole pass.
     if [ "$stored_st" = "agents" ] && [ "$new_st" = "idle" ]; then
       last_cwd=$(jq -rs --arg sid "$sid" \
         '[.[] | select(.session_id==$sid) | select(.cwd != "")] | last | .cwd // empty' "$EVENT_LOG" 2>/dev/null)
-      jq -nc --arg sid "$sid" --arg cwd "$last_cwd" '{session_id: $sid, cwd: $cwd}' \
-        | "$HOOKS_DIR/notify.sh" '✅' 'Background task completed' > /dev/null 2>&1
-      __trace "agents-finished-notify: sid=$sid cwd=$last_cwd"
+      "$HOOKS_DIR/bg-notify.sh" arm "$sid" "$ev_ts" "$last_cwd" > /dev/null 2>&1
+      __trace "agents-finished-notify armed: sid=$sid cwd=$last_cwd"
       unset last_cwd
     fi
   done < <(find "$SESSION_STATE_DIR" -type f 2>/dev/null)
@@ -510,6 +509,16 @@ if [ -d "$STOPPED_DIR" ]; then
     rm -rf "$d"
     __trace "stopped hard-expire: $d"
   done < <(find "$STOPPED_DIR" -mindepth 1 -maxdepth 1 -type d -mmin +720 2>/dev/null)
+fi
+
+# Deferred-ping marker cleanup: a marker outlives its checker only when the
+# checker was killed (reboot) before deciding. Same 12h cap; tidy-up only.
+if [ -d "$BG_NOTIFY_DIR" ]; then
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    rm -f "$f"
+    __trace "bgnotify hard-expire: $f"
+  done < <(find "$BG_NOTIFY_DIR" -mindepth 1 -maxdepth 1 -type f -mmin +720 2>/dev/null)
 fi
 
 # Notification expiry pass: clear any ccg-* notification older than the

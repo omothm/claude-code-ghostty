@@ -172,11 +172,12 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
 
 | Script | Purpose | Triggered by |
 |--------|---------|--------------|
-| `hooks/tab-title.sh` | Sets the terminal tab title via `terminalSequence` JSON output (Claude Code 2.1.141+) with a direct `/dev/tty` write as fallback; writes/removes `~/.claude/bell-state/<session_id>`; upgrades idle to `watching`/`agents` when a live monitor or background Agent/Task/Workflow is detected (a Workflow counts per run: run dir under `subagents/workflows/wf_<runId>/` present, result file `workflows/wf_<runId>.json` not yet written); on a subagent's `SubagentStop` writes a stopped-agent record (`~/.claude/.ccg/stopped/<sid>/<agent_id>`) so every live-agent counter skips its still-fresh transcript until it resumes; appends real state transitions to `~/.claude/.ccg/events.jsonl` with a sub-second ts clamped above the session's last logged ts (logical-state line 3); fires the "Background task completed" notification on a logical `agents → idle` edge; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SubagentStop`, `notify.sh` (for `input`) |
-| `hooks/notify.sh` | Sends `terminal-notifier`; skips if user is already on that tab; routes to `tab-title.sh` for title updates; optional `gate=agents` 5th arg suppresses the notification while a background Agent/Task/Workflow subagent is still live for the session or a Workflow run is still in flight (stopped-agent records don't count as live) | `Notification`, `Stop`, `tab-title.sh` / `sweep-bell-state.sh` (deferred completion) |
+| `hooks/tab-title.sh` | Sets the terminal tab title via `terminalSequence` JSON output (Claude Code 2.1.141+) with a direct `/dev/tty` write as fallback; writes/removes `~/.claude/bell-state/<session_id>`; upgrades idle to `watching`/`agents` when a live monitor or background Agent/Task/Workflow is detected (a Workflow counts per run: run dir under `subagents/workflows/wf_<runId>/` present, result file `workflows/wf_<runId>.json` not yet written); on a subagent's `SubagentStop` writes a stopped-agent record (`~/.claude/.ccg/stopped/<sid>/<agent_id>`) so every live-agent counter skips its still-fresh transcript until it resumes; appends real state transitions to `~/.claude/.ccg/events.jsonl` with a sub-second ts clamped above the session's last logged ts (logical-state line 3); arms the deferred "Background task completed" notification (`bg-notify.sh`) on a logical `agents → idle` edge and drops its marker on `end`; fires `refresh-menubar.sh` on actual state change | `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SubagentStop`, `notify.sh` (for `input`) |
+| `hooks/notify.sh` | Sends `terminal-notifier`; skips only the send (never the tab-title/state update) when Ghostty is frontmost with that session's tab selected; on a send or a focus skip, clears the session's deferred Background-ping marker; routes to `tab-title.sh` for title updates; optional `gate=agents` 5th arg suppresses the notification while a background Agent/Task/Workflow subagent is still live for the session or a Workflow run is still in flight (stopped-agent records don't count as live) | `PermissionRequest`, `Stop`, `StopFailure`, `bg-notify.sh` (deferred completion) |
+| `hooks/bg-notify.sh` | Deferred "Background task completed": `arm <sid> <edge_ts> [cwd]` writes a per-session marker with a fresh token (`~/.claude/.ccg/bgnotify/<sid>`) and spawns a fully detached checker; after `CCG_BG_NOTIFY_DELAY_SEC` the checker sends via `notify.sh` only if its token is still current (no newer edge, no other notification sent for the session) and the logical state is still `idle` with the edge's ts | `tab-title.sh` / `sweep-bell-state.sh` on the `agents → idle` edge |
 | `hooks/focus-ghostty-tab.sh` | AppleScript to focus a Ghostty tab by title-contains match; works across windows and single-tab windows | Notification `-execute`, SwiftBar dropdown |
 | `hooks/refresh-menubar.sh` | `open -g swiftbar://refreshallplugins`; silent no-op if SwiftBar isn't installed | `tab-title.sh` on state change; `sweep-bell-state.sh` after pruning |
-| `hooks/sweep-bell-state.sh` | Prunes bell-state files (dead PID, or >12 h); reconciles dead-but-unended sessions into `events.jsonl` via synthetic `end` events so the dashboard matches the menubar; corrects drifted `agents`/`watching`/`idle` states (honoring stopped-agent records), stamping corrections at append time and clamped above the session's last logged ts; fires a deferred "Background task completed" notification via `notify.sh` on the `agents → idle` logical-state edge; single-flight via an `mkdir` lock (`~/.claude/.ccg/sweep.lock`, stale-lock breaking); appends Homebrew to SwiftBar's minimal PATH | Background job dispatched by the SwiftBar plugin after each run |
+| `hooks/sweep-bell-state.sh` | Prunes bell-state files (dead PID, or >12 h); reconciles dead-but-unended sessions into `events.jsonl` via synthetic `end` events so the dashboard matches the menubar; corrects drifted `agents`/`watching`/`idle` states (honoring stopped-agent records), stamping corrections at append time and clamped above the session's last logged ts; arms the deferred "Background task completed" notification via `bg-notify.sh` on the `agents → idle` logical-state edge, and drops markers on synthetic `end` / after 12 h; single-flight via an `mkdir` lock (`~/.claude/.ccg/sweep.lock`, stale-lock breaking); appends Homebrew to SwiftBar's minimal PATH | Background job dispatched by the SwiftBar plugin after each run |
 | `.claude/hooks/fetch-changelog.sh` | Fetches `https://code.claude.com/docs/en/changelog`, strips HTML via `textutil`, caches to `~/.claude/.ccg/changelog.md` (12 h TTL) | `SessionStart` (project-only, via `.claude/settings.json`) |
 | `hooks/dashboard-server.sh` | Manages the metrics-dashboard HTTP server (`start`/`stop`/`status`/`toggle`); writes `~/.claude/.ccg/server.pid` and opens browser on start | SwiftBar dropdown entry click |
 | `swiftbar/ghostty-bells.30s.sh` | Reads state dir, emits dropdown (sessions + dashboard entry), dispatches sweep in background | SwiftBar 30 s poll + push-refresh URL |
@@ -248,6 +249,15 @@ Claude runs in this repo, referenced from `.claude/settings.json`).
   counters (`tab-title.sh`, `sweep-bell-state.sh`, `notify.sh`'s agents gate,
   the SwiftBar plugin). The validator sandboxes it. See "Stopped-agent
   records" in `docs/ARCHITECTURE.md`.
+- **`CCG_BG_NOTIFY_DELAY_SEC`** — how long (default `30`) `bg-notify.sh`
+  waits after an `agents → idle` edge before sending "Background task
+  completed". The validator sets it to `1`. See "Deferred completion
+  notification" in `docs/ARCHITECTURE.md`.
+- **`CCG_BG_NOTIFY_DIR`** — override the deferred-ping marker directory
+  (default `~/.claude/.ccg/bgnotify`). One file per session (line 1 =
+  token, line 2 = edge ts, line 3 = cwd). Written by `bg-notify.sh`, cleared
+  by `notify.sh` on any send or focus skip, by `end`/synthetic `end`, and by
+  the sweep's 12 h hard-age pass. The validator sandboxes it.
 - **`CCG_SWEEP_LOCK`** — override the sweep's single-flight lock directory
   (default `$(dirname "$CCG_SESSION_STATE_DIR")/sweep.lock`, i.e.
   `~/.claude/.ccg/sweep.lock`; the default already follows the validator's
@@ -322,9 +332,20 @@ subagent transcript suppresses the `gate=agents` notification entirely; a
 stale or absent transcript lets it through; call sites that omit `gate`
 are never suppressed even with a live transcript present), the deferred
 completion notification (`sweep-bell-state.sh`'s logical-state
-idle-refinement pass fires a `Background task completed` notification
-specifically on the `agents → idle` edge, and does not fire one on
-`watching → idle` or any other transition), event ts ordering (a sweep
+idle-refinement pass arms a `Background task completed` notification
+specifically on the `agents → idle` edge, and not on
+`watching → idle` or any other transition; via `bg-notify.sh`, both the
+`tab-title.sh` and sweep edges send nothing at the edge, write a marker, and
+send exactly one ping after `CCG_BG_NOTIFY_DELAY_SEC` if the session stays
+idle; the hook returns at once with its stdout captured (checker fully
+detached); no ping when a Stop `Task completed` is sent within the delay or
+the state returns to `agents`/`working`; three flapping edges collapse to one
+ping; `end`, a synthetic `end` and the 12 h hard-age pass drop the marker),
+the notify.sh focused-tab skip (via a global `osascript` stub driven by
+`FAKE_FRONT_APP`/`FAKE_FOCUSED_TAB`: Ghostty frontmost on the session's tab
+skips the send but still writes the `input` bell state and clears the
+deferred-ping marker; a different selected tab or a non-Ghostty frontmost
+app sends), event ts ordering (a sweep
 correction appended in the same second as a fractional hook event is the
 session's latest state in the dashboard's ts-then-append-order sort, run
 under SwiftBar's PATH both with and without a reachable `gdate` — the latter

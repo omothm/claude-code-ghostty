@@ -491,7 +491,10 @@ case "$status" in
     rm -f "$prebell_file" 2>/dev/null
     # Stopped-agent records outlive idle on purpose (a background agent that
     # stopped while the session idles must stay excluded); only `end` drops them.
-    [ "$status" = "end" ] && rm -rf "${CCG_STOPPED_DIR:-$HOME/.claude/.ccg/stopped}/$session_id" 2>/dev/null
+    if [ "$status" = "end" ]; then
+      rm -rf "${CCG_STOPPED_DIR:-$HOME/.claude/.ccg/stopped}/$session_id" 2>/dev/null
+      rm -f "${CCG_BG_NOTIFY_DIR:-$HOME/.claude/.ccg/bgnotify}/$session_id" 2>/dev/null
+    fi
     __trace "pending cleared (status=$status)"
     ;;
 esac
@@ -668,18 +671,17 @@ case "$effective_status" in
           printf '%s\n%s\n%s\n' "$effective_status" "$claude_pid" "$ts" > "$session_state_file"
         fi
         # agents -> idle: the last background Agent/Task/Workflow just stopped
-        # while the session sat idle (typically this very SubagentStop). The
-        # Stop hook's "Task completed" was suppressed by notify.sh's agents
-        # gate when the session settled to `agents`, so this is where the
-        # user learns the background work finished. The sweep's logical-state
-        # pass fires the same notification on the same edge when it observes
-        # it first (transcript aged out with no SubagentStop); only one of the
-        # two can see the edge, since whichever logs `idle` first moves the
-        # logical state off `agents`.
+        # while the session sat idle (typically this very SubagentStop). Arm
+        # the deferred "Background task completed" ping rather than sending it:
+        # the subagent's result often wakes the main agent, whose own Stop
+        # "Task completed" would double it, and idle/agents flapping would fire
+        # once per edge. bg-notify.sh sends it only if nothing superseded it.
+        # The sweep arms on the same edge when it observes it first; only one
+        # of the two can see the edge, since whichever logs `idle` first moves
+        # the logical state off `agents`.
         if [ "$prev_state" = "agents" ] && [ "$effective_status" = "idle" ]; then
-          jq -nc --arg sid "$session_id" --arg cwd "${CLAUDE_PROJECT_DIR:-$PWD}" '{session_id: $sid, cwd: $cwd}' \
-            | "$(dirname "$0")/notify.sh" '✅' 'Background task completed' > /dev/null 2>&1
-          __trace "agents-finished-notify: sid=$session_id"
+          "$(dirname "$0")/bg-notify.sh" arm "$session_id" "$ts" "${CLAUDE_PROJECT_DIR:-$PWD}" > /dev/null 2>&1
+          __trace "agents-finished-notify armed: sid=$session_id"
         fi
       fi
     else
