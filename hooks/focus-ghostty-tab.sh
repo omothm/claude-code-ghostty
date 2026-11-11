@@ -21,8 +21,9 @@ __dbg() {
 
 __dbg "=== click: searching for tab matching [$tab_title] ==="
 
-# Uses Ghostty's own AppleScript dictionary (Ghostty 1.4+), not System Events:
-# titles come straight from Ghostty (no AX lag) and no settle delay is needed.
+# Finds and selects the tab via Ghostty's AppleScript dictionary (Ghostty 1.4+), so
+# titles come straight from Ghostty with no AX lag. System Events is only used to
+# detect that the Space switch has finished.
 # The title goes in argv, never into the script source.
 ascript_out=$(osascript - "$tab_title" <<'EOF' 2>&1
 on run argv
@@ -35,11 +36,29 @@ on run argv
             repeat with i from 1 to count of ns
                 set diag to diag & "  tab=[" & (item i of ns) & "]" & linefeed
                 if item i of ns contains needle then
-                    -- Activate the app first so macOS switches to the Space of the window;
-                    -- raising the window while Ghostty is inactive pulls it onto the current one.
-                    activate
-                    select tab (tab i of w)
-                    activate window w
+                    set t to tab i of w
+                    set alreadyFront to (get selected of t) and ((get id of w) is (get id of front window))
+                    -- open -a goes through LaunchServices like a Dock click, which switches to
+                    -- the Space of the window. frontmost flips before that switch finishes, so
+                    -- ordering a window too early drags it onto the current Space instead.
+                    tell me to do shell script "/usr/bin/open -a Ghostty"
+                    if alreadyFront then
+                        set diag to diag & "already front, no reorder" & linefeed
+                    else
+                        -- AX lists only windows on the current Space, so a visible
+                        -- Ghostty window means the switch is done. Wait max ~1 s.
+                        set waited to 0
+                        tell application "System Events"
+                            repeat 50 times
+                                if exists window 1 of process "Ghostty" then exit repeat
+                                delay 0.02
+                                set waited to waited + 1
+                            end repeat
+                        end tell
+                        set diag to diag & "space ready after " & (waited * 20) & " ms" & linefeed
+                        select tab t
+                        activate window w
+                    end if
                     return diag & "RESULT: matched-tab [" & (item i of ns) & "]"
                 end if
             end repeat

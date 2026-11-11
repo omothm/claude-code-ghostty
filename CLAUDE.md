@@ -457,7 +457,9 @@ than confirming a single guess.
   `open` calls are synchronous (not backgrounded) so we get an exit code
   in trace; SwiftBar's URL-scheme dispatch is fast enough that this adds
   ~50 ms, not meaningful.
-- **Tab focus needs Ghostty 1.4+.** `focus-ghostty-tab.sh` uses Ghostty's own
-  AppleScript dictionary (`select tab`, `activate window`), not System Events
-  / AX, so it has no AX lag. Older Ghostty builds lack the dictionary and the
-  click fails; the first click may also trigger a macOS Automation prompt.
+- **Tab focus needs Ghostty 1.4+.** `focus-ghostty-tab.sh` finds and selects the
+  tab via Ghostty's own AppleScript dictionary (no AX title lag). It activates
+  with `open -a` and, unless the tab is already front, waits until System Events
+  sees a Ghostty window before `select tab` / `activate window`: raising a window
+  mid Space-switch drags it onto the current desktop. The first click may
+  trigger a macOS Automation prompt.
