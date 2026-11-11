@@ -449,11 +449,11 @@ state, so it doesn't need a fifth entry in the state machine.
 
 **Menubar-click corollary:** because the bell-state file's icon never
 changes, `ghostty-bells.30s.sh` strips the leading `🔔 ` before using the
-title as `focus-ghostty-tab.sh`'s AX contains-match key (both the
+title as `focus-ghostty-tab.sh`'s contains-match key (both the
 notifs-mode dropdown loop and the always-on `input` case) — matching
 `notify.sh`'s `match_key`, which was already icon-agnostic. Without the
 strip, a menubar click on a session whose live tab title had been swapped
-to ❓ would never match, because the AX title reads `❓ …` while the stale
+to ❓ would never match, because the live tab title reads `❓ …` while the stale
 `param1` string still read `🔔 …`. See [Plugin display swap](#plugin-display-swap---).
 
 ## Deferred completion notification (agents-gated Stop notification)

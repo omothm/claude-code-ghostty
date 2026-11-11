@@ -176,7 +176,7 @@ A pause between busy stretches longer than 10 minutes counts as a break rather t
 
 ## Why Ghostty
 
-Ghostty exposes its tab bar through the macOS Accessibility API, which lets AppleScript find and click a tab by title. Warp and Alacritty don't support this, so the click-to-navigate notification action only works with Ghostty.
+Ghostty (1.4+) exposes its windows and tabs through AppleScript, which lets the hooks find and select a tab by title. Warp and Alacritty don't support this, so the click-to-navigate notification action only works with Ghostty.
 
 ---
 

@@ -50,7 +50,7 @@ After every change, verify the following in order:
    session id), or osascript to read Ghostty's current tab titles. Do not
    rely on the user manually confirming.
 3. **Tab targeting** — will notifications still focus the correct tab?
-   `focus-ghostty-tab.sh` uses contains-match against AX tab titles; confirm
+   `focus-ghostty-tab.sh` uses contains-match against Ghostty tab titles; confirm
    the title stored in state files and passed via `terminal-notifier` still
    uniquely identifies the session.
 4. **Notification text** — does any user-visible string need updating?
@@ -457,7 +457,7 @@ than confirming a single guess.
   `open` calls are synchronous (not backgrounded) so we get an exit code
   in trace; SwiftBar's URL-scheme dispatch is fast enough that this adds
   ~50 ms, not meaningful.
-- **Menubar click still uses AX.** `focus-ghostty-tab.sh` relies on
-  AppleScript, which has the AX lag. In practice the user clicks seconds
-  after the bell appears, by which time Ghostty has been fronted enough for
-  AX to update. If a click ever fails to find the tab, that's the reason.
+- **Tab focus needs Ghostty 1.4+.** `focus-ghostty-tab.sh` uses Ghostty's own
+  AppleScript dictionary (`select tab`, `activate window`), not System Events
+  / AX, so it has no AX lag. Older Ghostty builds lack the dictionary and the
+  click fails; the first click may also trigger a macOS Automation prompt.

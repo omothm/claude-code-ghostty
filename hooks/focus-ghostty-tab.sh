@@ -4,9 +4,9 @@
 #
 # Runs ON NOTIFICATION CLICK (via terminal-notifier -execute, which invokes
 # it through /bin/sh -c). Always-on logging to ~/.claude/.ccg/focus-debug.log
-# records the match key, every tab/window title the Accessibility API reports,
-# and the outcome — this is the only window into why a click fails to
-# navigate, since the click happens outside any traced hook invocation.
+# records the match key, every tab/window title Ghostty reports, and the
+# outcome — this is the only window into why a click fails to navigate, since
+# the click happens outside any traced hook invocation.
 # Path overridable via CCG_DIR.
 
 tab_title="$1"
@@ -21,68 +21,36 @@ __dbg() {
 
 __dbg "=== click: searching for tab matching [$tab_title] ==="
 
-# The AppleScript both performs the navigation and emits a diagnostic dump of
-# what the Accessibility API actually sees (window names + tab-button names),
-# plus a final RESULT line. We capture stdout so the shell side can log it.
-ascript_out=$(osascript <<EOF 2>&1
-on logLine(s)
-    return s & linefeed
-end logLine
-
-set diag to ""
-tell application "Ghostty" to activate
-delay 0.3
-tell application "System Events"
-    tell process "Ghostty"
-        set allWindows to every window
-        set diag to diag & my logLine("windows=" & (count of allWindows))
-        -- First pass: search windows with tab bars (multi-tab windows)
-        repeat with w in allWindows
-            try
-                set wname to name of w
-            on error
-                set wname to "<no-name>"
-            end try
-            try
-                set tabButtons to every radio button of tab group "tab bar" of w
-                set diag to diag & my logLine("window [" & wname & "] tabs=" & (count of tabButtons))
-                repeat with btn in tabButtons
-                    set bname to name of btn
-                    set diag to diag & my logLine("  tab=[" & bname & "]")
-                    if bname contains "$tab_title" then
-                        perform action "AXRaise" of w
-                        delay 0.1
-                        click btn
-                        set diag to diag & my logLine("RESULT: matched-tab [" & bname & "]")
-                        return diag
-                    end if
-                end repeat
-            on error errMsg
-                set diag to diag & my logLine("window [" & wname & "] no-tab-bar (" & errMsg & ")")
-            end try
-        end repeat
-        -- Second pass: match by window title (single-tab windows)
-        repeat with w in allWindows
-            try
-                set wname to name of w
-            on error
-                set wname to "<no-name>"
-            end try
-            set diag to diag & my logLine("window-title-check [" & wname & "]")
-            if wname contains "$tab_title" then
-                perform action "AXRaise" of w
-                set diag to diag & my logLine("RESULT: matched-window [" & wname & "]")
-                return diag
-            end if
+# Uses Ghostty's own AppleScript dictionary (Ghostty 1.4+), not System Events:
+# titles come straight from Ghostty (no AX lag) and no settle delay is needed.
+# The title goes in argv, never into the script source.
+ascript_out=$(osascript - "$tab_title" <<'EOF' 2>&1
+on run argv
+    set needle to item 1 of argv
+    set diag to ""
+    tell application "Ghostty"
+        repeat with w in windows
+            set ns to name of every tab of w
+            set diag to diag & "window [" & (name of w) & "] tabs=" & (count of ns) & linefeed
+            repeat with i from 1 to count of ns
+                set diag to diag & "  tab=[" & (item i of ns) & "]" & linefeed
+                if item i of ns contains needle then
+                    -- Activate the app first so macOS switches to the Space of the window;
+                    -- raising the window while Ghostty is inactive pulls it onto the current one.
+                    activate
+                    select tab (tab i of w)
+                    activate window w
+                    return diag & "RESULT: matched-tab [" & (item i of ns) & "]"
+                end if
+            end repeat
         end repeat
     end tell
-end tell
-set diag to diag & my logLine("RESULT: NO MATCH for [$tab_title]")
-return diag
+    return diag & "RESULT: NO MATCH for [" & needle & "]"
+end run
 EOF
 )
-
 rc=$?
+
 # Log each line of the AppleScript diagnostic dump.
 while IFS= read -r _line; do
   [ -n "$_line" ] && __dbg "$_line"
